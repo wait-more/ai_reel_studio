@@ -1,0 +1,220 @@
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../core/providers.dart';
+import '../settings/settings_page.dart';
+import '../tree/project_tree.dart';
+import '../editor/markdown_editor.dart';
+import '../asset/asset_grid.dart';
+import '../search/global_search.dart';
+import '../shell/shell_panel.dart';
+
+class MainLayout extends ConsumerStatefulWidget {
+  const MainLayout({super.key});
+
+  @override
+  ConsumerState<MainLayout> createState() => _MainLayoutState();
+}
+
+class _MainLayoutState extends ConsumerState<MainLayout> {
+  double _treeWidth = 280;
+  double? _shellWidth; // null = 未初始化，首次布局时默认与中间栏对半
+
+  @override
+  Widget build(BuildContext context) {
+    final shellVisible = ref.watch(shellVisibleProvider);
+
+    return CallbackShortcuts(
+      bindings: {
+        // Ctrl+P：全局搜索
+        const SingleActivator(LogicalKeyboardKey.keyP, control: true):
+            (() {
+          showGlobalSearch(context);
+        }),
+      },
+      child: Focus(
+        autofocus: true,
+        child: LayoutBuilder(
+      builder: (context, constraints) {
+        // 首次布局：默认终端栏与中间内容栏对半分
+        if (_shellWidth == null) {
+          const dividerW = 6.0; // 两处分隔条
+          final avail = constraints.maxWidth - _treeWidth - dividerW;
+          _shellWidth = avail / 2;
+          if (_shellWidth! < 280) _shellWidth = 280;
+        }
+
+        return Scaffold(
+          body: Row(
+            children: [
+              // Left panel: Project tree
+              SizedBox(
+                width: _treeWidth,
+                child: const ProjectTree(),
+              ),
+              _buildDivider(resizeTree: true),
+              // Center panel: Editor tabs OR asset grid (both kept alive)
+              Expanded(
+                child: Column(
+                  children: [
+                    _buildTopBar(context),
+                    _buildModeBar(context),
+                    Expanded(
+                      child: IndexedStack(
+                        index:
+                            ref.watch(contentModeProvider) == 'assets' ? 1 : 0,
+                        children: const [
+                          MarkdownEditor(),
+                          AssetGridView(),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              if (shellVisible) ...[
+                _buildDivider(resizeTree: false),
+                // Right panel: Shell
+                SizedBox(
+                  width: _shellWidth,
+                  child: const ShellPanel(),
+                ),
+              ],
+            ],
+          ),
+        );
+      },
+        ),
+      ),
+    );
+  }
+
+  Widget _buildModeBar(BuildContext context) {
+    final mode = ref.watch(contentModeProvider);
+    final tabCount = ref.watch(openTabsProvider).length;
+    return Container(
+      height: 34,
+      color: Theme.of(context).colorScheme.surfaceContainerLow,
+      padding: const EdgeInsets.symmetric(horizontal: 8),
+      child: Row(
+        children: [
+          _modeChip(context, 'editor', '文档', mode, tabCount > 0 ? ' ${tabCount}' : ''),
+          const SizedBox(width: 8),
+          _modeChip(context, 'assets', '素材', mode, ''),
+          const Spacer(),
+        ],
+      ),
+    );
+  }
+
+  Widget _modeChip(BuildContext context, String value, String label,
+      String current, String badge) {
+    final active = current == value;
+    return InkWell(
+      onTap: () =>
+          ref.read(contentModeProvider.notifier).state = value,
+      borderRadius: BorderRadius.circular(6),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+        decoration: BoxDecoration(
+          color: active ? Theme.of(context).colorScheme.primaryContainer : null,
+          borderRadius: BorderRadius.circular(6),
+        ),
+        child: Text(
+          '$label$badge',
+          style: TextStyle(
+            fontSize: 12,
+            fontWeight: active ? FontWeight.w600 : FontWeight.w400,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTopBar(BuildContext context) {
+    return Container(
+      height: 40,
+      color: Theme.of(context).colorScheme.surfaceContainerHighest,
+      padding: const EdgeInsets.symmetric(horizontal: 8),
+      child: Row(
+        children: [
+          IconButton(
+            icon: const Icon(Icons.menu, size: 18),
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+            onPressed: () {},
+            tooltip: '菜单',
+          ),
+          const SizedBox(width: 4),
+          Text(
+            'AIReelStudio',
+            style: Theme.of(context).textTheme.titleSmall?.copyWith(
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          const Spacer(),
+          IconButton(
+            icon: const Icon(Icons.search, size: 18),
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+            onPressed: () => showGlobalSearch(context),
+            tooltip: '全局搜索 (Ctrl+P)',
+          ),
+          const SizedBox(width: 4),
+          IconButton(
+            icon: Icon(
+              ref.watch(shellVisibleProvider)
+                  ? Icons.terminal
+                  : Icons.terminal_outlined,
+              size: 18,
+            ),
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+            onPressed: () =>
+                ref.read(shellVisibleProvider.notifier).state =
+                    !ref.read(shellVisibleProvider),
+            tooltip: '终端',
+          ),
+          const SizedBox(width: 4),
+          IconButton(
+            icon: const Icon(Icons.settings, size: 18),
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+            onPressed: () => _openSettings(context),
+            tooltip: '设置',
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildDivider({required bool resizeTree}) {
+    return GestureDetector(
+      onPanUpdate: (details) {
+        setState(() {
+          if (resizeTree) {
+            _treeWidth = (_treeWidth + details.delta.dx).clamp(180.0, 500.0);
+          } else {
+            // Shell 面板只限制最小宽度，允许无限放大到占满窗口
+            _shellWidth = (_shellWidth ?? 400) - details.delta.dx;
+            if (_shellWidth! < 280) _shellWidth = 280;
+          }
+        });
+      },
+      child: MouseRegion(
+        cursor: SystemMouseCursors.resizeColumn,
+        child: Container(
+          width: 3,
+          color: Theme.of(context).dividerColor.withOpacity(0.2),
+        ),
+      ),
+    );
+  }
+
+  void _openSettings(BuildContext context) {
+    showDialog(
+      context: context,
+      builder: (_) => const SettingsPage(),
+    );
+  }
+}
