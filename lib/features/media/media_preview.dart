@@ -68,15 +68,22 @@ Future<String?> extractMediaFrame({
       await platform.setProperty('cache-on-disk', 'no');
       await platform.setProperty('audio-fallback-to-null', 'yes');
       await platform.setProperty('vid', 'auto');
+      // 静默截帧：彻底关掉音轨，避免 open/seek 时预览已暂停仍突然出声
+      await platform.setProperty('aid', 'no');
+      await platform.setProperty('mute', 'yes');
+      await platform.setProperty('volume', '0');
     }
-    await player.open(Media(path));
+    await player.setVolume(0);
+    // play:false，只为解码取帧，不自动开播
+    await player.open(Media(path), play: false);
 
     var dur = player.state.duration;
     for (var i = 0; i < 40 && dur == Duration.zero; i++) {
       await Future.delayed(const Duration(milliseconds: 200));
       dur = player.state.duration;
     }
-    player.pause();
+    await player.pause();
+    await player.setVolume(0);
 
     final Duration eff;
     if (lastFrame) {
@@ -163,6 +170,11 @@ class _MediaPreviewDialogState extends State<MediaPreviewDialog> {
   void initState() {
     super.initState();
     _player = Player();
+    // 视频必须先挂 VideoController，再 open；否则首帧解码时无渲染表面，
+    // 会出现「有比例的黑屏」，播过其它片后再开又正常（解码器/上下文被热起来）。
+    if (widget.isVideo) {
+      _videoController = VideoController(_player);
+    }
     _subcribeEvents();
     _open();
   }
@@ -194,31 +206,72 @@ class _MediaPreviewDialogState extends State<MediaPreviewDialog> {
 
   /// 覆盖 media_kit 硬编码默认值（必须在 open 之前设置，last-write-wins）：
   /// - `cache-on-disk=no`：避免部分环境下磁盘缓存文件创建失败导致流选择失败
-  /// - `audio-fallback-to-null=yes`：无声卡/音频设备失败时自动静音，
-  ///   播放时钟照常推进；有声卡则正常输出声音
+  /// - `audio-fallback-to-null=yes`：无声卡/音频设备失败时自动静音
+  /// - `vid=auto`：确保选中视频轨（与静默截帧路径一致）
+  /// - `hwdec=auto-safe`：降低个别编码首次硬解黑屏概率
   Future<void> _applyHardening() async {
     final platform = _player.platform;
     if (platform is! NativePlayer) return;
     await platform.setProperty('cache-on-disk', 'no');
     await platform.setProperty('audio-fallback-to-null', 'yes');
+    if (widget.isVideo) {
+      await platform.setProperty('vid', 'auto');
+      await platform.setProperty('hwdec', 'auto-safe');
+    }
   }
 
   Future<void> _open() async {
     try {
       await _applyHardening();
-      await _player.open(Media(widget.path));
+      // 等一帧，让 Video 控件先挂上 texture / platform view
       if (widget.isVideo) {
-        // 视频：创建 VideoController 渲染画面（含解复用音频，同步输出）
-        _videoController = VideoController(_player);
+        await WidgetsBinding.instance.endOfFrame;
+        if (!mounted) return;
       }
-      if (mounted) setState(() => _opened = true);
-      _player.play();
+      await _player.open(Media(widget.path), play: true);
+      if (!mounted) return;
+      setState(() => _opened = true);
+      if (widget.isVideo) {
+        await _ensureVideoVisible();
+      }
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: Text('无法打开媒体：$e', style: const TextStyle(fontSize: 12)),
         duration: const Duration(seconds: 3),
       ));
+    }
+  }
+
+  /// 打开后若长时间拿不到宽高，做一次轻量恢复（不换片源）。
+  Future<void> _ensureVideoVisible() async {
+    for (var i = 0; i < 25; i++) {
+      if (!mounted) return;
+      final w = _player.state.width ?? 0;
+      final h = _player.state.height ?? 0;
+      if (w > 0 && h > 0) return;
+      await Future<void>.delayed(const Duration(milliseconds: 80));
+    }
+    if (!mounted) return;
+    try {
+      // 轻推一下解码/渲染管线：停一下 → 回 0 → 再播
+      await _player.pause();
+      await _player.seek(Duration.zero);
+      await Future<void>.delayed(const Duration(milliseconds: 120));
+      if (!mounted) return;
+      await _player.play();
+      // 仍无尺寸则关掉硬解再试一次（部分机型/编码首次硬解会黑屏）
+      final w2 = _player.state.width ?? 0;
+      if (w2 <= 0) {
+        final platform = _player.platform;
+        if (platform is NativePlayer) {
+          await platform.setProperty('hwdec', 'no');
+        }
+        await _player.stop();
+        await _player.open(Media(widget.path), play: true);
+      }
+    } catch (_) {
+      // 恢复失败不打断预览壳
     }
   }
 
@@ -258,47 +311,68 @@ class _MediaPreviewDialogState extends State<MediaPreviewDialog> {
     setState(() => _position = target);
   }
 
-  // ── 截帧（首帧/末帧/当前帧） ──────────────────────────────
+  // ── 截帧（首帧/末帧静默；当前帧用预览播放器截屏） ──────────
 
-  /// 提取指定时间点的帧并保存 PNG 到媒体同目录，返回保存路径。
-  Future<String?> _grabAndSave(Duration target, String tag) async {
+  /// 首帧/末帧：另起临时 Player 静默提取（与右键菜单同一路径），
+  /// 不 seek、不暂停当前预览，避免进度条与画面跳动。
+  Future<void> _extractSilent({
+    required bool lastFrame,
+    required String tag,
+  }) async {
     if (_busy) {
       _toast('正在处理上一个操作，请稍候…');
-      return null;
+      return;
     }
     setState(() => _busy = true);
     try {
-      _player.pause();
-      // 末帧：避免 seek 到末尾触发 completed 清屏，回退 150ms
-      final seekTarget = target > _duration
-          ? _duration - const Duration(milliseconds: 150)
-          : target;
-      await _player.seek(seekTarget);
-      // 等待 libmpv 渲染出新帧
-      await Future.delayed(const Duration(milliseconds: 450));
-      final bytes = await _player.screenshot(format: 'image/png');
-      if (bytes == null) {
+      final path = await extractMediaFrame(
+        path: widget.path,
+        lastFrame: lastFrame,
+        tag: tag,
+      );
+      if (!mounted) return;
+      if (path == null) {
         _toast('截图失败：未取得帧数据');
-        return null;
+        return;
       }
-      final base = '$_dir${Platform.pathSeparator}${_stem}_$tag';
-      final file = await dedupTargetFile(base);
-      await file.writeAsBytes(bytes, flush: true);
-      _toast('已保存：${file.path}');
+      _toast('已保存：$path');
       widget.onChanged?.call();
-      return file.path;
     } catch (e) {
       _toast('截图失败：$e');
-      return null;
     } finally {
       if (mounted) setState(() => _busy = false);
     }
   }
 
-  Future<void> _firstFrame() => _grabAndSave(Duration.zero, '首帧');
+  /// 当前帧：直接截取预览播放器当前画面，不 seek。
+  Future<void> _currentFrame() async {
+    if (_busy) {
+      _toast('正在处理上一个操作，请稍候…');
+      return;
+    }
+    setState(() => _busy = true);
+    try {
+      final bytes = await _player.screenshot(format: 'image/png');
+      if (bytes == null) {
+        _toast('截图失败：未取得帧数据');
+        return;
+      }
+      final base = '$_dir${Platform.pathSeparator}${_stem}_帧';
+      final file = await dedupTargetFile(base);
+      await file.writeAsBytes(bytes, flush: true);
+      _toast('已保存：${file.path}');
+      widget.onChanged?.call();
+    } catch (e) {
+      _toast('截图失败：$e');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _firstFrame() =>
+      _extractSilent(lastFrame: false, tag: '首帧');
   Future<void> _lastFrame() =>
-      _grabAndSave(_duration - const Duration(milliseconds: 1), '末帧');
-  Future<void> _currentFrame() => _grabAndSave(_position, '帧');
+      _extractSilent(lastFrame: true, tag: '末帧');
 
   void _toast(String msg) {
     if (!mounted) return;
@@ -405,17 +479,32 @@ class _MediaPreviewDialogState extends State<MediaPreviewDialog> {
   }
 
   Widget _buildVisual() {
+    if (widget.isVideo && _videoController != null) {
+      // 尽早挂上 Video，保证 open 时已有渲染表面
+      return Stack(
+        fit: StackFit.expand,
+        children: [
+          Video(
+            controller: _videoController!,
+            controls: NoVideoControls,
+            fit: BoxFit.contain,
+          ),
+          if (!_opened)
+            const ColoredBox(
+              color: Colors.black54,
+              child: Center(
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  color: Colors.white54,
+                ),
+              ),
+            ),
+        ],
+      );
+    }
     if (!_opened) {
       return const Center(
         child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white54),
-      );
-    }
-    if (widget.isVideo && _videoController != null) {
-      // 视频：media_kit 解码视频流 + 音频流同步输出
-      return Video(
-        controller: _videoController!,
-        controls: NoVideoControls,
-        fit: BoxFit.contain,
       );
     }
     // 音频：画面区显示音符与文件名

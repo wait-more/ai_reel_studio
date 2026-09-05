@@ -81,10 +81,11 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
     return true;
   }
 
-  void _newTab() {
+  void _newTab({String? workingDirectory}) {
     setState(() {
       _tabs.add(_ShellTab(
-        session: TerminalSession()..start(workingDirectory: _projectRoot),
+        session: TerminalSession()
+          ..start(workingDirectory: workingDirectory ?? _projectRoot),
       ));
       _activeIndex = _tabs.length - 1;
     });
@@ -119,24 +120,63 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
     }
   }
 
-  void _runStartCmd(StartCmd cmd) {
-    final tab = _tabs[_activeIndex];
+  bool _isAgentLaunchCmd(StartCmd cmd) =>
+      commandLooksLikeAgent(cmd.command) || commandLooksLikeAgent(cmd.name);
+
+  /// 在指定 Tab 执行快捷启动（cwd 已由会话启动目录处理时可只发命令）。
+  void _executeOnTab(_ShellTab tab, StartCmd cmd, {required bool includeCd}) {
     final session = tab.session;
     final cwd = _resolveCwd(cmd.cwd);
-    if (cwd != null && cwd.isNotEmpty) {
-      final cd = Platform.isWindows
+    if (includeCd && cwd != null && cwd.isNotEmpty) {
+      final line = Platform.isWindows
           ? 'Set-Location -LiteralPath "$cwd"; ${cmd.command}'
           : 'cd "$cwd" && ${cmd.command}';
-      session.sendCommand(cd);
+      session.sendCommand(line);
     } else {
       session.sendCommand(cmd.command);
     }
-    if (commandLooksLikeAgent(cmd.command) ||
-        commandLooksLikeAgent(cmd.name)) {
+    if (_isAgentLaunchCmd(cmd)) {
       final token = cmd.command.trim().split(RegExp(r'\s+')).first;
       tab.launchedAgentHint = token.isNotEmpty ? token : cmd.name;
       setState(() {});
     }
+  }
+
+  Future<void> _runStartCmd(StartCmd cmd) async {
+    // 已在智能体（非纯 PowerShell）中再点智能体按钮：勿往当前输入框塞命令，
+    // 询问是否新开标签页启动。
+    if (_isAgentLaunchCmd(cmd) && _isActiveTabAgent()) {
+      final openNew = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('已在智能体中'),
+          content: Text(
+            '当前终端已在智能体会话中。是否打开新标签页启动「${cmd.name}」？',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('打开新标签页'),
+            ),
+          ],
+        ),
+      );
+      if (openNew != true || !mounted) return;
+      final cwd = _resolveCwd(cmd.cwd);
+      _newTab(workingDirectory: cwd ?? _projectRoot);
+      final tab = _tabs[_activeIndex];
+      // 等新 Shell 就绪（start 内对 UNC/cwd 约有 400ms 延迟）后再发命令
+      await Future<void>.delayed(const Duration(milliseconds: 700));
+      if (!mounted) return;
+      _executeOnTab(tab, cmd, includeCd: false);
+      return;
+    }
+
+    _executeOnTab(_tabs[_activeIndex], cmd, includeCd: true);
   }
 
   @override
