@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/agent_bridge.dart';
 import '../../core/providers.dart';
 import '../../core/toast.dart';
+import '../../core/workspace_memory.dart';
 import '../settings/settings_page.dart';
 import '../tree/project_tree.dart';
 import '../editor/markdown_editor.dart';
@@ -21,6 +22,29 @@ class MainLayout extends ConsumerStatefulWidget {
 class _MainLayoutState extends ConsumerState<MainLayout> {
   double _treeWidth = 280;
   double? _shellWidth; // null = 未初始化，首次布局时默认与中间栏对半
+  WorkspaceSnapshot? _lastWorkspaceSnap;
+
+  void _persistWorkspace() {
+    final snap = WorkspaceSnapshot(
+      expandedPaths: ref.read(expandedTreePathsProvider),
+      openTabs: ref.read(openTabsProvider),
+      selectedFile: ref.read(selectedFileProvider),
+      selectedDir: ref.read(selectedDirProvider),
+      contentMode: ref.read(contentModeProvider),
+    );
+    _lastWorkspaceSnap = snap;
+    WorkspaceMemory.instance.scheduleSave(snap);
+  }
+
+  @override
+  void dispose() {
+    final snap = _lastWorkspaceSnap;
+    if (snap != null) {
+      // 关闭前立刻落盘，避免去抖窗口内退出丢失最后一次状态
+      WorkspaceMemory.instance.saveNow(snap);
+    }
+    super.dispose();
+  }
 
   void _sendAgentReference() {
     final builder = ref.read(agentRefBuilderProvider);
@@ -61,6 +85,13 @@ class _MainLayoutState extends ConsumerState<MainLayout> {
   Widget build(BuildContext context) {
     final shellVisible = ref.watch(shellVisibleProvider);
     final agentChord = ref.watch(sendAgentRefChordProvider);
+
+    // 中间栏 + 目录树展开状态变更 → 去抖持久化
+    ref.listen(openTabsProvider, (_, __) => _persistWorkspace());
+    ref.listen(selectedFileProvider, (_, __) => _persistWorkspace());
+    ref.listen(selectedDirProvider, (_, __) => _persistWorkspace());
+    ref.listen(contentModeProvider, (_, __) => _persistWorkspace());
+    ref.listen(expandedTreePathsProvider, (_, __) => _persistWorkspace());
 
     return CallbackShortcuts(
       bindings: {

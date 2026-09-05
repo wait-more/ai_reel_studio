@@ -35,11 +35,51 @@ class _ProjectTreeState extends ConsumerState<ProjectTree> {
   void _loadTree() {
     if (AppConfig.instance.isConfigured) {
       final projectRoot = AppConfig.instance.projectRoot;
-      DirectoryParser.parseRootAsync(projectRoot).then((root) {
+      DirectoryParser.parseRootAsync(projectRoot).then((root) async {
         if (!mounted) return;
         ref.read(treeRootProvider.notifier).state = root;
+        await _applyExpandedPaths(
+          root,
+          ref.read(expandedTreePathsProvider),
+        );
+        if (!mounted) return;
+        setState(() {});
+        // 定位到上次选中的文件/目录
+        final anchor = ref.read(selectedFileProvider) ??
+            ref.read(selectedDirProvider);
+        if (anchor != null && anchor.isNotEmpty) {
+          _expandTo(anchor);
+        }
+        _publishExpandedPaths();
       });
     }
+  }
+
+  /// 把 [paths] 应用到树：按路径深度排序，保证父目录先于子目录展开。
+  Future<void> _applyExpandedPaths(
+    ScriptNode root,
+    List<String> paths,
+  ) async {
+    final sorted = List<String>.of(paths)
+      ..sort((a, b) {
+        final da = a.split(RegExp(r'[/\\]')).length;
+        final db = b.split(RegExp(r'[/\\]')).length;
+        return da.compareTo(db);
+      });
+    for (final p in sorted) {
+      final node = _findNodeByPath(root, p);
+      if (node == null || node.type == ScriptNodeType.file) continue;
+      if (!node.isLoaded) {
+        await DirectoryParser.loadChildrenAsync(node);
+      }
+      node.isExpanded = true;
+    }
+  }
+
+  void _publishExpandedPaths() {
+    final out = <String>[];
+    _collectExpandedPaths(ref.read(treeRootProvider), out);
+    ref.read(expandedTreePathsProvider.notifier).state = List.of(out);
   }
 
   /// 树自身结构变更统一入口：抛出一个 tick，由树与物料网格的监听各自刷新。
@@ -55,9 +95,11 @@ class _ProjectTreeState extends ConsumerState<ProjectTree> {
 /// 避免用户手动展开的分支被收拢。
   void _refreshTree(String anchorPath) {
     if (!AppConfig.instance.isConfigured) return;
-    // 1. 收集当前展开状态
-    final expandedPaths = <String>[];
-    _collectExpandedPaths(ref.read(treeRootProvider), expandedPaths);
+    // 1. 收集当前展开状态（优先用 provider，保证与持久化一致）
+    final expandedPaths = List<String>.of(ref.read(expandedTreePathsProvider));
+    if (expandedPaths.isEmpty) {
+      _collectExpandedPaths(ref.read(treeRootProvider), expandedPaths);
+    }
 
     _lastSyncedPath = null; // 强制重新执行展开
     DirectoryParser.parseRootAsync(AppConfig.instance.projectRoot).then(
@@ -65,16 +107,10 @@ class _ProjectTreeState extends ConsumerState<ProjectTree> {
       if (!mounted) return;
       ref.read(treeRootProvider.notifier).state = root;
       // 2. 恢复用户展开的分支（懒加载壳需先加载子项）
-      for (final p in expandedPaths) {
-        final node = _findNodeByPath(root, p);
-        if (node == null || node.type != ScriptNodeType.folder) continue;
-        if (!node.isLoaded) {
-          await DirectoryParser.loadChildrenAsync(node);
-        }
-        node.isExpanded = true;
-      }
+      await _applyExpandedPaths(root, expandedPaths);
       if (!mounted) return;
       setState(() {});
+      _publishExpandedPaths();
       // 3. 锚定到触发变更的位置
       _expandTo(anchorPath);
     });
@@ -178,16 +214,20 @@ class _ProjectTreeState extends ConsumerState<ProjectTree> {
     if (!match.isLoaded) {
       // 懒加载壳：异步加载后再继续展开
       final nodeToExpand = match;
+      final shouldExpand = !isFinal;
       DirectoryParser.loadChildrenAsync(nodeToExpand).then((_) {
         if (!mounted) return;
+        if (shouldExpand) nodeToExpand.isExpanded = true;
         setState(() {});
         _expandInto(nodeToExpand, segments, index + 1, sep);
+        _publishExpandedPaths();
       });
       return;
     }
     match.isExpanded = !isFinal ? true : match.isExpanded;
     setState(() {});
     _expandInto(match, segments, index + 1, sep);
+    if (isFinal) _publishExpandedPaths();
   }
 
   @override
@@ -346,6 +386,20 @@ class _TreeNodeWidget extends ConsumerStatefulWidget {
 
 class _TreeNodeWidgetState extends ConsumerState<_TreeNodeWidget> {
   Offset _menuPos = Offset.zero;
+
+  void _syncExpandedPathsToProvider() {
+    final out = <String>[];
+    void walk(ScriptNode? n) {
+      if (n == null) return;
+      if (n.isExpanded) out.add(n.path);
+      for (final c in n.children) {
+        walk(c);
+      }
+    }
+
+    walk(ref.read(treeRootProvider));
+    ref.read(expandedTreePathsProvider.notifier).state = List.of(out);
+  }
 
   
 /// 目录节点的进度状态徽章（未开始时隐藏）。
@@ -619,6 +673,7 @@ class _TreeNodeWidgetState extends ConsumerState<_TreeNodeWidget> {
                   if (!mounted) return;
                   setState(() {});
                 }
+                _syncExpandedPathsToProvider();
               }
             }
           },

@@ -6,6 +6,7 @@ import 'core/config.dart';
 import 'core/progress.dart';
 import 'core/providers.dart';
 import 'core/window_state.dart';
+import 'core/workspace_memory.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -21,6 +22,23 @@ void main() async {
   final allStatuses = await loadAllStatuses();
   if (allStatuses.isNotEmpty) {
     container.read(episodeStatusesProvider.notifier).state = allStatuses;
+  }
+
+  // 恢复目录树展开线索 + 中间栏（Tabs/模式/选中）
+  final workspace = await WorkspaceMemory.instance.load();
+  if (workspace.openTabs.isNotEmpty) {
+    container.read(openTabsProvider.notifier).state = workspace.openTabs;
+  }
+  if (workspace.selectedFile != null) {
+    container.read(selectedFileProvider.notifier).state = workspace.selectedFile;
+  }
+  if (workspace.selectedDir != null) {
+    container.read(selectedDirProvider.notifier).state = workspace.selectedDir;
+  }
+  container.read(contentModeProvider.notifier).state = workspace.contentMode;
+  if (workspace.expandedPaths.isNotEmpty) {
+    container.read(expandedTreePathsProvider.notifier).state =
+        workspace.expandedPaths;
   }
 
   runApp(UncontrolledProviderScope(

@@ -34,9 +34,10 @@ final saveActionsProvider =
 /// （key: episode_status:<path>）。
 final episodeStatusesProvider = StateProvider<Map<String, String>>((ref) => {});
 
-/// 左侧目录树强制刷新信号（自增计数）。
-/// 物料网格发生结构变更（删除/重命名/复制/新建/导入）后递增，
-/// 左侧树监听此值并整体重建以保持两边同步。
+/// 左侧目录树当前已展开的节点路径（供持久化）。
+final expandedTreePathsProvider = StateProvider<List<String>>((ref) => []);
+
+/// 目录树/物料网格结构变更 tick（递增即触发双方刷新）。
 final treeRefreshTickProvider = StateProvider<int>((ref) => 0);
 
 /// 外观 / 字号 / 快捷启动等用户偏好（与 [AppConfig] 同步持久化）。
