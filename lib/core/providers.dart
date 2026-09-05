@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'config.dart';
 import 'directory_parser.dart';
+import 'key_chord.dart';
 
 /// 当前选中的文件路径（在编辑区打开）
 final selectedFileProvider = StateProvider<String?>((ref) => null);
@@ -53,4 +54,7 @@ final terminalFontSizeProvider = StateProvider<double>(
 );
 final startCmdsProvider = StateProvider<List<StartCmd>>(
   (ref) => AppConfig.instance.startCmds,
+);
+final sendAgentRefChordProvider = StateProvider<KeyChord>(
+  (ref) => AppConfig.instance.sendAgentRefChord,
 );

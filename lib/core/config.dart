@@ -4,6 +4,8 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'key_chord.dart';
+
 /// 快捷启动工作目录策略。
 enum CwdStrategy {
   /// 使用项目 scripts 根目录
@@ -62,6 +64,7 @@ class AppConfig {
   static const _kEditorFontSize = 'editorFontSize';
   static const _kTerminalFontSize = 'terminalFontSize';
   static const _kStartCmds = 'startCmds';
+  static const _kSendAgentRefChord = 'sendAgentRefChord';
 
   static const defaultStartCmds = <StartCmd>[
     StartCmd(name: 'opencode', command: 'opencode'),
@@ -76,6 +79,7 @@ class AppConfig {
   double _editorFontSize = 14;
   double _terminalFontSize = 12;
   List<StartCmd> _startCmds = List.of(defaultStartCmds);
+  KeyChord _sendAgentRefChord = KeyChord.defaultSendAgentRef;
 
   String get projectRoot => _projectRoot;
   ThemeMode get themeMode => _themeMode;
@@ -83,6 +87,7 @@ class AppConfig {
   double get editorFontSize => _editorFontSize;
   double get terminalFontSize => _terminalFontSize;
   List<StartCmd> get startCmds => List.unmodifiable(_startCmds);
+  KeyChord get sendAgentRefChord => _sendAgentRefChord;
 
   Future<void> init() async {
     final prefs = await SharedPreferences.getInstance();
@@ -94,6 +99,7 @@ class AppConfig {
     _terminalFontSize =
         (prefs.getDouble(_kTerminalFontSize) ?? 12).clamp(10, 22);
     _startCmds = _loadStartCmds(prefs.getString(_kStartCmds));
+    _sendAgentRefChord = _loadChord(prefs.getString(_kSendAgentRefChord));
   }
 
   Future<void> setProjectRoot(String path) async {
@@ -133,6 +139,12 @@ class AppConfig {
     await prefs.setString(_kStartCmds, encoded);
   }
 
+  Future<void> setSendAgentRefChord(KeyChord chord) async {
+    _sendAgentRefChord = chord;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_kSendAgentRefChord, jsonEncode(chord.toJson()));
+  }
+
   bool get isConfigured =>
       _projectRoot.isNotEmpty && Directory(_projectRoot).existsSync();
 
@@ -160,6 +172,16 @@ class AppConfig {
       return cmds.isEmpty ? List.of(defaultStartCmds) : cmds;
     } catch (_) {
       return List.of(defaultStartCmds);
+    }
+  }
+
+  static KeyChord _loadChord(String? raw) {
+    if (raw == null || raw.isEmpty) return KeyChord.defaultSendAgentRef;
+    try {
+      final map = jsonDecode(raw) as Map<String, dynamic>;
+      return KeyChord.fromJson(map);
+    } catch (_) {
+      return KeyChord.defaultSendAgentRef;
     }
   }
 }

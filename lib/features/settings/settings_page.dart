@@ -1,7 +1,9 @@
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/config.dart';
+import '../../core/key_chord.dart';
 import '../../core/providers.dart';
 import '../layout/main_layout.dart';
 
@@ -17,7 +19,7 @@ class SettingsPage extends ConsumerWidget {
     return Dialog(
       insetPadding: const EdgeInsets.symmetric(horizontal: 48, vertical: 36),
       child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 720, maxHeight: 560),
+        constraints: const BoxConstraints(maxWidth: 760, maxHeight: 600),
         child: const _SettingsShell(),
       ),
     );
@@ -65,7 +67,7 @@ class _FirstRunPanel extends ConsumerWidget {
   }
 }
 
-enum _SettingsSection { project, appearance, shell, about }
+enum _SettingsSection { project, appearance, shell, shortcuts, about }
 
 class _SettingsShell extends ConsumerStatefulWidget {
   const _SettingsShell();
@@ -125,6 +127,11 @@ class _SettingsShellState extends ConsumerState<_SettingsShell> {
                       label: Text('Shell'),
                     ),
                     NavigationRailDestination(
+                      icon: Icon(Icons.keyboard_outlined),
+                      selectedIcon: Icon(Icons.keyboard),
+                      label: Text('快捷键'),
+                    ),
+                    NavigationRailDestination(
                       icon: Icon(Icons.info_outline),
                       selectedIcon: Icon(Icons.info),
                       label: Text('关于'),
@@ -140,6 +147,7 @@ class _SettingsShellState extends ConsumerState<_SettingsShell> {
                     _SettingsSection.project => const _ProjectSection(),
                     _SettingsSection.appearance => const _AppearanceSection(),
                     _SettingsSection.shell => const _ShellSection(),
+                    _SettingsSection.shortcuts => const _ShortcutsSection(),
                     _SettingsSection.about => const _AboutSection(),
                   },
                 ),
@@ -455,6 +463,151 @@ Future<StartCmd?> _editStartCmd(BuildContext context, {StartCmd? existing}) {
       );
     },
   );
+}
+
+class _ShortcutsSection extends ConsumerStatefulWidget {
+  const _ShortcutsSection();
+
+  @override
+  ConsumerState<_ShortcutsSection> createState() => _ShortcutsSectionState();
+}
+
+class _ShortcutsSectionState extends ConsumerState<_ShortcutsSection> {
+  bool _recording = false;
+  late final FocusNode _recordFocus = FocusNode();
+
+  @override
+  void dispose() {
+    _recordFocus.dispose();
+    super.dispose();
+  }
+
+  Future<void> _applyChord(KeyChord chord) async {
+    ref.read(sendAgentRefChordProvider.notifier).state = chord;
+    await AppConfig.instance.setSendAgentRefChord(chord);
+    if (mounted) {
+      setState(() => _recording = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final chord = ref.watch(sendAgentRefChordProvider);
+    final scheme = Theme.of(context).colorScheme;
+
+    return ListView(
+      children: [
+        Text('快捷键', style: Theme.of(context).textTheme.titleMedium),
+        const SizedBox(height: 8),
+        Text(
+          '向智能体填入引用',
+          style: Theme.of(context).textTheme.titleSmall,
+        ),
+        const SizedBox(height: 6),
+        Text(
+          '在 Markdown 编辑器中按下组合键，把当前文件或选区变成引用字符串，'
+          '写入右侧 Shell 里已检测到的智能体输入区（不自动回车）。\n'
+          '• 无选区 → @相对路径\n'
+          '• 有选区 → @相对路径#L12 或 @相对路径#L12-L34\n'
+          '• 未检测到 opencode / dsh-tui 等智能体时会提示并拒绝填入\n'
+          '• 原始 PowerShell 不会填入',
+          style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                color: scheme.onSurfaceVariant,
+                height: 1.45,
+              ),
+        ),
+        const SizedBox(height: 16),
+        Row(
+          children: [
+            Text('当前组合键', style: Theme.of(context).textTheme.titleSmall),
+            const SizedBox(width: 12),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+              decoration: BoxDecoration(
+                color: scheme.surfaceContainerHighest,
+                borderRadius: BorderRadius.circular(6),
+                border: Border.all(color: scheme.outlineVariant),
+              ),
+              child: Text(
+                chord.label,
+                style: const TextStyle(
+                  fontFamily: 'Consolas',
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        if (_recording)
+          Focus(
+            focusNode: _recordFocus,
+            autofocus: true,
+            onKeyEvent: (node, event) {
+              if (event is! KeyDownEvent) return KeyEventResult.ignored;
+              if (KeyChord.isModifierOnly(event.logicalKey)) {
+                return KeyEventResult.handled;
+              }
+              if (event.logicalKey == LogicalKeyboardKey.escape) {
+                setState(() => _recording = false);
+                return KeyEventResult.handled;
+              }
+              final next = KeyChord.fromKeyEvent(event);
+              // 至少要有一个修饰键，避免误绑单键
+              if (!next.control && !next.alt && !next.shift && !next.meta) {
+                return KeyEventResult.handled;
+              }
+              _applyChord(next);
+              return KeyEventResult.handled;
+            },
+            child: Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(
+                color: scheme.primaryContainer.withValues(alpha: 0.35),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: scheme.primary),
+              ),
+              child: Text(
+                '请按下新的组合键…（Esc 取消；需含 Ctrl/Alt/Shift 之一）',
+                style: TextStyle(color: scheme.onSurface),
+              ),
+            ),
+          )
+        else
+          Row(
+            children: [
+              FilledButton.tonalIcon(
+                onPressed: () {
+                  setState(() => _recording = true);
+                  WidgetsBinding.instance.addPostFrameCallback((_) {
+                    _recordFocus.requestFocus();
+                  });
+                },
+                icon: const Icon(Icons.edit, size: 16),
+                label: const Text('重新定义'),
+              ),
+              const SizedBox(width: 8),
+              TextButton(
+                onPressed: chord == KeyChord.defaultSendAgentRef
+                    ? null
+                    : () => _applyChord(KeyChord.defaultSendAgentRef),
+                child: const Text('恢复默认 (Ctrl+Alt+K)'),
+              ),
+            ],
+          ),
+        const SizedBox(height: 20),
+        Text('其它内置快捷键', style: Theme.of(context).textTheme.titleSmall),
+        const SizedBox(height: 6),
+        Text(
+          'Ctrl+P — 全局搜索（暂不支持重定义）',
+          style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                color: scheme.onSurfaceVariant,
+              ),
+        ),
+      ],
+    );
+  }
 }
 
 class _AboutSection extends StatelessWidget {

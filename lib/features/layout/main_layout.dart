@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../core/agent_bridge.dart';
 import '../../core/providers.dart';
+import '../../core/toast.dart';
 import '../settings/settings_page.dart';
 import '../tree/project_tree.dart';
 import '../editor/markdown_editor.dart';
@@ -20,9 +22,45 @@ class _MainLayoutState extends ConsumerState<MainLayout> {
   double _treeWidth = 280;
   double? _shellWidth; // null = 未初始化，首次布局时默认与中间栏对半
 
+  void _sendAgentReference() {
+    final builder = ref.read(agentRefBuilderProvider);
+    if (builder == null) {
+      showGlobalToast(context, '请先打开一个文档');
+      return;
+    }
+    final refText = builder();
+    if (refText == null || refText.isEmpty) {
+      showGlobalToast(context, '请先打开一个文档');
+      return;
+    }
+
+    if (!ref.read(shellVisibleProvider)) {
+      ref.read(shellVisibleProvider.notifier).state = true;
+    }
+
+    final host = ref.read(shellAgentHostProvider);
+    if (host == null) {
+      showGlobalToast(context, 'Shell 未就绪');
+      return;
+    }
+    if (!host.isAgentActive()) {
+      showGlobalToast(
+        context,
+        '当前终端未检测到智能体，请先启动 opencode / dsh-tui 等',
+      );
+      return;
+    }
+    if (!host.inject(refText)) {
+      showGlobalToast(context, '填入失败');
+      return;
+    }
+    showGlobalToast(context, '已填入 $refText');
+  }
+
   @override
   Widget build(BuildContext context) {
     final shellVisible = ref.watch(shellVisibleProvider);
+    final agentChord = ref.watch(sendAgentRefChordProvider);
 
     return CallbackShortcuts(
       bindings: {
@@ -31,6 +69,8 @@ class _MainLayoutState extends ConsumerState<MainLayout> {
             (() {
           showGlobalSearch(context);
         }),
+        // 当前文件/选区引用 → 智能体输入区（不回车）；组合键可在设置中改
+        agentChord.toActivator(): _sendAgentReference,
       },
       child: Focus(
         autofocus: true,
@@ -72,14 +112,12 @@ class _MainLayoutState extends ConsumerState<MainLayout> {
                   ],
                 ),
               ),
-              if (shellVisible) ...[
-                _buildDivider(resizeTree: false),
-                // Right panel: Shell
-                SizedBox(
-                  width: _shellWidth,
-                  child: const ShellPanel(),
-                ),
-              ],
+              if (shellVisible) _buildDivider(resizeTree: false),
+              // 始终挂载 ShellPanel，折叠时宽度为 0，避免销毁 PTY / 智能体会话
+              SizedBox(
+                width: shellVisible ? _shellWidth : 0,
+                child: const ShellPanel(),
+              ),
             ],
           ),
         );

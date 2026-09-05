@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:xterm/xterm.dart';
 
+import '../../core/agent_bridge.dart';
 import '../../core/config.dart';
 import '../../core/providers.dart';
 import 'terminal_session.dart';
@@ -32,14 +33,52 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
     _tabs.add(_ShellTab(
       session: TerminalSession()..start(workingDirectory: _projectRoot),
     ));
+    WidgetsBinding.instance.addPostFrameCallback((_) => _registerHost());
   }
 
   @override
   void dispose() {
+    ref.read(shellAgentHostProvider.notifier).state = null;
     for (final t in _tabs) {
       t.session.dispose();
     }
     super.dispose();
+  }
+
+  void _registerHost() {
+    if (!mounted) return;
+    ref.read(shellAgentHostProvider.notifier).state = ShellAgentHost(
+      isAgentActive: _isActiveTabAgent,
+      agentHint: _activeAgentHint,
+      inject: _injectToActive,
+    );
+  }
+
+  bool _isActiveTabAgent() {
+    if (_tabs.isEmpty) return false;
+    final tab = _tabs[_activeIndex];
+    final recent = tab.session.recentBufferText();
+    if (terminalTextLooksLikeAgent(recent)) return true;
+    // 快捷启动打过标记，且近期缓冲仍能对上关键字时才算（避免纯 PS 误放行）
+    final hint = tab.launchedAgentHint;
+    if (hint != null &&
+        hint.isNotEmpty &&
+        recent.toLowerCase().contains(hint.toLowerCase())) {
+      return true;
+    }
+    return false;
+  }
+
+  String? _activeAgentHint() {
+    if (_tabs.isEmpty) return null;
+    return _tabs[_activeIndex].launchedAgentHint;
+  }
+
+  bool _injectToActive(String text) {
+    if (_tabs.isEmpty || text.isEmpty) return false;
+    if (!_isActiveTabAgent()) return false;
+    _tabs[_activeIndex].session.sendInput(text);
+    return true;
   }
 
   void _newTab() {
@@ -49,6 +88,7 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
       ));
       _activeIndex = _tabs.length - 1;
     });
+    _registerHost();
   }
 
   void _closeTab(int index) {
@@ -61,6 +101,7 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
         _activeIndex--;
       }
     });
+    _registerHost();
   }
 
   String? _resolveCwd(CwdStrategy strategy) {
@@ -79,7 +120,8 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
   }
 
   void _runStartCmd(StartCmd cmd) {
-    final session = _tabs[_activeIndex].session;
+    final tab = _tabs[_activeIndex];
+    final session = tab.session;
     final cwd = _resolveCwd(cmd.cwd);
     if (cwd != null && cwd.isNotEmpty) {
       final cd = Platform.isWindows
@@ -88,6 +130,12 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
       session.sendCommand(cd);
     } else {
       session.sendCommand(cmd.command);
+    }
+    if (commandLooksLikeAgent(cmd.command) ||
+        commandLooksLikeAgent(cmd.name)) {
+      final token = cmd.command.trim().split(RegExp(r'\s+')).first;
+      tab.launchedAgentHint = token.isNotEmpty ? token : cmd.name;
+      setState(() {});
     }
   }
 
@@ -134,8 +182,13 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
               itemCount: _tabs.length,
               itemBuilder: (context, index) {
                 final isActive = index == _activeIndex;
+                final tab = _tabs[index];
+                final agentish = tab.launchedAgentHint != null;
                 return InkWell(
-                  onTap: () => setState(() => _activeIndex = index),
+                  onTap: () {
+                    setState(() => _activeIndex = index);
+                    _registerHost();
+                  },
                   child: Container(
                     margin: const EdgeInsets.symmetric(
                         vertical: 4, horizontal: 2),
@@ -149,8 +202,15 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
                     child: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
+                        if (agentish) ...[
+                          const Icon(Icons.smart_toy_outlined,
+                              size: 12, color: Colors.lightGreenAccent),
+                          const SizedBox(width: 4),
+                        ],
                         Text(
-                          '终端 ${index + 1}',
+                          agentish
+                              ? (tab.launchedAgentHint ?? 'Agent')
+                              : '终端 ${index + 1}',
                           style: const TextStyle(
                               fontSize: 12, color: Colors.white),
                         ),
@@ -196,7 +256,8 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
               label: Text(cmd.name, style: const TextStyle(fontSize: 11)),
               backgroundColor: const Color(0xFF3D3D3D),
               labelStyle: const TextStyle(color: Colors.white),
-              tooltip: '${cmd.command}\n${cmd.cwd == CwdStrategy.selectedDir ? "cwd: 当前选中目录" : "cwd: 项目根"}',
+              tooltip:
+                  '${cmd.command}\n${cmd.cwd == CwdStrategy.selectedDir ? "cwd: 当前选中目录" : "cwd: 项目根"}',
               onPressed: () => _runStartCmd(cmd),
             ),
         ],
@@ -208,6 +269,8 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
 /// 单个终端页签。
 class _ShellTab {
   final TerminalSession session;
+  /// 通过快捷启动打上的智能体线索（命令首词），供检测与 Tab 标题使用。
+  String? launchedAgentHint;
   _ShellTab({required this.session});
 }
 

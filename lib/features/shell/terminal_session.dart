@@ -109,6 +109,27 @@ class TerminalSession extends ChangeNotifier {
     _pty?.write(const Utf8Encoder().convert('$command\r'));
   }
 
+  /// 向终端写入文本，不加回车（用于填入智能体输入区）。
+  void sendInput(String text) {
+    if (text.isEmpty) return;
+    _pty?.write(const Utf8Encoder().convert(text));
+  }
+
+  /// 读取终端缓冲区最近若干行纯文本（供智能体检测）。
+  String recentBufferText({int maxLines = 48}) {
+    final buf = terminal.buffer;
+    final height = buf.height;
+    if (height <= 0) return '';
+    final startY = height > maxLines ? height - maxLines : 0;
+    final endX = buf.viewWidth > 0 ? buf.viewWidth - 1 : 0;
+    return buf.getText(
+      BufferRangeLine(
+        CellOffset(0, startY),
+        CellOffset(endX, height - 1),
+      ),
+    );
+  }
+
   /// 结束并清理底层 PTY。
   ///
   /// 先给 shell 发 exit 让它正常退出（PowerShell/cmd 退出时会自动回收其

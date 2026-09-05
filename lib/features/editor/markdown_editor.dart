@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../core/agent_bridge.dart';
 import '../../core/providers.dart';
 import 'markdown_highlight_controller.dart';
 
@@ -171,14 +172,61 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
   bool _showPreview = false;
   List<FileSystemEntity> _dirEntries = [];
 
+  /// 记住最近一次非空选区。快捷键触发时 TextField 选区常被收成光标，
+  /// 若只用当前 selection 会把多行误判成单行。
+  TextSelection? _rememberedRange;
+
   @override
   void initState() {
     super.initState();
+    _controller.addListener(_onControllerChanged);
     // 延后到首帧构建完成后注册，避免在 build 期间修改 provider
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) _registerSave();
     });
     _load();
+  }
+
+  void _onControllerChanged() {
+    final sel = _controller.selection;
+    if (sel.isValid && !sel.isCollapsed) {
+      _rememberedRange = sel;
+    }
+  }
+
+  /// 优先用当前非空选区；若已被快捷键冲成光标，回退到记住的范围选区。
+  TextSelection _effectiveSelection() {
+    final sel = _controller.selection;
+    if (sel.isValid && !sel.isCollapsed) return sel;
+    final remembered = _rememberedRange;
+    if (remembered != null &&
+        remembered.isValid &&
+        !remembered.isCollapsed &&
+        remembered.start >= 0 &&
+        remembered.end <= _controller.text.length) {
+      return remembered;
+    }
+    return sel;
+  }
+
+  void _registerAgentRef() {
+    if (_isDir) return;
+    ref.read(agentRefBuilderProvider.notifier).state = () {
+      final sel = _effectiveSelection();
+      return buildAgentReference(
+        filePath: widget.path,
+        text: _controller.text,
+        selectionStart: sel.start,
+        selectionEnd: sel.end,
+      );
+    };
+  }
+
+  void _unregisterAgentRef() {
+    final selected = ref.read(selectedFileProvider);
+    if (selected == widget.path) {
+      ref.read(agentRefBuilderProvider.notifier).state = null;
+    }
   }
 
   void _registerSave() {
@@ -224,12 +272,14 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
         _controller.text = content;
         _loading = false;
       });
+      _registerAgentRef();
     } catch (e) {
       if (!mounted) return;
       setState(() {
         _content = '';
         _loading = false;
       });
+      _registerAgentRef();
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('无法读取文件: $e')),
       );
@@ -260,9 +310,11 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
 
   @override
   void dispose() {
+    _controller.removeListener(_onControllerChanged);
     // 延后到下一帧移除保存注册，避免在 dispose 期间修改 provider
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _unregisterSave();
+      _unregisterAgentRef();
     });
     _controller.dispose();
     _editorFocus.dispose();
