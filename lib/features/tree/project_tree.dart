@@ -465,6 +465,7 @@ class _TreeNodeWidgetState extends ConsumerState<_TreeNodeWidget> {
       path: mediaPath,
       tag: tag,
       lastFrame: lastFrame,
+      hostContext: context,
     );
     if (!context.mounted) return;
     showGlobalToast(context, result != null

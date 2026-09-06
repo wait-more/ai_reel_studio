@@ -48,63 +48,257 @@ void showImageViewerDialog(BuildContext context, String path) {
   );
 }
 
-/// 独立提取媒体某一帧并保存 PNG 到媒体同目录（供右键菜单等无预览场景）。
+/// 等待 [player] 的 duration 就绪（流 + 轮询），超时返回当前值。
+Future<Duration> _waitForDuration(
+  Player player, {
+  Duration timeout = const Duration(seconds: 8),
+}) async {
+  final existing = player.state.duration;
+  if (existing > Duration.zero) return existing;
+
+  final completer = Completer<Duration>();
+  late final StreamSubscription<Duration> sub;
+  sub = player.stream.duration.listen((d) {
+    if (d > Duration.zero && !completer.isCompleted) {
+      completer.complete(d);
+    }
+  });
+  try {
+    return await Future.any<Duration>([
+      completer.future,
+      Future<Duration>(() async {
+        final deadline = DateTime.now().add(timeout);
+        while (DateTime.now().isBefore(deadline)) {
+          final d = player.state.duration;
+          if (d > Duration.zero) return d;
+          await Future<void>.delayed(const Duration(milliseconds: 50));
+        }
+        return player.state.duration;
+      }),
+    ]);
+  } finally {
+    await sub.cancel();
+  }
+}
+
+/// 等待 position 进入 [target] 容差内；超时不抛错，由调用方校验。
+Future<void> _waitForSeekSettle(
+  Player player,
+  Duration target, {
+  Duration tolerance = const Duration(milliseconds: 800),
+  Duration timeout = const Duration(seconds: 4),
+}) async {
+  bool near(Duration p) =>
+      (p - target).inMilliseconds.abs() <= tolerance.inMilliseconds;
+
+  if (near(player.state.position)) return;
+
+  final completer = Completer<void>();
+  late final StreamSubscription<Duration> sub;
+  sub = player.stream.position.listen((p) {
+    if (near(p) && !completer.isCompleted) completer.complete();
+  });
+  try {
+    await Future.any<void>([
+      completer.future,
+      Future<void>(() async {
+        final deadline = DateTime.now().add(timeout);
+        while (DateTime.now().isBefore(deadline)) {
+          if (near(player.state.position)) return;
+          await Future<void>.delayed(const Duration(milliseconds: 40));
+        }
+      }),
+    ]);
+  } finally {
+    await sub.cancel();
+  }
+}
+
+/// 等待 position ≥ [minPos]（末帧用：只认是否够靠后）。
+Future<bool> _waitUntilAtLeast(
+  Player player,
+  Duration minPos, {
+  Duration timeout = const Duration(seconds: 8),
+}) async {
+  if (player.state.position >= minPos) return true;
+
+  final completer = Completer<bool>();
+  late final StreamSubscription<Duration> sub;
+  sub = player.stream.position.listen((p) {
+    if (p >= minPos && !completer.isCompleted) completer.complete(true);
+  });
+  try {
+    return await Future.any<bool>([
+      completer.future,
+      Future<bool>(() async {
+        final deadline = DateTime.now().add(timeout);
+        while (DateTime.now().isBefore(deadline)) {
+          if (player.state.position >= minPos) return true;
+          await Future<void>.delayed(const Duration(milliseconds: 40));
+        }
+        return player.state.position >= minPos;
+      }),
+    ]);
+  } finally {
+    await sub.cancel();
+  }
+}
+
+/// 计算末帧目标时间（略早于 EOF，避免 completed 清屏）。
+Duration _lastFrameTarget(Duration dur) {
+  const back = Duration(milliseconds: 350);
+  if (dur > back + const Duration(milliseconds: 100)) return dur - back;
+  if (dur > const Duration(milliseconds: 50)) {
+    return dur - const Duration(milliseconds: 50);
+  }
+  return Duration.zero;
+}
+
+/// 把临时 [Video] 挂到离屏 Overlay，保证 libmpv 有真实渲染表面可截帧。
+OverlayEntry? _mountOffscreenVideo(
+  BuildContext hostContext,
+  VideoController controller,
+) {
+  final overlay = Overlay.maybeOf(hostContext, rootOverlay: true);
+  if (overlay == null) return null;
+  final entry = OverlayEntry(
+    builder: (_) => IgnorePointer(
+      child: Opacity(
+        opacity: 0,
+        child: Align(
+          alignment: Alignment.topLeft,
+          child: SizedBox(
+            width: 64,
+            height: 64,
+            child: Video(controller: controller, controls: NoVideoControls),
+          ),
+        ),
+      ),
+    ),
+  );
+  overlay.insert(entry);
+  return entry;
+}
+
+/// 独立提取媒体某一帧并保存 PNG（目录树右键 / 播放页共用）。
 ///
-/// 自建临时 Player，完成后释放。返回保存的文件路径，失败返回 null。
-/// - [lastFrame]：为 true 时取末帧（回退 150ms 避免 completed 清屏）
-/// - [target]：指定时间点；不传且非末帧则取首帧
-/// - [tag]：文件名后缀（如 '首帧' → `<stem>_首帧.png`）
+/// 另起临时 Player，不改动预览进度。返回保存路径，失败返回 null。
+/// [hostContext]：挂离屏 Video，提高截帧成功率。
 Future<String?> extractMediaFrame({
   required String path,
   Duration? target,
   bool lastFrame = false,
   String? tag,
+  BuildContext? hostContext,
 }) async {
   final player = Player();
+  // 软解 + 小尺寸：静默截帧时 seek 更稳、更快
+  final video = VideoController(
+    player,
+    configuration: const VideoControllerConfiguration(
+      enableHardwareAcceleration: false,
+      hwdec: 'no',
+      width: 480,
+      height: 270,
+    ),
+  );
+
+  OverlayEntry? overlayEntry;
   try {
-    // 与预览对话框一致的 hardening（无渲染表面时需 vid=auto 才能解码视频帧）
+    await video.platform.future.timeout(const Duration(seconds: 8));
+
+    if (hostContext != null && hostContext.mounted) {
+      overlayEntry = _mountOffscreenVideo(hostContext, video);
+      await WidgetsBinding.instance.endOfFrame;
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+    }
+
     final platform = player.platform;
     if (platform is NativePlayer) {
       await platform.setProperty('cache-on-disk', 'no');
       await platform.setProperty('audio-fallback-to-null', 'yes');
-      await platform.setProperty('vid', 'auto');
-      // 静默截帧：彻底关掉音轨，避免 open/seek 时预览已暂停仍突然出声
+      await platform.setProperty('hr-seek', 'yes');
       await platform.setProperty('aid', 'no');
       await platform.setProperty('mute', 'yes');
       await platform.setProperty('volume', '0');
     }
     await player.setVolume(0);
-    // play:false，只为解码取帧，不自动开播
-    await player.open(Media(path), play: false);
 
-    var dur = player.state.duration;
-    for (var i = 0; i < 40 && dur == Duration.zero; i++) {
-      await Future.delayed(const Duration(milliseconds: 200));
-      dur = player.state.duration;
-    }
-    await player.pause();
+    await player.open(Media(path), play: true);
     await player.setVolume(0);
+    try {
+      await video.waitUntilFirstFrameRendered
+          .timeout(const Duration(seconds: 8));
+    } catch (_) {}
 
-    final Duration eff;
-    if (lastFrame) {
-      eff = dur > const Duration(milliseconds: 300)
-          ? dur - const Duration(milliseconds: 150)
-          : dur;
+    final dur = await _waitForDuration(player);
+    await player.pause();
+    if (lastFrame && dur <= Duration.zero) return null;
+
+    final seekTo =
+        lastFrame ? _lastFrameTarget(dur) : (target ?? Duration.zero);
+
+    if (lastFrame && seekTo > Duration.zero) {
+      // 末帧唯一路径：Media.start 从目标点打开。
+      // 禁止「从 0 seek / 失败再重开」多分支，否则两次截会落到不同关键帧。
+      await player.open(Media(path, start: seekTo), play: true);
+      await player.setVolume(0);
+      try {
+        await video.waitUntilFirstFrameRendered
+            .timeout(const Duration(seconds: 8));
+      } catch (_) {}
+
+      final minAccept = seekTo > const Duration(milliseconds: 800)
+          ? seekTo - const Duration(milliseconds: 800)
+          : Duration.zero;
+      var ok = await _waitUntilAtLeast(player, minAccept);
+      if (!ok) {
+        await player.seek(seekTo);
+        await player.play();
+        ok = await _waitUntilAtLeast(
+          player,
+          minAccept,
+          timeout: const Duration(seconds: 5),
+        );
+      }
+      await player.pause();
+      await Future<void>.delayed(const Duration(milliseconds: 250));
+
+      final tailGate =
+          Duration(milliseconds: (dur.inMilliseconds * 0.9).floor());
+      if (dur > const Duration(seconds: 2) &&
+          player.state.position < tailGate) {
+        return null;
+      }
+    } else if (seekTo > Duration.zero) {
+      await player.seek(seekTo);
+      await player.play();
+      await _waitForSeekSettle(player, seekTo);
+      await player.pause();
+      await Future<void>.delayed(const Duration(milliseconds: 200));
     } else {
-      eff = target ?? Duration.zero;
+      await player.pause();
+      await player.seek(Duration.zero);
+      await Future<void>.delayed(const Duration(milliseconds: 200));
     }
-    await player.seek(eff);
-    // 等待 libmpv 解码出目标帧
-    await Future.delayed(const Duration(milliseconds: 450));
-    final bytes = await player.screenshot(format: 'image/png');
-    if (bytes == null) return null;
+
+    Uint8List? bytes;
+    for (var i = 0; i < 5; i++) {
+      bytes = await player.screenshot(format: 'image/png');
+      if (bytes != null && bytes.isNotEmpty) break;
+      await Future<void>.delayed(const Duration(milliseconds: 150));
+    }
+    if (bytes == null || bytes.isEmpty) return null;
 
     final base = '${Directory(path).parent.path}${Platform.pathSeparator}'
         '${_stemOf(path)}${tag == null ? '' : '_$tag'}';
     final file = await dedupTargetFile(base);
     await file.writeAsBytes(bytes, flush: true);
     return file.path;
+  } catch (_) {
+    return null;
   } finally {
+    overlayEntry?.remove();
     await player.dispose();
   }
 }
@@ -311,10 +505,8 @@ class _MediaPreviewDialogState extends State<MediaPreviewDialog> {
     setState(() => _position = target);
   }
 
-  // ── 截帧（首帧/末帧静默；当前帧用预览播放器截屏） ──────────
+  // ── 截帧（与目录树右键同一条静默路径，不碰预览进度） ────
 
-  /// 首帧/末帧：另起临时 Player 静默提取（与右键菜单同一路径），
-  /// 不 seek、不暂停当前预览，避免进度条与画面跳动。
   Future<void> _extractSilent({
     required bool lastFrame,
     required String tag,
@@ -324,15 +516,21 @@ class _MediaPreviewDialogState extends State<MediaPreviewDialog> {
       return;
     }
     setState(() => _busy = true);
+    // 截帧时先停预览，避免双 Player 抢解码导致与目录树落点不一致
+    final wasPlaying = _playing;
     try {
+      await _player.pause();
       final path = await extractMediaFrame(
         path: widget.path,
         lastFrame: lastFrame,
         tag: tag,
+        hostContext: context,
       );
       if (!mounted) return;
       if (path == null) {
-        _toast('截图失败：未取得帧数据');
+        _toast(lastFrame
+            ? '截图失败：未能定位到末帧'
+            : '截图失败：未取得帧数据');
         return;
       }
       _toast('已保存：$path');
@@ -340,6 +538,11 @@ class _MediaPreviewDialogState extends State<MediaPreviewDialog> {
     } catch (e) {
       _toast('截图失败：$e');
     } finally {
+      if (wasPlaying) {
+        try {
+          await _player.play();
+        } catch (_) {}
+      }
       if (mounted) setState(() => _busy = false);
     }
   }
