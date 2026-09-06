@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -5,7 +6,13 @@ import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/agent_bridge.dart';
 import '../../core/providers.dart';
+import 'line_number_gutter.dart';
 import 'markdown_highlight_controller.dart';
+import 'markdown_outline.dart';
+import 'outline_rail.dart';
+
+/// 大纲是否钉住（会话内保持）。
+final outlinePinnedProvider = StateProvider<bool>((ref) => false);
 
 class MarkdownEditor extends ConsumerWidget {
   const MarkdownEditor({super.key});
@@ -166,15 +173,27 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
   late final TextEditingController _controller =
       MarkdownHighlightController(enabled: isMarkdownDoc);
   final FocusNode _editorFocus = FocusNode();
+  final GlobalKey _editorFieldKey = GlobalKey();
+  double _scrollOffset = 0;
+  double _viewportHeight = 400;
   bool _isDir = false;
   bool _loading = true;
   bool _isDirty = false;
   bool _showPreview = false;
   List<FileSystemEntity> _dirEntries = [];
 
+  List<OutlineHeading> _outline = const [];
+  int _activeOutline = -1;
+  int _activeLine = 0;
+  int _lineCount = 1;
+  Timer? _outlineDebounce;
+
   /// 记住最近一次非空选区。快捷键触发时 TextField 选区常被收成光标，
   /// 若只用当前 selection 会把多行误判成单行。
   TextSelection? _rememberedRange;
+
+  static const _editorPadding = EdgeInsets.all(8);
+  static const _lineHeightFactor = 1.6;
 
   @override
   void initState() {
@@ -191,6 +210,150 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
     final sel = _controller.selection;
     if (sel.isValid && !sel.isCollapsed) {
       _rememberedRange = sel;
+    }
+    _refreshCaretLine();
+    _scheduleOutlineRebuild();
+  }
+
+  /// TextField 内部 Scrollable。
+  ScrollPosition? _editorScrollPosition() {
+    final focusCtx = _editorFocus.context;
+    if (focusCtx != null) {
+      final viaFocus = Scrollable.maybeOf(focusCtx)?.position;
+      if (viaFocus != null) return viaFocus;
+    }
+    // TextField 的 context 在 Scrollable 之上，需向下找
+    final root = _editorFieldKey.currentContext as Element?;
+    if (root == null) return null;
+    ScrollPosition? found;
+    void visit(Element el) {
+      if (found != null) return;
+      if (el is StatefulElement && el.state is ScrollableState) {
+        found = (el.state as ScrollableState).position;
+        return;
+      }
+      el.visitChildren(visit);
+    }
+
+    visit(root);
+    return found;
+  }
+
+  void _refreshCaretLine() {
+    final text = _controller.text;
+    final offset = _controller.selection.baseOffset.clamp(0, text.length);
+    final line = lineIndexOfOffset(text, offset);
+    final lines = countLines(text);
+    if (line != _activeLine || lines != _lineCount) {
+      setState(() {
+        _activeLine = line;
+        _lineCount = lines;
+      });
+    }
+    _updateActiveOutline(line);
+  }
+
+  void _refreshActiveOutlineFromViewport() {
+    if (!isMarkdownDoc || _outline.isEmpty) return;
+    final fontSize = ref.read(editorFontSizeProvider);
+    final lineHeight = fontSize * _lineHeightFactor;
+    final firstVisible =
+        ((_scrollOffset - _editorPadding.top) / lineHeight)
+            .floor()
+            .clamp(0, _lineCount - 1);
+    if (_editorFocus.hasFocus) {
+      _updateActiveOutline(_activeLine);
+    } else {
+      _updateActiveOutline(firstVisible);
+    }
+  }
+
+  void _updateActiveOutline(int line) {
+    final idx = activeOutlineIndex(_outline, line);
+    if (idx != _activeOutline) {
+      setState(() => _activeOutline = idx);
+    }
+  }
+
+  void _scheduleOutlineRebuild() {
+    if (!isMarkdownDoc) return;
+    _outlineDebounce?.cancel();
+    _outlineDebounce = Timer(const Duration(milliseconds: 200), () {
+      if (!mounted) return;
+      final next = parseMarkdownOutline(_controller.text);
+      setState(() {
+        _outline = next;
+        _activeOutline = activeOutlineIndex(next, _activeLine);
+      });
+    });
+  }
+
+  /// 测量目标字符在文档中的 Y（含 padding），用于精确定位滚动。
+  double _measureDocY(int charOffset, TextStyle style) {
+    final box = _editorFieldKey.currentContext?.findRenderObject() as RenderBox?;
+    final maxWidth = (box?.size.width ?? 800) - _editorPadding.horizontal;
+    final tp = TextPainter(
+      text: TextSpan(text: _controller.text, style: style),
+      textDirection: TextDirection.ltr,
+    )..layout(maxWidth: maxWidth > 40 ? maxWidth : 800);
+    final caret = tp.getOffsetForCaret(
+      TextPosition(offset: charOffset.clamp(0, _controller.text.length)),
+      Rect.zero,
+    );
+    return _editorPadding.top + caret.dy;
+  }
+
+  Future<void> _jumpToHeading(OutlineHeading h) async {
+    final caret = h.charOffset.clamp(0, _controller.text.length);
+    final fontSize = ref.read(editorFontSizeProvider);
+    final style = TextStyle(
+      fontSize: fontSize,
+      height: _lineHeightFactor,
+      fontFamily: 'Consolas',
+    );
+
+    setState(() {
+      _activeLine = h.lineIndex;
+      _activeOutline = activeOutlineIndex(_outline, h.lineIndex);
+    });
+
+    _editorFocus.requestFocus();
+    await WidgetsBinding.instance.endOfFrame;
+    if (!mounted) return;
+
+    bool pinTargetInView() {
+      final pos = _editorScrollPosition();
+      if (pos == null || !pos.hasContentDimensions) return false;
+      final docY = _measureDocY(caret, style);
+      // 目标行落在视口上方约 1/4，下面留出大部分正文
+      final target =
+          (docY - pos.viewportDimension * 0.25).clamp(0.0, pos.maxScrollExtent);
+      if ((pos.pixels - target).abs() > 0.5) {
+        pos.jumpTo(target);
+      }
+      if ((_scrollOffset - target).abs() > 0.5) {
+        setState(() {
+          _scrollOffset = target;
+          _viewportHeight = pos.viewportDimension;
+        });
+      }
+      return true;
+    }
+
+    // 1) 先滚动到位（尚未改 selection → 不会触发 bringIntoView）
+    pinTargetInView();
+    await WidgetsBinding.instance.endOfFrame;
+    if (!mounted) return;
+    pinTargetInView();
+
+    // 2) 再设光标；若目标已在视口中上部，bringIntoView 通常不再大挪
+    _controller.selection = TextSelection.collapsed(offset: caret);
+
+    // 3) 盯梢约 200ms，挡住迟到的 bringIntoView（向后跳时会把光标顶到底部）
+    final deadline = DateTime.now().add(const Duration(milliseconds: 220));
+    while (mounted && DateTime.now().isBefore(deadline)) {
+      await WidgetsBinding.instance.endOfFrame;
+      pinTargetInView();
     }
   }
 
@@ -270,6 +433,10 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
       setState(() {
         _content = content;
         _controller.text = content;
+        _lineCount = countLines(content);
+        _outline = isMarkdownDoc ? parseMarkdownOutline(content) : const [];
+        _activeOutline = activeOutlineIndex(_outline, 0);
+        _activeLine = 0;
         _loading = false;
       });
       _registerAgentRef();
@@ -310,6 +477,7 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
 
   @override
   void dispose() {
+    _outlineDebounce?.cancel();
     _controller.removeListener(_onControllerChanged);
     // 延后到下一帧移除保存注册，避免在 dispose 期间修改 provider
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -332,6 +500,7 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
     }
 
     final isMarkdown = widget.path.endsWith('.md');
+    final fileName = widget.path.split(Platform.pathSeparator).last;
 
     return Column(
       children: [
@@ -350,12 +519,28 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
               const SizedBox(width: 6),
               Expanded(
                 child: Text(
-                  widget.path,
+                  isMarkdown ? fileName : widget.path,
                   style: const TextStyle(fontSize: 12, color: Colors.grey),
                   overflow: TextOverflow.ellipsis,
                 ),
               ),
               if (isMarkdown) ...[
+                IconButton(
+                  icon: Icon(
+                    ref.watch(outlinePinnedProvider)
+                        ? Icons.list_alt
+                        : Icons.list_alt_outlined,
+                    size: 18,
+                  ),
+                  padding: EdgeInsets.zero,
+                  constraints:
+                      const BoxConstraints(minWidth: 32, minHeight: 32),
+                  tooltip: '大纲 (Ctrl+Shift+O)',
+                  onPressed: () {
+                    final pinned = ref.read(outlinePinnedProvider);
+                    ref.read(outlinePinnedProvider.notifier).state = !pinned;
+                  },
+                ),
                 IconButton(
                   icon: Icon(
                     _showPreview ? Icons.edit_note : Icons.visibility_outlined,
@@ -380,7 +565,7 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
                   Container(
                     width: 8,
                     height: 8,
-                    decoration: BoxDecoration(
+                    decoration: const BoxDecoration(
                       color: Colors.orange,
                       shape: BoxShape.circle,
                     ),
@@ -389,47 +574,203 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
             ],
           ),
         ),
+        if (isMarkdown) _buildHeadingBreadcrumb(context, fileName),
         const Divider(height: 1),
         Expanded(
           child: (_showPreview && isMarkdown)
               ? _buildPreview(context)
-              : Padding(
-                  padding: const EdgeInsets.all(4),
-                  child: KeyboardListener(
-                    focusNode: _editorFocus,
-                    onKeyEvent: (event) {
-                      if (event is KeyDownEvent &&
-                          HardwareKeyboard.instance.isControlPressed &&
-                          event.logicalKey == LogicalKeyboardKey.keyS) {
-                        _save();
-                      }
-                    },
-                    child: TextField(
-                      controller: _controller,
-                      onChanged: (_) {
-                        setState(() => _isDirty = true);
-                        ref.read(dirtyFilesProvider.notifier).update((s) {
-                          if (s.contains(widget.path)) return s;
-                          return {...s, widget.path};
-                        });
-                      },
-                      maxLines: null,
-                      expands: true,
-                      keyboardType: TextInputType.multiline,
-                      style: TextStyle(
-                        fontSize: ref.watch(editorFontSizeProvider),
-                        height: 1.6,
-                        fontFamily: 'Consolas',
-                      ),
-                      decoration: const InputDecoration(
-                        border: InputBorder.none,
-                        contentPadding: EdgeInsets.all(8),
-                      ),
-                    ),
-                  ),
-                ),
+              : _buildCodeEditor(context, isMarkdown),
         ),
       ],
+    );
+  }
+
+  /// 顶部粘性标题预览：以 # / ## / ### 展示当前章节链；正文区独立滚动。
+  Widget _buildHeadingBreadcrumb(BuildContext context, String fileName) {
+    final theme = Theme.of(context);
+    final trail = outlineBreadcrumb(_outline, _activeOutline);
+    final muted = theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.5);
+    final hashColor = theme.brightness == Brightness.dark
+        ? const Color(0xFF5A7A9A)
+        : const Color(0xFF6E7781);
+    final titleColor = theme.brightness == Brightness.dark
+        ? const Color(0xFF79B8FF)
+        : const Color(0xFF0550AE);
+
+    void jump(OutlineHeading h) {
+      if (_showPreview) {
+        setState(() => _showPreview = false);
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) _jumpToHeading(h);
+        });
+      } else {
+        _jumpToHeading(h);
+      }
+    }
+
+    return Material(
+      color: theme.colorScheme.surfaceContainerLow.withValues(alpha: 0.9),
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.fromLTRB(12, 6, 12, 8),
+        decoration: BoxDecoration(
+          border: Border(
+            bottom: BorderSide(
+              color: theme.dividerColor.withValues(alpha: 0.35),
+            ),
+          ),
+        ),
+        child: trail.isEmpty
+            ? Text(
+                '（无标题 · 正文）',
+                style: TextStyle(fontSize: 12, color: muted, height: 1.35),
+              )
+            : Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  for (var i = 0; i < trail.length; i++) ...[
+                    if (i > 0) const SizedBox(height: 2),
+                    InkWell(
+                      onTap: () => jump(trail[i]),
+                      borderRadius: BorderRadius.circular(3),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 1),
+                        child: Text.rich(
+                          TextSpan(
+                            style: TextStyle(
+                              fontFamily: 'Consolas',
+                              fontSize: (15.5 - trail[i].level * 0.6)
+                                  .clamp(12.0, 15.0),
+                              height: 1.35,
+                              fontWeight: i == trail.length - 1
+                                  ? FontWeight.w700
+                                  : FontWeight.w500,
+                            ),
+                            children: [
+                              TextSpan(
+                                text: '${'#' * trail[i].level} ',
+                                style: TextStyle(color: hashColor),
+                              ),
+                              TextSpan(
+                                text: trail[i].title,
+                                style: TextStyle(
+                                  color: i == trail.length - 1
+                                      ? titleColor
+                                      : titleColor.withValues(alpha: 0.72),
+                                ),
+                              ),
+                            ],
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+      ),
+    );
+  }
+
+  Widget _buildCodeEditor(BuildContext context, bool isMarkdown) {
+    final fontSize = ref.watch(editorFontSizeProvider);
+    final pinned = ref.watch(outlinePinnedProvider);
+    final theme = Theme.of(context);
+
+    return CallbackShortcuts(
+      bindings: {
+        const SingleActivator(LogicalKeyboardKey.keyS, control: true): _save,
+        const SingleActivator(
+          LogicalKeyboardKey.keyO,
+          control: true,
+          shift: true,
+        ): () {
+          if (!isMarkdown) return;
+          final p = ref.read(outlinePinnedProvider);
+          ref.read(outlinePinnedProvider.notifier).state = !p;
+        },
+      },
+      child: ColoredBox(
+        color: theme.colorScheme.surface,
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            if (isMarkdown)
+              OutlineRail(
+                headings: _outline,
+                activeIndex: _activeOutline,
+                pinned: pinned,
+                onPinnedChanged: (v) =>
+                    ref.read(outlinePinnedProvider.notifier).state = v,
+                onJump: _jumpToHeading,
+              ),
+            DecoratedBox(
+              decoration: BoxDecoration(
+                border: Border(
+                  right: BorderSide(
+                    color: theme.dividerColor.withValues(alpha: 0.35),
+                  ),
+                ),
+                color: theme.colorScheme.surfaceContainerLow
+                    .withValues(alpha: 0.5),
+              ),
+              child: LineNumberGutter(
+                scrollOffset: _scrollOffset,
+                lineCount: _lineCount,
+                fontSize: fontSize,
+                lineHeightFactor: _lineHeightFactor,
+                contentPadding: _editorPadding,
+                activeLine: _activeLine,
+              ),
+            ),
+            Expanded(
+              child: NotificationListener<ScrollNotification>(
+                onNotification: (n) {
+                  if (n.metrics.axis != Axis.vertical) return false;
+                  if (n.depth != 0) return false;
+                  final pixels = n.metrics.pixels;
+                  final viewport = n.metrics.viewportDimension;
+                  if ((pixels - _scrollOffset).abs() > 0.5 ||
+                      (viewport - _viewportHeight).abs() > 0.5) {
+                    setState(() {
+                      _scrollOffset = pixels;
+                      _viewportHeight = viewport;
+                    });
+                    _refreshActiveOutlineFromViewport();
+                  }
+                  return false;
+                },
+                child: TextField(
+                  key: _editorFieldKey,
+                  controller: _controller,
+                  focusNode: _editorFocus,
+                  onChanged: (_) {
+                    setState(() => _isDirty = true);
+                    ref.read(dirtyFilesProvider.notifier).update((s) {
+                      if (s.contains(widget.path)) return s;
+                      return {...s, widget.path};
+                    });
+                  },
+                  maxLines: null,
+                  expands: true,
+                  keyboardType: TextInputType.multiline,
+                  style: TextStyle(
+                    fontSize: fontSize,
+                    height: _lineHeightFactor,
+                    fontFamily: 'Consolas',
+                  ),
+                  decoration: const InputDecoration(
+                    border: InputBorder.none,
+                    contentPadding: _editorPadding,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 
