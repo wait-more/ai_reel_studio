@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -7,9 +8,11 @@ import 'package:xterm/xterm.dart';
 import '../../core/agent_bridge.dart';
 import '../../core/config.dart';
 import '../../core/providers.dart';
+import '../../core/shell_session_memory.dart';
+import '../../core/toast.dart';
 import 'terminal_session.dart';
 
-/// Shell 面板：真实 PTY 终端，支持多 Tab 与快捷启动。
+/// Shell 面板：真实 PTY 终端，支持多 Tab、快捷启动与会话级恢复（一期）。
 class ShellPanel extends ConsumerStatefulWidget {
   const ShellPanel({super.key});
 
@@ -20,6 +23,8 @@ class ShellPanel extends ConsumerStatefulWidget {
 class _ShellPanelState extends ConsumerState<ShellPanel> {
   final List<_ShellTab> _tabs = [];
   int _activeIndex = 0;
+  bool _bootstrapped = false;
+  bool _restoring = false;
 
   /// 新终端默认 cwd：项目 scripts 根目录。
   String? get _projectRoot {
@@ -30,14 +35,77 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
   @override
   void initState() {
     super.initState();
-    _tabs.add(_ShellTab(
-      session: TerminalSession()..start(workingDirectory: _projectRoot),
-    ));
-    WidgetsBinding.instance.addPostFrameCallback((_) => _registerHost());
+    _bootstrap();
+  }
+
+  Future<void> _bootstrap() async {
+    final root = _projectRoot ?? '';
+    final snap = await ShellSessionMemory.instance.loadFor(root);
+    if (!mounted) return;
+
+    ref.read(shellVisibleProvider.notifier).state = snap.shellVisible;
+
+    if (snap.tabs.isEmpty) {
+      _tabs.add(_ShellTab(
+        session: TerminalSession()..start(workingDirectory: _projectRoot),
+        cwd: _projectRoot,
+      ));
+      _activeIndex = 0;
+      setState(() => _bootstrapped = true);
+      _registerHost();
+      _schedulePersist();
+      return;
+    }
+
+    _restoring = true;
+    for (final t in List.of(_tabs)) {
+      t.dispose();
+    }
+    _tabs.clear();
+
+    for (final t in snap.tabs) {
+      final cwd = (t.cwd != null && t.cwd!.isNotEmpty) ? t.cwd : _projectRoot;
+      _tabs.add(_ShellTab(
+        session: TerminalSession()..start(workingDirectory: cwd),
+        cwd: cwd,
+        launchCommand: t.launchCommand,
+        launchedAgentHint: t.agentHint,
+      ));
+    }
+    _activeIndex = snap.activeIndex.clamp(0, _tabs.length - 1);
+    setState(() => _bootstrapped = true);
+    _registerHost();
+
+    // 等各 Tab 的 cwd 切入完成后再重拉启动命令
+    await Future<void>.delayed(const Duration(milliseconds: 750));
+    if (!mounted) return;
+
+    var relaunched = 0;
+    for (final tab in _tabs) {
+      final cmd = tab.launchCommand?.trim();
+      if (cmd == null || cmd.isEmpty) continue;
+      final label = tab.launchedAgentHint ?? cmd.split(RegExp(r'\s+')).first;
+      tab.session.terminal.write(
+        '\r\n\x1b[90m[已恢复会话：$label'
+        '${tab.cwd != null && tab.cwd!.isNotEmpty ? ' @ ${tab.cwd}' : ''}]'
+        '\x1b[0m\r\n',
+      );
+      tab.session.sendCommand(cmd);
+      relaunched++;
+    }
+    _restoring = false;
+    _schedulePersist();
+
+    if (relaunched > 0 && mounted) {
+      showGlobalToast(context, '已恢复 $relaunched 个 Shell/智能体会话');
+    } else if (snap.tabs.length > 1 && mounted) {
+      showGlobalToast(context, '已恢复 ${snap.tabs.length} 个终端标签');
+    }
   }
 
   @override
   void dispose() {
+    _persistNow();
     ref.read(shellAgentHostProvider.notifier).state = null;
     for (final t in _tabs) {
       t.dispose();
@@ -60,12 +128,13 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
     final tab = _tabs[_activeIndex];
     final recent = tab.session.recentBufferText();
     if (terminalTextLooksLikeAgent(recent)) return true;
-    // 快捷启动打过标记，且近期缓冲仍能对上关键字时才算（避免纯 PS 误放行）
     final hint = tab.launchedAgentHint;
-    if (hint != null &&
-        hint.isNotEmpty &&
-        recent.toLowerCase().contains(hint.toLowerCase())) {
-      return true;
+    if (hint != null && hint.isNotEmpty) {
+      // 会话恢复后缓冲里可能还没刷出关键字，有启动命令则仍视为智能体 Tab
+      if (tab.launchCommand != null && tab.launchCommand!.trim().isNotEmpty) {
+        return true;
+      }
+      if (recent.toLowerCase().contains(hint.toLowerCase())) return true;
     }
     return false;
   }
@@ -85,26 +154,57 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
   void _focusActiveTerminal() {
     if (_tabs.isEmpty) return;
     final node = _tabs[_activeIndex].focusNode;
-    // 展开 Shell / IndexedStack 切页后需等一帧再抢焦点
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       node.requestFocus();
     });
   }
 
+  ShellSessionSnapshot _captureSnapshot() {
+    return ShellSessionSnapshot(
+      projectRoot: _projectRoot ?? '',
+      activeIndex: _activeIndex,
+      shellVisible: ref.read(shellVisibleProvider),
+      tabs: [
+        for (final t in _tabs)
+          ShellTabSnapshot(
+            kind: (t.launchedAgentHint != null &&
+                    t.launchedAgentHint!.isNotEmpty)
+                ? 'agent'
+                : 'shell',
+            cwd: t.cwd ?? t.session.workingDirectory,
+            launchCommand: t.launchCommand,
+            agentHint: t.launchedAgentHint,
+          ),
+      ],
+    );
+  }
+
+  void _schedulePersist() {
+    if (!_bootstrapped || _restoring) return;
+    ShellSessionMemory.instance.scheduleSave(_captureSnapshot());
+  }
+
+  void _persistNow() {
+    if (!_bootstrapped) return;
+    unawaited(ShellSessionMemory.instance.saveNow(_captureSnapshot()));
+  }
+
   void _newTab({String? workingDirectory}) {
+    final cwd = workingDirectory ?? _projectRoot;
     setState(() {
       _tabs.add(_ShellTab(
-        session: TerminalSession()
-          ..start(workingDirectory: workingDirectory ?? _projectRoot),
+        session: TerminalSession()..start(workingDirectory: cwd),
+        cwd: cwd,
       ));
       _activeIndex = _tabs.length - 1;
     });
     _registerHost();
+    _schedulePersist();
   }
 
   void _closeTab(int index) {
-    if (_tabs.length == 1) return; // 至少保留一个终端
+    if (_tabs.length == 1) return;
     setState(() {
       _tabs.removeAt(index).dispose();
       if (_activeIndex >= _tabs.length) {
@@ -114,6 +214,7 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
       }
     });
     _registerHost();
+    _schedulePersist();
   }
 
   String? _resolveCwd(CwdStrategy strategy) {
@@ -134,10 +235,11 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
   bool _isAgentLaunchCmd(StartCmd cmd) =>
       commandLooksLikeAgent(cmd.command) || commandLooksLikeAgent(cmd.name);
 
-  /// 在指定 Tab 执行快捷启动（cwd 已由会话启动目录处理时可只发命令）。
   void _executeOnTab(_ShellTab tab, StartCmd cmd, {required bool includeCd}) {
     final session = tab.session;
     final cwd = _resolveCwd(cmd.cwd);
+    tab.cwd = cwd;
+    tab.launchCommand = cmd.command;
     if (includeCd && cwd != null && cwd.isNotEmpty) {
       final line = Platform.isWindows
           ? 'Set-Location -LiteralPath "$cwd"; ${cmd.command}'
@@ -151,11 +253,10 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
       tab.launchedAgentHint = token.isNotEmpty ? token : cmd.name;
       setState(() {});
     }
+    _schedulePersist();
   }
 
   Future<void> _runStartCmd(StartCmd cmd) async {
-    // 已在智能体（非纯 PowerShell）中再点智能体按钮：勿往当前输入框塞命令，
-    // 询问是否新开标签页启动。
     if (_isAgentLaunchCmd(cmd) && _isActiveTabAgent()) {
       final openNew = await showDialog<bool>(
         context: context,
@@ -180,7 +281,6 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
       final cwd = _resolveCwd(cmd.cwd);
       _newTab(workingDirectory: cwd ?? _projectRoot);
       final tab = _tabs[_activeIndex];
-      // 等新 Shell 就绪（start 内对 UNC/cwd 约有 400ms 延迟）后再发命令
       await Future<void>.delayed(const Duration(milliseconds: 700));
       if (!mounted) return;
       _executeOnTab(tab, cmd, includeCd: false);
@@ -194,6 +294,21 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
   Widget build(BuildContext context) {
     final terminalFontSize = ref.watch(terminalFontSizeProvider);
     final startCmds = ref.watch(startCmdsProvider);
+
+    ref.listen(shellVisibleProvider, (_, __) => _schedulePersist());
+
+    if (!_bootstrapped) {
+      return const ColoredBox(
+        color: Color(0xFF1E1E1E),
+        child: Center(
+          child: SizedBox(
+            width: 18,
+            height: 18,
+            child: CircularProgressIndicator(strokeWidth: 2),
+          ),
+        ),
+      );
+    }
 
     return Container(
       color: const Color(0xFF1E1E1E),
@@ -241,6 +356,7 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
                   onTap: () {
                     setState(() => _activeIndex = index);
                     _registerHost();
+                    _schedulePersist();
                   },
                   child: Container(
                     margin: const EdgeInsets.symmetric(
@@ -305,7 +421,8 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
         children: [
           for (final cmd in commands)
             ActionChip(
-              avatar: const Icon(Icons.play_arrow, size: 14, color: Colors.white70),
+              avatar:
+                  const Icon(Icons.play_arrow, size: 14, color: Colors.white70),
               label: Text(cmd.name, style: const TextStyle(fontSize: 11)),
               backgroundColor: const Color(0xFF3D3D3D),
               labelStyle: const TextStyle(color: Colors.white),
@@ -323,9 +440,16 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
 class _ShellTab {
   final TerminalSession session;
   final FocusNode focusNode = FocusNode();
-  /// 通过快捷启动打上的智能体线索（命令首词），供检测与 Tab 标题使用。
+  String? cwd;
+  String? launchCommand;
   String? launchedAgentHint;
-  _ShellTab({required this.session});
+
+  _ShellTab({
+    required this.session,
+    this.cwd,
+    this.launchCommand,
+    this.launchedAgentHint,
+  });
 
   void dispose() {
     focusNode.dispose();
