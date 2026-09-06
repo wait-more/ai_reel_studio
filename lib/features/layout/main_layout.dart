@@ -135,10 +135,10 @@ class _MainLayoutState extends ConsumerState<MainLayout> {
                     Expanded(
                       child: IndexedStack(
                         index:
-                            ref.watch(contentModeProvider) == 'assets' ? 1 : 0,
+                            ref.watch(contentModeProvider) == 'editor' ? 1 : 0,
                         children: const [
-                          MarkdownEditor(),
                           AssetGridView(),
+                          MarkdownEditor(),
                         ],
                       ),
                     ),
@@ -169,9 +169,9 @@ class _MainLayoutState extends ConsumerState<MainLayout> {
       padding: const EdgeInsets.symmetric(horizontal: 8),
       child: Row(
         children: [
-          _modeChip(context, 'editor', '文档', mode, tabCount > 0 ? ' ${tabCount}' : ''),
-          const SizedBox(width: 8),
           _modeChip(context, 'assets', '素材', mode, ''),
+          const SizedBox(width: 8),
+          _modeChip(context, 'editor', '文档', mode, tabCount > 0 ? ' $tabCount' : ''),
           const Spacer(),
         ],
       ),

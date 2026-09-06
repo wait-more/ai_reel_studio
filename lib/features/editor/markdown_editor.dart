@@ -44,33 +44,67 @@ class MarkdownEditor extends ConsumerWidget {
     return Container(
       height: 36,
       color: Theme.of(context).colorScheme.surfaceContainerHigh,
-      child: ListView.builder(
+      child: ReorderableListView.builder(
         scrollDirection: Axis.horizontal,
+        buildDefaultDragHandles: false,
+        onReorder: (oldIndex, newIndex) {
+          final list = List<String>.of(ref.read(openTabsProvider));
+          if (newIndex > oldIndex) newIndex -= 1;
+          final item = list.removeAt(oldIndex);
+          list.insert(newIndex, item);
+          ref.read(openTabsProvider.notifier).state = list;
+        },
+        proxyDecorator: (child, index, animation) {
+          return AnimatedBuilder(
+            animation: animation,
+            builder: (context, child) {
+              final t = Curves.easeInOut.transform(animation.value);
+              return Material(
+                elevation: 2 + 4 * t,
+                borderRadius: BorderRadius.circular(6),
+                color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                child: child,
+              );
+            },
+            child: child,
+          );
+        },
         itemCount: tabs.length,
         itemBuilder: (context, index) {
           final path = tabs[index];
           final isSelected = path == selected;
-          return InkWell(
-            onTap: () => ref.read(selectedFileProvider.notifier).state = path,
-            child: Container(
-              margin: const EdgeInsets.symmetric(vertical: 3, horizontal: 2),
-              padding: const EdgeInsets.symmetric(horizontal: 10),
-              decoration: BoxDecoration(
-                color: isSelected ? Colors.white12 : null,
-                borderRadius: BorderRadius.circular(6),
-              ),
-              child: Row(
-                children: [
-                  Text(
-                    path.split(Platform.pathSeparator).last,
-                    style: const TextStyle(fontSize: 12),
-                  ),
-                  const SizedBox(width: 4),
-                  GestureDetector(
-                    onTap: () => _closeTab(context, path, ref),
-                    child: const Icon(Icons.close, size: 14, color: Colors.grey),
-                  ),
-                ],
+          return ReorderableDragStartListener(
+            key: ValueKey(path),
+            index: index,
+            child: InkWell(
+              onTap: () =>
+                  ref.read(selectedFileProvider.notifier).state = path,
+              child: Container(
+                margin: const EdgeInsets.symmetric(vertical: 3, horizontal: 2),
+                padding: const EdgeInsets.symmetric(horizontal: 10),
+                decoration: BoxDecoration(
+                  color: isSelected
+                      ? Theme.of(context)
+                          .colorScheme
+                          .primary
+                          .withValues(alpha: 0.15)
+                      : null,
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      path.split(Platform.pathSeparator).last,
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                    const SizedBox(width: 4),
+                    GestureDetector(
+                      onTap: () => _closeTab(context, path, ref),
+                      child: const Icon(Icons.close, size: 14, color: Colors.grey),
+                    ),
+                  ],
+                ),
               ),
             ),
           );
@@ -589,7 +623,8 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
     }
 
     final isMarkdown = widget.path.endsWith('.md');
-    final fileName = widget.path.split(Platform.pathSeparator).last;
+    final relPath = relativeProjectPath(widget.path);
+    final pathLabel = relPath.isNotEmpty ? relPath : widget.path;
 
     return Column(
       children: [
@@ -607,10 +642,14 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
               ),
               const SizedBox(width: 6),
               Expanded(
-                child: Text(
-                  isMarkdown ? fileName : widget.path,
-                  style: const TextStyle(fontSize: 12, color: Colors.grey),
-                  overflow: TextOverflow.ellipsis,
+                child: Tooltip(
+                  message: widget.path,
+                  waitDuration: const Duration(milliseconds: 400),
+                  child: Text(
+                    pathLabel,
+                    style: const TextStyle(fontSize: 12, color: Colors.grey),
+                    overflow: TextOverflow.ellipsis,
+                  ),
                 ),
               ),
               if (isMarkdown) ...[
@@ -663,7 +702,7 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
             ],
           ),
         ),
-        if (isMarkdown) _buildHeadingBreadcrumb(context, fileName),
+        if (isMarkdown) _buildHeadingBreadcrumb(context, pathLabel),
         const Divider(height: 1),
         Expanded(
           child: (_showPreview && isMarkdown)
