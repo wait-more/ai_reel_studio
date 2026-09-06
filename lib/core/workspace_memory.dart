@@ -6,13 +6,38 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'config.dart';
 
-/// 工作区快照：目录树展开 + 中间栏（模式/Tabs/选中）。
+/// 单个文档的阅读/编辑位置。
+class EditorViewState {
+  final int caretOffset;
+  final double scrollOffset;
+
+  const EditorViewState({
+    this.caretOffset = 0,
+    this.scrollOffset = 0,
+  });
+
+  Map<String, dynamic> toJson() => {
+        'caret': caretOffset,
+        'scroll': scrollOffset,
+      };
+
+  factory EditorViewState.fromJson(Map<String, dynamic> json) {
+    return EditorViewState(
+      caretOffset: (json['caret'] as num?)?.toInt() ?? 0,
+      scrollOffset: (json['scroll'] as num?)?.toDouble() ?? 0,
+    );
+  }
+}
+
+/// 工作区快照：目录树展开 + 中间栏（模式/Tabs/选中）+ 文档位置。
 class WorkspaceSnapshot {
   final List<String> expandedPaths;
   final List<String> openTabs;
   final String? selectedFile;
   final String? selectedDir;
   final String contentMode;
+  /// 路径 → 光标/滚动位置
+  final Map<String, EditorViewState> fileViews;
 
   const WorkspaceSnapshot({
     this.expandedPaths = const [],
@@ -20,6 +45,7 @@ class WorkspaceSnapshot {
     this.selectedFile,
     this.selectedDir,
     this.contentMode = 'editor',
+    this.fileViews = const {},
   });
 
   Map<String, dynamic> toJson() => {
@@ -28,6 +54,9 @@ class WorkspaceSnapshot {
         'selectedFile': selectedFile,
         'selectedDir': selectedDir,
         'contentMode': contentMode,
+        'fileViews': {
+          for (final e in fileViews.entries) e.key: e.value.toJson(),
+        },
       };
 
   factory WorkspaceSnapshot.fromJson(Map<String, dynamic> json) {
@@ -37,12 +66,30 @@ class WorkspaceSnapshot {
     }
 
     final mode = json['contentMode'] as String? ?? 'editor';
+    final viewsRaw = json['fileViews'];
+    final views = <String, EditorViewState>{};
+    if (viewsRaw is Map) {
+      for (final e in viewsRaw.entries) {
+        final key = e.key;
+        final val = e.value;
+        if (key is! String) continue;
+        if (val is Map<String, dynamic>) {
+          views[key] = EditorViewState.fromJson(val);
+        } else if (val is Map) {
+          views[key] = EditorViewState.fromJson(
+            val.map((k, v) => MapEntry(k.toString(), v)),
+          );
+        }
+      }
+    }
+
     return WorkspaceSnapshot(
       expandedPaths: asStringList(json['expandedPaths']),
       openTabs: asStringList(json['openTabs']),
       selectedFile: json['selectedFile'] as String?,
       selectedDir: json['selectedDir'] as String?,
       contentMode: (mode == 'assets' || mode == 'editor') ? mode : 'editor',
+      fileViews: views,
     );
   }
 
@@ -81,6 +128,10 @@ class WorkspaceSnapshot {
       selectedFile: file,
       selectedDir: dir,
       contentMode: contentMode,
+      fileViews: {
+        for (final e in fileViews.entries)
+          if (alive(e.key)) e.key: e.value,
+      },
     );
   }
 }
@@ -105,7 +156,7 @@ class WorkspaceMemory {
     }
   }
 
-  /// 立即写入（启动恢复后的首次、或关键前可调用）。
+  /// 立刻写入（启动恢复后的首次、或关闭前可调用）。
   Future<void> saveNow(WorkspaceSnapshot snap) async {
     _debounce?.cancel();
     final prefs = await SharedPreferences.getInstance();

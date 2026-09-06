@@ -40,6 +40,10 @@ void main() async {
     container.read(expandedTreePathsProvider.notifier).state =
         workspace.expandedPaths;
   }
+  if (workspace.fileViews.isNotEmpty) {
+    container.read(editorViewStatesProvider.notifier).state =
+        Map.of(workspace.fileViews);
+  }
 
   runApp(UncontrolledProviderScope(
     container: container,

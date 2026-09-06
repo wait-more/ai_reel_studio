@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'config.dart';
 import 'directory_parser.dart';
 import 'key_chord.dart';
+import 'workspace_memory.dart';
 
 /// 当前选中的文件路径（在编辑区打开）
 final selectedFileProvider = StateProvider<String?>((ref) => null);
@@ -12,6 +13,10 @@ final selectedDirProvider = StateProvider<String?>((ref) => null);
 
 /// 已打开的 Tab 文件路径列表
 final openTabsProvider = StateProvider<List<String>>((ref) => []);
+
+/// 各文档光标/滚动位置（供工作区记忆持久化与恢复）。
+final editorViewStatesProvider =
+    StateProvider<Map<String, EditorViewState>>((ref) => {});
 
 /// 右面板（Shell）是否可见
 final shellVisibleProvider = StateProvider<bool>((ref) => true);

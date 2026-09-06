@@ -31,6 +31,7 @@ class _MainLayoutState extends ConsumerState<MainLayout> {
       selectedFile: ref.read(selectedFileProvider),
       selectedDir: ref.read(selectedDirProvider),
       contentMode: ref.read(contentModeProvider),
+      fileViews: ref.read(editorViewStatesProvider),
     );
     _lastWorkspaceSnap = snap;
     WorkspaceMemory.instance.scheduleSave(snap);
@@ -92,6 +93,7 @@ class _MainLayoutState extends ConsumerState<MainLayout> {
     ref.listen(selectedDirProvider, (_, __) => _persistWorkspace());
     ref.listen(contentModeProvider, (_, __) => _persistWorkspace());
     ref.listen(expandedTreePathsProvider, (_, __) => _persistWorkspace());
+    ref.listen(editorViewStatesProvider, (_, __) => _persistWorkspace());
 
     return CallbackShortcuts(
       bindings: {

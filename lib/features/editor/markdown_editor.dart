@@ -6,6 +6,7 @@ import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/agent_bridge.dart';
 import '../../core/providers.dart';
+import '../../core/workspace_memory.dart';
 import 'line_number_gutter.dart';
 import 'markdown_highlight_controller.dart';
 import 'markdown_outline.dart';
@@ -187,6 +188,8 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
   int _activeLine = 0;
   int _lineCount = 1;
   Timer? _outlineDebounce;
+  Timer? _viewPersistDebounce;
+  bool _restoringView = false;
 
   /// 记住最近一次非空选区。快捷键触发时 TextField 选区常被收成光标，
   /// 若只用当前 selection 会把多行误判成单行。
@@ -213,6 +216,29 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
     }
     _refreshCaretLine();
     _scheduleOutlineRebuild();
+    if (!_restoringView) _schedulePersistView();
+  }
+
+  void _schedulePersistView() {
+    if (_isDir || _loading) return;
+    _viewPersistDebounce?.cancel();
+    _viewPersistDebounce = Timer(const Duration(milliseconds: 400), () {
+      if (!mounted || _isDir) return;
+      _flushPersistView();
+    });
+  }
+
+  void _flushPersistView() {
+    final caret =
+        _controller.selection.baseOffset.clamp(0, _controller.text.length);
+    final next = Map<String, EditorViewState>.of(
+      ref.read(editorViewStatesProvider),
+    );
+    next[widget.path] = EditorViewState(
+      caretOffset: caret,
+      scrollOffset: _scrollOffset,
+    );
+    ref.read(editorViewStatesProvider.notifier).state = next;
   }
 
   /// TextField 内部 Scrollable。
@@ -336,6 +362,7 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
           _scrollOffset = target;
           _viewportHeight = pos.viewportDimension;
         });
+        if (!_restoringView) _schedulePersistView();
       }
       return true;
     }
@@ -440,6 +467,9 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
         _loading = false;
       });
       _registerAgentRef();
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _restoreViewState();
+      });
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -450,6 +480,58 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('无法读取文件: $e')),
       );
+    }
+  }
+
+  Future<void> _restoreViewState() async {
+    final saved = ref.read(editorViewStatesProvider)[widget.path];
+    if (saved == null || _isDir) return;
+
+    final caret = saved.caretOffset.clamp(0, _controller.text.length);
+    final style = TextStyle(
+      fontSize: ref.read(editorFontSizeProvider),
+      height: _lineHeightFactor,
+      fontFamily: 'Consolas',
+    );
+
+    _restoringView = true;
+    try {
+      _editorFocus.requestFocus();
+      await WidgetsBinding.instance.endOfFrame;
+      if (!mounted) return;
+
+      void pinScroll(double desired) {
+        final pos = _editorScrollPosition();
+        if (pos == null || !pos.hasContentDimensions) return;
+        final target = desired.clamp(0.0, pos.maxScrollExtent);
+        if ((pos.pixels - target).abs() > 0.5) {
+          pos.jumpTo(target);
+        }
+        setState(() {
+          _scrollOffset = target;
+          _viewportHeight = pos.viewportDimension;
+          _activeLine = lineIndexOfOffset(_controller.text, caret);
+          _activeOutline = activeOutlineIndex(_outline, _activeLine);
+        });
+      }
+
+      // 优先用记下的滚动；若异常再按光标估算
+      var scrollTarget = saved.scrollOffset;
+      if (scrollTarget < 0) {
+        scrollTarget = _measureDocY(caret, style) - _viewportHeight * 0.25;
+      }
+      pinScroll(scrollTarget);
+      await WidgetsBinding.instance.endOfFrame;
+      if (!mounted) return;
+
+      _controller.selection = TextSelection.collapsed(offset: caret);
+      final deadline = DateTime.now().add(const Duration(milliseconds: 200));
+      while (mounted && DateTime.now().isBefore(deadline)) {
+        await WidgetsBinding.instance.endOfFrame;
+        pinScroll(scrollTarget);
+      }
+    } finally {
+      _restoringView = false;
     }
   }
 
@@ -478,6 +560,13 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
   @override
   void dispose() {
     _outlineDebounce?.cancel();
+    _viewPersistDebounce?.cancel();
+    // 关闭 Tab / 切换文件前尽量落盘当前位置
+    try {
+      if (!_isDir && !_loading) {
+        _flushPersistView();
+      }
+    } catch (_) {}
     _controller.removeListener(_onControllerChanged);
     // 延后到下一帧移除保存注册，避免在 dispose 期间修改 provider
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -739,6 +828,7 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
                       _viewportHeight = viewport;
                     });
                     _refreshActiveOutlineFromViewport();
+                    if (!_restoringView) _schedulePersistView();
                   }
                   return false;
                 },
