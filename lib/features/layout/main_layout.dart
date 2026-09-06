@@ -79,6 +79,8 @@ class _MainLayoutState extends ConsumerState<MainLayout> {
       showGlobalToast(context, '填入失败');
       return;
     }
+    ref.read(agentRefPreserveSelectionProvider)?.call();
+    host.focusInput();
     showGlobalToast(context, '已填入 $refText');
   }
 

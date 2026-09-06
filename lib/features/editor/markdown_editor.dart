@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
@@ -8,9 +9,11 @@ import '../../core/agent_bridge.dart';
 import '../../core/providers.dart';
 import '../../core/workspace_memory.dart';
 import 'line_number_gutter.dart';
+import 'line_selection_overlay.dart';
 import 'markdown_highlight_controller.dart';
 import 'markdown_outline.dart';
 import 'outline_rail.dart';
+import 'wrap_line_metrics.dart';
 
 /// 大纲是否钉住（会话内保持）。
 final outlinePinnedProvider = StateProvider<bool>((ref) => false);
@@ -211,6 +214,8 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
   final GlobalKey _editorFieldKey = GlobalKey();
   double _scrollOffset = 0;
   double _viewportHeight = 400;
+  WrapLineMetrics? _wrapMetrics;
+  String? _wrapSyncFingerprint;
   bool _isDir = false;
   bool _loading = true;
   bool _isDirty = false;
@@ -225,9 +230,11 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
   Timer? _viewPersistDebounce;
   bool _restoringView = false;
 
-  /// 记住最近一次非空选区。快捷键触发时 TextField 选区常被收成光标，
-  /// 若只用当前 selection 会把多行误判成单行。
+  /// 记住最近一次非空选区。快捷键/失焦时 TextField 常收成光标或隐藏高亮。
   TextSelection? _rememberedRange;
+
+  /// 恢复选区时忽略 controller 回调，避免记忆被冲掉。
+  bool _freezeSelection = false;
 
   static const _editorPadding = EdgeInsets.all(8);
   static const _lineHeightFactor = 1.6;
@@ -236,6 +243,7 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
   void initState() {
     super.initState();
     _controller.addListener(_onControllerChanged);
+    _editorFocus.addListener(_onEditorFocusChanged);
     // 延后到首帧构建完成后注册，避免在 build 期间修改 provider
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) _registerSave();
@@ -243,10 +251,52 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
     _load();
   }
 
+  void _onEditorFocusChanged() {
+    if (_editorFocus.hasFocus) {
+      // 回到编辑器：把记忆选区写回 controller，由原生高亮绘制
+      final pin = _rememberedValidSelection();
+      if (pin != null) {
+        _freezeSelection = true;
+        _controller.selection = pin;
+        _freezeSelection = false;
+      }
+    }
+    // 失焦时改为叠加层绘制选区；获焦时去掉叠加层
+    if (mounted) setState(() {});
+  }
+
+  /// 当前应展示/恢复的非空选区。
+  TextSelection? _rememberedValidSelection() {
+    final sel = _controller.selection;
+    if (sel.isValid &&
+        !sel.isCollapsed &&
+        sel.start >= 0 &&
+        sel.end <= _controller.text.length) {
+      return sel;
+    }
+    final r = _rememberedRange;
+    if (r != null &&
+        r.isValid &&
+        !r.isCollapsed &&
+        r.start >= 0 &&
+        r.end <= _controller.text.length) {
+      return r;
+    }
+    return null;
+  }
+
   void _onControllerChanged() {
+    if (_freezeSelection) return;
     final sel = _controller.selection;
     if (sel.isValid && !sel.isCollapsed) {
       _rememberedRange = sel;
+    } else if (sel.isValid && sel.isCollapsed) {
+      // 失焦收成光标：端点仍在原选区内则保留记忆
+      final r = _rememberedRange;
+      if (r != null &&
+          (sel.baseOffset < r.start || sel.baseOffset > r.end)) {
+        _rememberedRange = null;
+      }
     }
     _refreshCaretLine();
     _scheduleOutlineRebuild();
@@ -263,14 +313,18 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
   }
 
   void _flushPersistView() {
-    final caret =
-        _controller.selection.baseOffset.clamp(0, _controller.text.length);
+    final textLen = _controller.text.length;
+    final sel = _rememberedValidSelection();
+    final caret = (sel != null ? sel.extentOffset : _controller.selection.baseOffset)
+        .clamp(0, textLen);
     final next = Map<String, EditorViewState>.of(
       ref.read(editorViewStatesProvider),
     );
     next[widget.path] = EditorViewState(
       caretOffset: caret,
       scrollOffset: _scrollOffset,
+      selectionBase: sel?.baseOffset,
+      selectionExtent: sel?.extentOffset,
     );
     ref.read(editorViewStatesProvider.notifier).state = next;
   }
@@ -315,18 +369,95 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
 
   void _refreshActiveOutlineFromViewport() {
     if (!isMarkdownDoc || _outline.isEmpty) return;
-    final fontSize = ref.read(editorFontSizeProvider);
-    final lineHeight = fontSize * _lineHeightFactor;
-    final firstVisible =
-        ((_scrollOffset - _editorPadding.top) / lineHeight)
-            .floor()
-            .clamp(0, _lineCount - 1);
     if (_editorFocus.hasFocus) {
       _updateActiveOutline(_activeLine);
-    } else {
-      _updateActiveOutline(firstVisible);
+      return;
     }
+    final metrics = _wrapMetrics;
+    if (metrics == null || metrics.lineCount == 0) return;
+    final firstVisible = metrics
+        .lineAtY(_scrollOffset - _editorPadding.top)
+        .clamp(0, metrics.lineCount - 1);
+    _updateActiveOutline(firstVisible);
   }
+
+  TextStyle _editorTextStyle(double fontSize) => TextStyle(
+        fontSize: fontSize,
+        height: _lineHeightFactor,
+        fontFamily: 'Consolas',
+      );
+
+  StrutStyle _editorStrut(double fontSize) => StrutStyle(
+        fontSize: fontSize,
+        height: _lineHeightFactor,
+        fontFamily: 'Consolas',
+        forceStrutHeight: true,
+      );
+
+  WrapLineMetrics _computeWrapMetrics(
+    BuildContext context,
+    double fontSize,
+    double textViewportWidth,
+  ) {
+    final lineHeight = fontSize * _lineHeightFactor;
+    final style = _editorTextStyle(fontSize);
+    final strut = _editorStrut(fontSize);
+    final editableWidth = math.max(
+      40.0,
+      textViewportWidth - _editorPadding.horizontal - kEditableCaretMargin,
+    );
+
+    final InlineSpan span;
+    final c = _controller;
+    if (c is MarkdownHighlightController && c.enabled) {
+      span = c.buildTextSpan(
+        context: context,
+        style: style,
+        withComposing: false,
+      );
+    } else {
+      span = TextSpan(text: _controller.text, style: style);
+    }
+
+    return buildWrapLineMetrics(
+      text: _controller.text,
+      span: span,
+      maxWidth: editableWidth,
+      lineHeight: lineHeight,
+      strutStyle: strut,
+    );
+  }
+
+  /// 布局完成后用 RenderEditable 真值校正行号，消除估高漂移。
+  void _scheduleSyncWrapMetricsFromEditable(
+    String fingerprint,
+    double fontSize,
+  ) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      if (_wrapSyncFingerprint == fingerprint && _wrapMetrics != null) {
+        return;
+      }
+      final editable = findRenderEditable(
+        _editorFieldKey.currentContext?.findRenderObject(),
+      );
+      if (editable == null) return;
+      final next = buildWrapLineMetricsFromEditable(
+        editable: editable,
+        text: _controller.text,
+        lineHeight: fontSize * _lineHeightFactor,
+      );
+      if (next == null) return;
+      final prev = _wrapMetrics;
+      _wrapSyncFingerprint = fingerprint;
+      if (prev != null && prev.nearlyEquals(next)) return;
+      setState(() => _wrapMetrics = next);
+    });
+  }
+
+  String _wrapFingerprint(double fontSize, double textViewportW) =>
+      '${_controller.text.hashCode}:${_controller.text.length}:'
+      '$fontSize:${textViewportW.round()}';
 
   void _updateActiveOutline(int line) {
     final idx = activeOutlineIndex(_outline, line);
@@ -444,12 +575,27 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
         selectionEnd: sel.end,
       );
     };
+    ref.read(agentRefPreserveSelectionProvider.notifier).state =
+        _preserveSelectionAfterAgentRef;
+  }
+
+  /// 快捷键填入后：写回选区并保持记忆，失焦后由字符级叠加层绘制。
+  void _preserveSelectionAfterAgentRef() {
+    if (!mounted || _isDir) return;
+    final pin = _effectiveSelection();
+    if (!pin.isValid || pin.isCollapsed) return;
+    _freezeSelection = true;
+    _rememberedRange = pin;
+    _controller.selection = pin;
+    _freezeSelection = false;
+    if (mounted) setState(() {});
   }
 
   void _unregisterAgentRef() {
     final selected = ref.read(selectedFileProvider);
     if (selected == widget.path) {
       ref.read(agentRefBuilderProvider.notifier).state = null;
+      ref.read(agentRefPreserveSelectionProvider.notifier).state = null;
     }
   }
 
@@ -558,7 +704,19 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
       await WidgetsBinding.instance.endOfFrame;
       if (!mounted) return;
 
-      _controller.selection = TextSelection.collapsed(offset: caret);
+      // 恢复选区（若有），否则折叠光标
+      if (saved.hasSelection) {
+        final base = saved.selectionBase!.clamp(0, _controller.text.length);
+        final extent =
+            saved.selectionExtent!.clamp(0, _controller.text.length);
+        final restored = TextSelection(baseOffset: base, extentOffset: extent);
+        _freezeSelection = true;
+        _rememberedRange = restored;
+        _controller.selection = restored;
+        _freezeSelection = false;
+      } else {
+        _controller.selection = TextSelection.collapsed(offset: caret);
+      }
       final deadline = DateTime.now().add(const Duration(milliseconds: 200));
       while (mounted && DateTime.now().isBefore(deadline)) {
         await WidgetsBinding.instance.endOfFrame;
@@ -602,6 +760,7 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
       }
     } catch (_) {}
     _controller.removeListener(_onControllerChanged);
+    _editorFocus.removeListener(_onEditorFocusChanged);
     // 延后到下一帧移除保存注册，避免在 dispose 期间修改 provider
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _unregisterSave();
@@ -834,67 +993,122 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
                     ref.read(outlinePinnedProvider.notifier).state = v,
                 onJump: _jumpToHeading,
               ),
-            DecoratedBox(
-              decoration: BoxDecoration(
-                border: Border(
-                  right: BorderSide(
-                    color: theme.dividerColor.withValues(alpha: 0.35),
-                  ),
-                ),
-                color: theme.colorScheme.surfaceContainerLow
-                    .withValues(alpha: 0.5),
-              ),
-              child: LineNumberGutter(
-                scrollOffset: _scrollOffset,
-                lineCount: _lineCount,
-                fontSize: fontSize,
-                lineHeightFactor: _lineHeightFactor,
-                contentPadding: _editorPadding,
-                activeLine: _activeLine,
-              ),
-            ),
             Expanded(
-              child: NotificationListener<ScrollNotification>(
-                onNotification: (n) {
-                  if (n.metrics.axis != Axis.vertical) return false;
-                  if (n.depth != 0) return false;
-                  final pixels = n.metrics.pixels;
-                  final viewport = n.metrics.viewportDimension;
-                  if ((pixels - _scrollOffset).abs() > 0.5 ||
-                      (viewport - _viewportHeight).abs() > 0.5) {
-                    setState(() {
-                      _scrollOffset = pixels;
-                      _viewportHeight = viewport;
-                    });
-                    _refreshActiveOutlineFromViewport();
-                    if (!_restoringView) _schedulePersistView();
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  final gutterW =
+                      LineNumberGutter.widthFor(_lineCount, fontSize);
+                  final textViewportW =
+                      math.max(80.0, constraints.maxWidth - gutterW);
+                  final fp = _wrapFingerprint(fontSize, textViewportW);
+                  final WrapLineMetrics metrics;
+                  if (_wrapMetrics != null && _wrapSyncFingerprint == fp) {
+                    metrics = _wrapMetrics!;
+                  } else {
+                    metrics = _computeWrapMetrics(
+                      context,
+                      fontSize,
+                      textViewportW,
+                    );
+                    _wrapMetrics = metrics;
+                    _scheduleSyncWrapMetricsFromEditable(fp, fontSize);
                   }
-                  return false;
+
+                  final textStyle = _editorTextStyle(fontSize);
+                  final revealSel = _rememberedValidSelection();
+                  final showSelOverlay = revealSel != null &&
+                      !_editorFocus.hasFocus;
+
+                  return Row(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      DecoratedBox(
+                        decoration: BoxDecoration(
+                          border: Border(
+                            right: BorderSide(
+                              color: theme.dividerColor
+                                  .withValues(alpha: 0.35),
+                            ),
+                          ),
+                          color: theme.colorScheme.surfaceContainerLow
+                              .withValues(alpha: 0.5),
+                        ),
+                        child: LineNumberGutter(
+                          editorFieldKey: _editorFieldKey,
+                          text: _controller.text,
+                          lineCount: _lineCount,
+                          scrollOffset: _scrollOffset,
+                          fontSize: fontSize,
+                          lineHeight: fontSize * _lineHeightFactor,
+                          activeLine: _activeLine,
+                        ),
+                      ),
+                      Expanded(
+                        child: Stack(
+                          children: [
+                            NotificationListener<ScrollNotification>(
+                              onNotification: (n) {
+                                if (n.metrics.axis != Axis.vertical) {
+                                  return false;
+                                }
+                                if (n.depth != 0) return false;
+                                final pixels = n.metrics.pixels;
+                                final viewport =
+                                    n.metrics.viewportDimension;
+                                if ((pixels - _scrollOffset).abs() > 0.5 ||
+                                    (viewport - _viewportHeight).abs() >
+                                        0.5) {
+                                  setState(() {
+                                    _scrollOffset = pixels;
+                                    _viewportHeight = viewport;
+                                  });
+                                  _refreshActiveOutlineFromViewport();
+                                  if (!_restoringView) {
+                                    _schedulePersistView();
+                                  }
+                                }
+                                return false;
+                              },
+                              child: TextField(
+                                key: _editorFieldKey,
+                                controller: _controller,
+                                focusNode: _editorFocus,
+                                onChanged: (_) {
+                                  setState(() => _isDirty = true);
+                                  ref
+                                      .read(dirtyFilesProvider.notifier)
+                                      .update((s) {
+                                    if (s.contains(widget.path)) return s;
+                                    return {...s, widget.path};
+                                  });
+                                },
+                                maxLines: null,
+                                expands: true,
+                                keyboardType: TextInputType.multiline,
+                                style: textStyle,
+                                strutStyle: _editorStrut(fontSize),
+                                decoration: const InputDecoration(
+                                  border: InputBorder.none,
+                                  contentPadding: _editorPadding,
+                                ),
+                              ),
+                            ),
+                            if (showSelOverlay)
+                              Positioned.fill(
+                                child: SelectionHighlightOverlay(
+                                  editorFieldKey: _editorFieldKey,
+                                  selection: revealSel,
+                                  scrollOffset: _scrollOffset,
+                                  color: theme.colorScheme.primary
+                                      .withValues(alpha: 0.28),
+                                ),
+                              ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  );
                 },
-                child: TextField(
-                  key: _editorFieldKey,
-                  controller: _controller,
-                  focusNode: _editorFocus,
-                  onChanged: (_) {
-                    setState(() => _isDirty = true);
-                    ref.read(dirtyFilesProvider.notifier).update((s) {
-                      if (s.contains(widget.path)) return s;
-                      return {...s, widget.path};
-                    });
-                  },
-                  maxLines: null,
-                  expands: true,
-                  keyboardType: TextInputType.multiline,
-                  style: TextStyle(
-                    fontSize: fontSize,
-                    height: _lineHeightFactor,
-                    fontFamily: 'Consolas',
-                  ),
-                  decoration: const InputDecoration(
-                    border: InputBorder.none,
-                    contentPadding: _editorPadding,
-                  ),
-                ),
               ),
             ),
           ],

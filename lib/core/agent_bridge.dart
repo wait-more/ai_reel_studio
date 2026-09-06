@@ -1,6 +1,7 @@
 import 'dart:io';
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'config.dart';
@@ -96,7 +97,8 @@ String? buildAgentReference({
     return '@$rel';
   }
 
-  // end 为开区间，最后纳入的字符下标是 b-1
+  // end 为开区间，最后纳入的字符下标是 b-1。
+  // 行号与编辑器行号栏一致：按 \\n 计的逻辑行，1-based。
   final startLine = lineNumberAt(text, a);
   final endLine = lineNumberAt(text, b - 1);
   if (startLine == endLine) {
@@ -105,7 +107,7 @@ String? buildAgentReference({
   return '@$rel#L$startLine-L$endLine';
 }
 
-/// 1-based 行号。
+/// 1-based 逻辑行号（与行号栏 `i + 1` 同一规则：只认 `\\n`）。
 int lineNumberAt(String text, int offset) {
   var line = 1;
   final o = offset.clamp(0, text.length);
@@ -123,13 +125,18 @@ class ShellAgentHost {
   final bool Function() isAgentActive;
   final String? Function() agentHint;
   final bool Function(String text) inject;
+  final void Function() focusInput;
 
   const ShellAgentHost({
     required this.isAgentActive,
     required this.agentHint,
     required this.inject,
+    required this.focusInput,
   });
 }
 
 final agentRefBuilderProvider = StateProvider<AgentRefBuilder?>((ref) => null);
+/// 引用填入后由编辑器恢复选区（避免快捷键/失焦把选区冲掉）。
+final agentRefPreserveSelectionProvider =
+    StateProvider<VoidCallback?>((ref) => null);
 final shellAgentHostProvider = StateProvider<ShellAgentHost?>((ref) => null);

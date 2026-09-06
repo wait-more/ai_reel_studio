@@ -40,7 +40,7 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
   void dispose() {
     ref.read(shellAgentHostProvider.notifier).state = null;
     for (final t in _tabs) {
-      t.session.dispose();
+      t.dispose();
     }
     super.dispose();
   }
@@ -51,6 +51,7 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
       isAgentActive: _isActiveTabAgent,
       agentHint: _activeAgentHint,
       inject: _injectToActive,
+      focusInput: _focusActiveTerminal,
     );
   }
 
@@ -81,6 +82,16 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
     return true;
   }
 
+  void _focusActiveTerminal() {
+    if (_tabs.isEmpty) return;
+    final node = _tabs[_activeIndex].focusNode;
+    // 展开 Shell / IndexedStack 切页后需等一帧再抢焦点
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      node.requestFocus();
+    });
+  }
+
   void _newTab({String? workingDirectory}) {
     setState(() {
       _tabs.add(_ShellTab(
@@ -95,7 +106,7 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
   void _closeTab(int index) {
     if (_tabs.length == 1) return; // 至少保留一个终端
     setState(() {
-      _tabs.removeAt(index).session.dispose();
+      _tabs.removeAt(index).dispose();
       if (_activeIndex >= _tabs.length) {
         _activeIndex = _tabs.length - 1;
       } else if (index < _activeIndex) {
@@ -199,7 +210,9 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
                       for (final tab in _tabs)
                         _TerminalViewClient(
                           tab.session,
+                          focusNode: tab.focusNode,
                           fontSize: terminalFontSize,
+                          autofocus: identical(tab, _tabs[_activeIndex]),
                         ),
                     ],
                   ),
@@ -309,16 +322,29 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
 /// 单个终端页签。
 class _ShellTab {
   final TerminalSession session;
+  final FocusNode focusNode = FocusNode();
   /// 通过快捷启动打上的智能体线索（命令首词），供检测与 Tab 标题使用。
   String? launchedAgentHint;
   _ShellTab({required this.session});
+
+  void dispose() {
+    focusNode.dispose();
+    session.dispose();
+  }
 }
 
 /// 渲染单个会话的 TerminalView 并监听会话变更。
 class _TerminalViewClient extends StatefulWidget {
   final TerminalSession session;
+  final FocusNode focusNode;
   final double fontSize;
-  const _TerminalViewClient(this.session, {required this.fontSize});
+  final bool autofocus;
+  const _TerminalViewClient(
+    this.session, {
+    required this.focusNode,
+    required this.fontSize,
+    this.autofocus = false,
+  });
 
   @override
   State<_TerminalViewClient> createState() => _TerminalViewClientState();
@@ -356,8 +382,9 @@ class _TerminalViewClientState extends State<_TerminalViewClient> {
       color: const Color(0xFF1E1E1E),
       child: TerminalView(
         widget.session.terminal,
+        focusNode: widget.focusNode,
         hardwareKeyboardOnly: true,
-        autofocus: true,
+        autofocus: widget.autofocus,
         textStyle: TerminalStyle(
           fontSize: widget.fontSize,
           fontFamily: 'Cascadia Mono, Consolas, Microsoft YaHei',

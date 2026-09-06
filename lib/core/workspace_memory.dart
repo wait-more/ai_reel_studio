@@ -10,21 +10,36 @@ import 'config.dart';
 class EditorViewState {
   final int caretOffset;
   final double scrollOffset;
+  /// 非空选区（与 caret 独立记忆，失焦后仍可恢复）。
+  final int? selectionBase;
+  final int? selectionExtent;
 
   const EditorViewState({
     this.caretOffset = 0,
     this.scrollOffset = 0,
+    this.selectionBase,
+    this.selectionExtent,
   });
+
+  bool get hasSelection {
+    final a = selectionBase;
+    final b = selectionExtent;
+    return a != null && b != null && a != b;
+  }
 
   Map<String, dynamic> toJson() => {
         'caret': caretOffset,
         'scroll': scrollOffset,
+        if (selectionBase != null) 'selBase': selectionBase,
+        if (selectionExtent != null) 'selExtent': selectionExtent,
       };
 
   factory EditorViewState.fromJson(Map<String, dynamic> json) {
     return EditorViewState(
       caretOffset: (json['caret'] as num?)?.toInt() ?? 0,
       scrollOffset: (json['scroll'] as num?)?.toDouble() ?? 0,
+      selectionBase: (json['selBase'] as num?)?.toInt(),
+      selectionExtent: (json['selExtent'] as num?)?.toInt(),
     );
   }
 }

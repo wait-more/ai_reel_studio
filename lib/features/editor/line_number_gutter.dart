@@ -1,29 +1,67 @@
-import 'package:flutter/material.dart';
+import 'dart:math' as math;
 
-/// 行号槽：由外部传入 [scrollOffset]，不挂载 ScrollController（避免多 ScrollView 冲突）。
-class LineNumberGutter extends StatelessWidget {
-  final double scrollOffset;
+import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
+
+import 'wrap_line_metrics.dart';
+
+/// 行号槽：用 [RenderEditable] 真实行位置映射，软换行续行不编号。
+///
+/// 垂直对齐策略（与编辑器同一套 strut）：
+/// - 行中线 = caret 矩形中心（Flutter 在整行高内垂直居中）
+/// - 行号用相同 strut 行高绘制，几何中心对中线，避免墨迹盒/缩小字号造成忽上忽下
+class LineNumberGutter extends StatefulWidget {
+  final GlobalKey editorFieldKey;
+  final String text;
   final int lineCount;
+  final double scrollOffset;
   final double fontSize;
-  final double lineHeightFactor;
-  final EdgeInsets contentPadding;
-  final int? activeLine; // 0-based，当前光标行
+  final double lineHeight;
+  final int? activeLine; // 0-based
 
   const LineNumberGutter({
     super.key,
-    required this.scrollOffset,
+    required this.editorFieldKey,
+    required this.text,
     required this.lineCount,
+    required this.scrollOffset,
     required this.fontSize,
-    this.lineHeightFactor = 1.6,
-    this.contentPadding = const EdgeInsets.all(8),
+    required this.lineHeight,
     this.activeLine,
   });
 
-  double get _lineHeight => fontSize * lineHeightFactor;
-
-  double get _width {
+  static double widthFor(int lineCount, double fontSize) {
     final digits = lineCount.toString().length.clamp(2, 6);
     return digits * fontSize * 0.62 + 16;
+  }
+
+  @override
+  State<LineNumberGutter> createState() => _LineNumberGutterState();
+}
+
+class _LineNumberGutterState extends State<LineNumberGutter> {
+  final GlobalKey _gutterKey = GlobalKey();
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) setState(() {});
+    });
+  }
+
+  @override
+  void didUpdateWidget(covariant LineNumberGutter oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.text != widget.text ||
+        oldWidget.scrollOffset != widget.scrollOffset ||
+        oldWidget.fontSize != widget.fontSize ||
+        oldWidget.lineCount != widget.lineCount ||
+        oldWidget.activeLine != widget.activeLine) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) setState(() {});
+      });
+    }
   }
 
   @override
@@ -33,18 +71,21 @@ class LineNumberGutter extends StatelessWidget {
     final active = theme.colorScheme.primary;
 
     return SizedBox(
-      width: _width,
+      key: _gutterKey,
+      width: LineNumberGutter.widthFor(widget.lineCount, widget.fontSize),
       child: ClipRect(
         child: CustomPaint(
           painter: _LineNumberPainter(
-            lineCount: lineCount,
-            lineHeight: _lineHeight,
-            fontSize: fontSize,
-            scrollOffset: scrollOffset,
-            topPadding: contentPadding.top,
+            gutterKey: _gutterKey,
+            editorFieldKey: widget.editorFieldKey,
+            text: widget.text,
+            lineCount: widget.lineCount,
+            scrollOffset: widget.scrollOffset,
+            fontSize: widget.fontSize,
+            lineHeight: widget.lineHeight,
             muted: muted,
             active: active,
-            activeLine: activeLine,
+            activeLine: widget.activeLine,
           ),
           child: const SizedBox.expand(),
         ),
@@ -54,21 +95,25 @@ class LineNumberGutter extends StatelessWidget {
 }
 
 class _LineNumberPainter extends CustomPainter {
+  final GlobalKey gutterKey;
+  final GlobalKey editorFieldKey;
+  final String text;
   final int lineCount;
-  final double lineHeight;
-  final double fontSize;
   final double scrollOffset;
-  final double topPadding;
+  final double fontSize;
+  final double lineHeight;
   final Color muted;
   final Color active;
   final int? activeLine;
 
   _LineNumberPainter({
+    required this.gutterKey,
+    required this.editorFieldKey,
+    required this.text,
     required this.lineCount,
-    required this.lineHeight,
-    required this.fontSize,
     required this.scrollOffset,
-    required this.topPadding,
+    required this.fontSize,
+    required this.lineHeight,
     required this.muted,
     required this.active,
     required this.activeLine,
@@ -78,14 +123,47 @@ class _LineNumberPainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     if (lineCount <= 0) return;
 
-    final first =
-        ((scrollOffset - topPadding) / lineHeight).floor().clamp(0, lineCount - 1);
-    final visible = (size.height / lineHeight).ceil() + 2;
-    final last = (first + visible).clamp(0, lineCount);
+    final gutterBox = gutterKey.currentContext?.findRenderObject() as RenderBox?;
+    final editable = findRenderEditable(
+      editorFieldKey.currentContext?.findRenderObject(),
+    );
+    if (gutterBox == null ||
+        editable == null ||
+        !editable.hasSize ||
+        !gutterBox.hasSize) {
+      return;
+    }
 
-    for (var i = first; i < last; i++) {
-      final y = topPadding + i * lineHeight - scrollOffset;
-      if (y + lineHeight < 0 || y > size.height) continue;
+    final plh = editable.preferredLineHeight > 0
+        ? editable.preferredLineHeight
+        : lineHeight;
+    final heightFactor = fontSize > 0 ? plh / fontSize : 1.6;
+
+    // 中文/大写视觉重心高于几何中线；以「汉」为正文视觉中心基准
+    final bodyVisualCenter = _strutVisualCenterFromTop(
+      sample: '汉',
+      fontSize: fontSize,
+      heightFactor: heightFactor,
+      plh: plh,
+    );
+
+    final lines = text.isEmpty ? <String>[''] : text.split('\n');
+    final n = math.min(lineCount, lines.length);
+    var charOffset = 0;
+
+    for (var i = 0; i < n; i++) {
+      final o = charOffset.clamp(0, text.length);
+      final editableMidY =
+          editable.getLocalRectForCaret(TextPosition(offset: o)).center.dy;
+      final gutterMidY = gutterBox
+          .globalToLocal(editable.localToGlobal(Offset(0, editableMidY)))
+          .dy;
+
+      charOffset += lines[i].length;
+      if (i < lines.length - 1) charOffset += 1;
+
+      if (gutterMidY - plh > size.height) break;
+      if (gutterMidY + plh < 0) continue;
 
       final isActive = activeLine == i;
       final tp = TextPainter(
@@ -96,23 +174,72 @@ class _LineNumberPainter extends CustomPainter {
             fontSize: fontSize * 0.85,
             fontFamily: 'Consolas',
             fontWeight: isActive ? FontWeight.w600 : FontWeight.w400,
-            height: 1.0,
+            height: heightFactor,
           ),
         ),
         textDirection: TextDirection.ltr,
+        strutStyle: StrutStyle(
+          fontSize: fontSize,
+          height: heightFactor,
+          fontFamily: 'Consolas',
+          forceStrutHeight: true,
+        ),
       )..layout(minWidth: 0, maxWidth: size.width - 6);
 
-      final dy = y + (lineHeight - tp.height) / 2;
+      final numVisualCenter = _visualCenterFromTop(tp, fallback: tp.height / 2);
+      // 行号视觉中心对齐正文（汉）视觉中心 → 相对几何中线上移
+      final strutTop = gutterMidY - plh / 2;
+      final dy = strutTop + bodyVisualCenter - numVisualCenter;
       tp.paint(canvas, Offset(size.width - tp.width - 8, dy));
     }
   }
 
+  double _strutVisualCenterFromTop({
+    required String sample,
+    required double fontSize,
+    required double heightFactor,
+    required double plh,
+  }) {
+    final tp = TextPainter(
+      text: TextSpan(
+        text: sample,
+        style: TextStyle(
+          fontSize: fontSize,
+          fontFamily: 'Consolas',
+          height: heightFactor,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+      strutStyle: StrutStyle(
+        fontSize: fontSize,
+        height: heightFactor,
+        fontFamily: 'Consolas',
+        forceStrutHeight: true,
+      ),
+    )..layout();
+    return _visualCenterFromTop(tp, fallback: plh / 2);
+  }
+
+  /// 字形视觉中心距 paint 顶（汉字接近占满 ascent，重心约在 0.42*ascent 处）。
+  double _visualCenterFromTop(TextPainter tp, {required double fallback}) {
+    final metrics = tp.computeLineMetrics();
+    if (metrics.isNotEmpty) {
+      final m = metrics.first;
+      return m.baseline - m.ascent * 0.42;
+    }
+    final baseline =
+        tp.computeDistanceToActualBaseline(TextBaseline.alphabetic);
+    if (baseline != null) return baseline * 0.55;
+    return fallback;
+  }
+
   @override
   bool shouldRepaint(covariant _LineNumberPainter old) =>
+      old.text != text ||
       old.lineCount != lineCount ||
-      old.lineHeight != lineHeight ||
-      old.fontSize != fontSize ||
       old.scrollOffset != scrollOffset ||
+      old.fontSize != fontSize ||
+      old.lineHeight != lineHeight ||
       old.activeLine != activeLine ||
       old.muted != muted ||
       old.active != active;

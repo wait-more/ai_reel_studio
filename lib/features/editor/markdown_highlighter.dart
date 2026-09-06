@@ -355,7 +355,7 @@ List<InlineSpan> _styleInlineMatch(
       TextSpan(text: '![', style: TextStyle(color: c.punct)),
       TextSpan(text: alt, style: TextStyle(color: c.image)),
       TextSpan(text: '](', style: TextStyle(color: c.punct)),
-      TextSpan(text: url, style: TextStyle(color: c.linkUrl, fontSize: 12)),
+      TextSpan(text: url, style: TextStyle(color: c.linkUrl)),
       TextSpan(text: ')', style: TextStyle(color: c.punct)),
     ];
   }
@@ -375,7 +375,7 @@ List<InlineSpan> _styleInlineMatch(
         ),
       ),
       TextSpan(text: '](', style: TextStyle(color: c.punct)),
-      TextSpan(text: url, style: TextStyle(color: c.linkUrl, fontSize: 12)),
+      TextSpan(text: url, style: TextStyle(color: c.linkUrl)),
       TextSpan(text: ')', style: TextStyle(color: c.punct)),
     ];
   }
