@@ -24,6 +24,7 @@ class MarkdownHighlightController extends TextEditingController {
     return highlightMarkdown(
       text,
       base: style ?? const TextStyle(fontFamily: 'Consolas'),
+      brightness: Theme.of(context).brightness,
     );
   }
 }
