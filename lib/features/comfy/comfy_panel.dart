@@ -145,6 +145,10 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
 
   String get _serverId => ref.read(comfySelectedServerIdProvider);
 
+  /// 任务按 Comfy URL（serverId）隔离；其它 URL 上的任务仍在后台跑，切回去还能看到。
+  List<_ComfyJob> _jobsForServer(String serverId) =>
+      _jobs.where((j) => j.serverId == serverId).toList(growable: false);
+
   ComfyClient _client() => ComfyClient(
         baseUrl: ref.read(comfyBaseUrlProvider),
         apiKey: ref.read(comfyApiKeyProvider),
@@ -472,7 +476,10 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
   }
 
   void _clearFinishedJobs() {
-    setState(() => _jobs.removeWhere((j) => j.isTerminal));
+    final id = _serverId;
+    setState(
+      () => _jobs.removeWhere((j) => j.serverId == id && j.isTerminal),
+    );
   }
 
   /// 入队一次生成：快照当前表单，不锁定界面；可继续编辑并再次生成。
@@ -545,13 +552,13 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
     setState(() {
       _formError = null;
       _jobs.insert(0, job);
-      while (_jobs.length > _kMaxJobs) {
-        final last = _jobs.last;
-        if (last.isTerminal) {
-          _jobs.removeLast();
-        } else {
-          break;
-        }
+      // 每个 URL 各自保留上限，避免 A 的历史挤掉 B 的进行中任务。
+      while (_jobs.where((j) => j.serverId == job.serverId).length > _kMaxJobs) {
+        final idx = _jobs.lastIndexWhere(
+          (j) => j.serverId == job.serverId && j.isTerminal,
+        );
+        if (idx < 0) break;
+        _jobs.removeAt(idx);
       }
     });
 
@@ -974,6 +981,7 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
   Widget _buildDetail() {
     final t = _selected!;
     final cs = Theme.of(context).colorScheme;
+    final serverJobs = _jobsForServer(_serverId);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -1004,7 +1012,7 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
                 ),
                 icon: const Icon(Icons.play_arrow, size: 18),
                 label: Text(
-                  _jobs.any((j) => j.isActive) ? '继续生成' : '生成',
+                  serverJobs.any((j) => j.isActive) ? '继续生成' : '生成',
                 ),
               ),
             ],
@@ -1064,13 +1072,13 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
                         style: TextStyle(color: cs.error, fontSize: 12),
                       ),
                     ],
-                    if (_jobs.isNotEmpty) ...[
+                    if (serverJobs.isNotEmpty) ...[
                       const SizedBox(height: 12),
-                      _buildJobList(cs),
+                      _buildJobList(cs, serverJobs),
                     ],
                     const SizedBox(height: 4),
                     Text(
-                      '可继续改参数后再次点生成；任务在下方列表排队/执行',
+                      '可继续改参数后再次点生成；任务按当前 URL 分列，其它 URL 任务切回去仍可见',
                       style: Theme.of(context).textTheme.bodySmall?.copyWith(
                             color: cs.onSurfaceVariant,
                             fontSize: 11,
@@ -1103,9 +1111,9 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
     );
   }
 
-  Widget _buildJobList(ColorScheme cs) {
-    final activeCount = _jobs.where((j) => j.isActive).length;
-    final finishedCount = _jobs.length - activeCount;
+  Widget _buildJobList(ColorScheme cs, List<_ComfyJob> jobs) {
+    final activeCount = jobs.where((j) => j.isActive).length;
+    final finishedCount = jobs.length - activeCount;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -1133,9 +1141,9 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
           constraints: const BoxConstraints(maxHeight: 280),
           child: ListView.separated(
             shrinkWrap: true,
-            itemCount: _jobs.length,
+            itemCount: jobs.length,
             separatorBuilder: (_, __) => const SizedBox(height: 8),
-            itemBuilder: (context, i) => _buildJobCard(_jobs[i], cs),
+            itemBuilder: (context, i) => _buildJobCard(jobs[i], cs),
           ),
         ),
       ],
