@@ -644,6 +644,51 @@ class _TreeNodeWidgetState extends ConsumerState<_TreeNodeWidget> {
     }
   }
 
+  /// 折叠后中间栏回到的父目录；不超过项目根。
+  String _parentDirForAssets(String dirPath) {
+    final parent = Directory(dirPath).parent.path;
+    final root = AppConfig.instance.projectRoot;
+    if (root.isEmpty) return parent;
+    final rootNorm = root.toLowerCase();
+    final parentNorm = parent.toLowerCase();
+    if (parentNorm == rootNorm) return root;
+    final prefix = rootNorm.endsWith(Platform.pathSeparator)
+        ? rootNorm
+        : '$rootNorm${Platform.pathSeparator}';
+    if (!parentNorm.startsWith(prefix)) return root;
+    return parent;
+  }
+
+  void _selectDirInAssets(String dirPath) {
+    ref.read(selectedDirProvider.notifier).state = dirPath;
+    ref.read(contentModeProvider.notifier).state = 'assets';
+  }
+
+  Future<void> _toggleExpand() async {
+    final node = widget.node;
+    if (node.type == ScriptNodeType.file) return;
+    final canExpand = !node.isLoaded || node.children.isNotEmpty;
+    if (!canExpand) return;
+
+    final expanding = !node.isExpanded;
+    node.isExpanded = expanding;
+    setState(() {});
+
+    if (expanding) {
+      // 展开：中间栏同步进该文件夹
+      _selectDirInAssets(node.path);
+      if (!node.isLoaded) {
+        await DirectoryParser.loadChildrenAsync(node);
+        if (!mounted) return;
+        setState(() {});
+      }
+    } else {
+      // 折叠：中间栏回到该文件夹所在层级（父目录）
+      _selectDirInAssets(_parentDirForAssets(node.path));
+    }
+    _syncExpandedPathsToProvider();
+  }
+
   @override
   Widget build(BuildContext context) {
     final node = widget.node;
@@ -652,41 +697,17 @@ class _TreeNodeWidgetState extends ConsumerState<_TreeNodeWidget> {
     final isExpanded = node.isExpanded;
     // 目录总是可尝试展开：未加载（懒加载壳）或已加载且有子项
     final canExpand = !isFile && (!node.isLoaded || node.children.isNotEmpty);
-    final selected = ref.watch(selectedFileProvider) == node.path;
+    final fileSelected = ref.watch(selectedFileProvider) == node.path;
+    final dirSelected =
+        !isFile && ref.watch(selectedDirProvider) == node.path;
+    final selected = fileSelected || dirSelected;
 
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        InkWell(
-          onTap: () async {
-            if (isFile) {
-              _openFile(node.path);
-            } else {
-              // 目录：激活物料网格并定位到该目录（编辑器文档保留）
-              ref.read(selectedDirProvider.notifier).state = node.path;
-              ref.read(contentModeProvider.notifier).state = 'assets';
-              if (canExpand) {
-                node.isExpanded = !isExpanded;
-                setState(() {});
-                // 懒加载壳：展开时按需拉取真实子节点
-                if (!node.isLoaded) {
-                  await DirectoryParser.loadChildrenAsync(node);
-                  if (!mounted) return;
-                  setState(() {});
-                }
-                _syncExpandedPathsToProvider();
-              }
-            }
-          },
-          onSecondaryTapDown: (d) => _menuPos = d.globalPosition,
-          onSecondaryTap: () => _showMenu(context),
-          child: Container(
-            padding: EdgeInsets.only(
-              left: 8.0 + level * 12.0,
-              right: 4,
-              top: 4,
-              bottom: 4,
-            ),
+        Padding(
+          padding: EdgeInsets.only(left: 8.0 + level * 12.0, right: 2),
+          child: DecoratedBox(
             decoration: BoxDecoration(
               color: selected
                   ? Theme.of(context).colorScheme.primary.withOpacity(0.15)
@@ -695,34 +716,73 @@ class _TreeNodeWidgetState extends ConsumerState<_TreeNodeWidget> {
             ),
             child: Row(
               children: [
-                Icon(
-                  _iconFor(node),
-                  size: 16,
-                  color: _iconColorFor(context, node),
-                ),
-                const SizedBox(width: 6),
                 Expanded(
-                  child: Text(
-                    node.name,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w400,
-                      color: isExpanded
-                          ? Theme.of(context).colorScheme.primary
-                          : null,
+                  child: InkWell(
+                    borderRadius: BorderRadius.circular(4),
+                    onTap: () {
+                      if (isFile) {
+                        _openFile(node.path);
+                      } else {
+                        // 单击名称：只切换中间栏，不折叠/展开
+                        _selectDirInAssets(node.path);
+                      }
+                    },
+                    onDoubleTap: isFile
+                        ? null
+                        : () {
+                            // 双击名称：展开/折叠（与箭头一致）
+                            _toggleExpand();
+                          },
+                    onSecondaryTapDown: (d) => _menuPos = d.globalPosition,
+                    onSecondaryTap: () => _showMenu(context),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 4),
+                      child: Row(
+                        children: [
+                          Icon(
+                            _iconFor(node),
+                            size: 16,
+                            color: _iconColorFor(context, node),
+                          ),
+                          const SizedBox(width: 6),
+                          Expanded(
+                            child: Text(
+                              node.name,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                fontSize: 13,
+                                fontWeight: FontWeight.w400,
+                                color: isExpanded
+                                    ? Theme.of(context).colorScheme.primary
+                                    : null,
+                              ),
+                            ),
+                          ),
+                          _progressBubble(node),
+                        ],
+                      ),
                     ),
                   ),
                 ),
-                _progressBubble(node),
-                if (canExpand) ...[
-                  Icon(
-                    isExpanded
-                        ? Icons.keyboard_arrow_down
-                        : Icons.keyboard_arrow_right,
-                    size: 16,
+                if (canExpand)
+                  InkWell(
+                    borderRadius: BorderRadius.circular(4),
+                    onTap: _toggleExpand,
+                    onSecondaryTapDown: (d) => _menuPos = d.globalPosition,
+                    onSecondaryTap: () => _showMenu(context),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 4,
+                        vertical: 4,
+                      ),
+                      child: Icon(
+                        isExpanded
+                            ? Icons.keyboard_arrow_down
+                            : Icons.keyboard_arrow_right,
+                        size: 16,
+                      ),
+                    ),
                   ),
-                ],
               ],
             ),
           ),
