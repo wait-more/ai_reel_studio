@@ -9,6 +9,7 @@ import '../settings/settings_page.dart';
 import '../tree/project_tree.dart';
 import '../editor/markdown_editor.dart';
 import '../asset/asset_grid.dart';
+import '../comfy/comfy_panel.dart';
 import '../search/global_search.dart';
 import '../shell/shell_panel.dart';
 
@@ -136,11 +137,15 @@ class _MainLayoutState extends ConsumerState<MainLayout> {
                     _buildModeBar(context),
                     Expanded(
                       child: IndexedStack(
-                        index:
-                            ref.watch(contentModeProvider) == 'editor' ? 1 : 0,
+                        index: switch (ref.watch(contentModeProvider)) {
+                          'editor' => 1,
+                          'comfy' => 2,
+                          _ => 0,
+                        },
                         children: const [
                           AssetGridView(),
                           MarkdownEditor(),
+                          ComfyPanel(),
                         ],
                       ),
                     ),
@@ -174,6 +179,8 @@ class _MainLayoutState extends ConsumerState<MainLayout> {
           _modeChip(context, 'assets', '素材', mode, ''),
           const SizedBox(width: 8),
           _modeChip(context, 'editor', '文档', mode, tabCount > 0 ? ' $tabCount' : ''),
+          const SizedBox(width: 8),
+          _modeChip(context, 'comfy', '生成', mode, ''),
           const Spacer(),
         ],
       ),

@@ -103,7 +103,9 @@ class WorkspaceSnapshot {
       openTabs: asStringList(json['openTabs']),
       selectedFile: json['selectedFile'] as String?,
       selectedDir: json['selectedDir'] as String?,
-      contentMode: (mode == 'assets' || mode == 'editor') ? mode : 'editor',
+      contentMode: (mode == 'assets' || mode == 'editor' || mode == 'comfy')
+          ? mode
+          : 'editor',
       fileViews: views,
     );
   }

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'comfy/comfy_models.dart';
 import 'config.dart';
 import 'directory_parser.dart';
 import 'key_chord.dart';
@@ -24,8 +25,39 @@ final shellVisibleProvider = StateProvider<bool>((ref) => true);
 /// 项目树根节点
 final treeRootProvider = StateProvider<ScriptNode?>((ref) => null);
 
-/// 中间视图模式：'editor' = 文档编辑器，'assets' = 物料网格
+/// 中间视图模式：'editor' | 'assets' | 'comfy'
 final contentModeProvider = StateProvider<String>((ref) => 'editor');
+
+/// ComfyUI 多实例列表 / 当前选中实例。
+final comfyServersProvider = StateProvider<List<ComfyServer>>(
+  (ref) => AppConfig.instance.comfyServers,
+);
+final comfySelectedServerIdProvider = StateProvider<String>(
+  (ref) => AppConfig.instance.comfySelectedServerId,
+);
+
+/// 兼容旧代码：当前选中实例的 URL / Key。
+final comfyBaseUrlProvider = Provider<String>((ref) {
+  final id = ref.watch(comfySelectedServerIdProvider);
+  final list = ref.watch(comfyServersProvider);
+  for (final s in list) {
+    if (s.id == id) return s.baseUrl;
+  }
+  return list.isNotEmpty
+      ? list.first.baseUrl
+      : AppConfig.defaultComfyBaseUrl;
+});
+final comfyApiKeyProvider = Provider<String>((ref) {
+  final id = ref.watch(comfySelectedServerIdProvider);
+  final list = ref.watch(comfyServersProvider);
+  for (final s in list) {
+    if (s.id == id) return s.apiKey;
+  }
+  return list.isNotEmpty ? list.first.apiKey : '';
+});
+
+/// 强制刷新 `.aireel/comfy` 动作列表（手动刷新或外部变更）。
+final comfyActionsTickProvider = StateProvider<int>((ref) => 0);
 
 /// 有未保存修改的文档路径集合
 final dirtyFilesProvider = StateProvider<Set<String>>((ref) => {});

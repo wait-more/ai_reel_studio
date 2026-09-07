@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'comfy/comfy_models.dart';
 import 'key_chord.dart';
 
 /// 快捷启动工作目录策略。
@@ -65,6 +66,12 @@ class AppConfig {
   static const _kTerminalFontSize = 'terminalFontSize';
   static const _kStartCmds = 'startCmds';
   static const _kSendAgentRefChord = 'sendAgentRefChord';
+  static const _kComfyBaseUrl = 'comfyBaseUrl';
+  static const _kComfyApiKey = 'comfyApiKey';
+  static const _kComfyServers = 'comfyServers';
+  static const _kComfySelectedServerId = 'comfySelectedServerId';
+
+  static const defaultComfyBaseUrl = 'http://127.0.0.1:8188';
 
   static const defaultStartCmds = <StartCmd>[
     StartCmd(name: 'opencode', command: 'opencode'),
@@ -80,6 +87,8 @@ class AppConfig {
   double _terminalFontSize = 12;
   List<StartCmd> _startCmds = List.of(defaultStartCmds);
   KeyChord _sendAgentRefChord = KeyChord.defaultSendAgentRef;
+  List<ComfyServer> _comfyServers = [ComfyServer.localDefault()];
+  String _comfySelectedServerId = 'local';
 
   String get projectRoot => _projectRoot;
   ThemeMode get themeMode => _themeMode;
@@ -88,6 +97,21 @@ class AppConfig {
   double get terminalFontSize => _terminalFontSize;
   List<StartCmd> get startCmds => List.unmodifiable(_startCmds);
   KeyChord get sendAgentRefChord => _sendAgentRefChord;
+  List<ComfyServer> get comfyServers => List.unmodifiable(_comfyServers);
+  String get comfySelectedServerId => _comfySelectedServerId;
+
+  ComfyServer get comfySelectedServer {
+    for (final s in _comfyServers) {
+      if (s.id == _comfySelectedServerId) return s;
+    }
+    return _comfyServers.isNotEmpty
+        ? _comfyServers.first
+        : ComfyServer.localDefault();
+  }
+
+  /// 兼容旧代码：当前选中实例的 URL / Key。
+  String get comfyBaseUrl => comfySelectedServer.baseUrl;
+  String get comfyApiKey => comfySelectedServer.apiKey;
 
   Future<void> init() async {
     final prefs = await SharedPreferences.getInstance();
@@ -100,6 +124,17 @@ class AppConfig {
         (prefs.getDouble(_kTerminalFontSize) ?? 12).clamp(10, 22);
     _startCmds = _loadStartCmds(prefs.getString(_kStartCmds));
     _sendAgentRefChord = _loadChord(prefs.getString(_kSendAgentRefChord));
+    _comfyServers = _loadComfyServers(
+      prefs.getString(_kComfyServers),
+      legacyUrl: prefs.getString(_kComfyBaseUrl),
+      legacyKey: prefs.getString(_kComfyApiKey),
+    );
+    final sel = prefs.getString(_kComfySelectedServerId);
+    if (sel != null && _comfyServers.any((s) => s.id == sel)) {
+      _comfySelectedServerId = sel;
+    } else {
+      _comfySelectedServerId = _comfyServers.first.id;
+    }
   }
 
   Future<void> setProjectRoot(String path) async {
@@ -143,6 +178,78 @@ class AppConfig {
     _sendAgentRefChord = chord;
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_kSendAgentRefChord, jsonEncode(chord.toJson()));
+  }
+
+  Future<void> setComfyServers(List<ComfyServer> servers) async {
+    _comfyServers = servers.isEmpty
+        ? [ComfyServer.localDefault()]
+        : List.of(servers);
+    if (!_comfyServers.any((s) => s.id == _comfySelectedServerId)) {
+      _comfySelectedServerId = _comfyServers.first.id;
+    }
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(
+      _kComfyServers,
+      jsonEncode(_comfyServers.map((e) => e.toJson()).toList()),
+    );
+    await prefs.setString(_kComfySelectedServerId, _comfySelectedServerId);
+  }
+
+  Future<void> setComfySelectedServerId(String id) async {
+    if (!_comfyServers.any((s) => s.id == id)) return;
+    _comfySelectedServerId = id;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_kComfySelectedServerId, id);
+  }
+
+  Future<void> setComfyBaseUrl(String url) async {
+    // 兼容：改当前选中实例的 URL
+    final cur = comfySelectedServer;
+    final next = List.of(_comfyServers);
+    final i = next.indexWhere((s) => s.id == cur.id);
+    if (i < 0) return;
+    next[i] = cur.copyWith(
+      baseUrl: url.trim().isEmpty ? defaultComfyBaseUrl : url.trim(),
+    );
+    await setComfyServers(next);
+  }
+
+  Future<void> setComfyApiKey(String key) async {
+    final cur = comfySelectedServer;
+    final next = List.of(_comfyServers);
+    final i = next.indexWhere((s) => s.id == cur.id);
+    if (i < 0) return;
+    next[i] = cur.copyWith(apiKey: key);
+    await setComfyServers(next);
+  }
+
+  static List<ComfyServer> _loadComfyServers(
+    String? raw, {
+    String? legacyUrl,
+    String? legacyKey,
+  }) {
+    if (raw != null && raw.isNotEmpty) {
+      try {
+        final list = jsonDecode(raw) as List<dynamic>;
+        final servers = list
+            .whereType<Map>()
+            .map((e) => ComfyServer.fromJson(Map<String, dynamic>.from(e)))
+            .where((e) => e.baseUrl.trim().isNotEmpty)
+            .toList();
+        if (servers.isNotEmpty) return servers;
+      } catch (_) {}
+    }
+    final url = (legacyUrl == null || legacyUrl.trim().isEmpty)
+        ? defaultComfyBaseUrl
+        : legacyUrl.trim();
+    return [
+      ComfyServer(
+        id: 'local',
+        name: '本机',
+        baseUrl: url,
+        apiKey: legacyKey ?? '',
+      ),
+    ];
   }
 
   bool get isConfigured =>

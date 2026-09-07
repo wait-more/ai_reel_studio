@@ -57,6 +57,7 @@
 | **素材浏览** | 网格导航、类型过滤、导入、分类汇总；图片/视频/音频预览；右键文件操作 |
 | **全局搜索** | `Ctrl+P`：文件名 + Markdown 正文（内存扫描，非 SQLite） |
 | **Shell / Agent** | 多 Tab PTY；可配置快捷启动与 cwd（项目根 / 当前选中目录）；`Ctrl+Alt+K`（可改）向智能体填入 `@路径` / `#L行` 引用 |
+| **ComfyUI 生成** | 中间栏「生成」：导入 API JSON、勾选暴露输入、动态表单调用本地 Comfy；动作落在 `.aireel/comfy/` 可热加载 |
 | **会话恢复（一期）** | 按项目记住 Shell Tab、cwd、启动命令、面板显隐；重启后重建并重拉 Agent（不恢复屏幕滚动缓冲） |
 | **设置** | 项目根、主题、字号、快捷启动、引用快捷键 |
 
@@ -94,7 +95,8 @@ powershell -ExecutionPolicy Bypass -File scripts/pack_windows.ps1
 
 平台优先级：**Windows（主）** → Linux（有工程壳，非正式分发）→ Android（后续）。仓库当前无 macOS 工程目录。
 
-目标架构与缺口对照见 [docs/方案.md](docs/方案.md)。
+目标架构与缺口对照见 [docs/方案.md](docs/方案.md)。  
+ComfyUI 动态 API 接入见 [docs/ComfyUI集成方案.md](docs/ComfyUI集成方案.md)。
 
 ---
 

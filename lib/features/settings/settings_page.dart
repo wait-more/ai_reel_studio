@@ -2,6 +2,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../core/comfy/comfy_models.dart';
 import '../../core/config.dart';
 import '../../core/key_chord.dart';
 import '../../core/providers.dart';
@@ -67,7 +68,7 @@ class _FirstRunPanel extends ConsumerWidget {
   }
 }
 
-enum _SettingsSection { project, appearance, shell, shortcuts, about }
+enum _SettingsSection { project, appearance, shell, comfy, shortcuts, about }
 
 class _SettingsShell extends ConsumerStatefulWidget {
   const _SettingsShell();
@@ -127,6 +128,11 @@ class _SettingsShellState extends ConsumerState<_SettingsShell> {
                       label: Text('Shell'),
                     ),
                     NavigationRailDestination(
+                      icon: Icon(Icons.auto_awesome_outlined),
+                      selectedIcon: Icon(Icons.auto_awesome),
+                      label: Text('Comfy'),
+                    ),
+                    NavigationRailDestination(
                       icon: Icon(Icons.keyboard_outlined),
                       selectedIcon: Icon(Icons.keyboard),
                       label: Text('快捷键'),
@@ -147,6 +153,7 @@ class _SettingsShellState extends ConsumerState<_SettingsShell> {
                     _SettingsSection.project => const _ProjectSection(),
                     _SettingsSection.appearance => const _AppearanceSection(),
                     _SettingsSection.shell => const _ShellSection(),
+                    _SettingsSection.comfy => const _ComfySection(),
                     _SettingsSection.shortcuts => const _ShortcutsSection(),
                     _SettingsSection.about => const _AboutSection(),
                   },
@@ -380,6 +387,228 @@ class _ShellSection extends ConsumerWidget {
         return '当前选中目录';
     }
   }
+}
+
+class _ComfySection extends ConsumerStatefulWidget {
+  const _ComfySection();
+
+  @override
+  ConsumerState<_ComfySection> createState() => _ComfySectionState();
+}
+
+class _ComfySectionState extends ConsumerState<_ComfySection> {
+  @override
+  Widget build(BuildContext context) {
+    final servers = ref.watch(comfyServersProvider);
+    final selectedId = ref.watch(comfySelectedServerIdProvider);
+    final cs = Theme.of(context).colorScheme;
+
+    return ListView(
+      children: [
+        Text('ComfyUI 实例', style: Theme.of(context).textTheme.titleMedium),
+        const SizedBox(height: 8),
+        Text(
+          '可配置多个 ComfyUI 地址。同一动作共享一份 workflow 模板，'
+          '各实例的节点暴露配置可单独保存。当前实例在「生成」顶栏切换。',
+          style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                color: cs.onSurfaceVariant,
+              ),
+        ),
+        const SizedBox(height: 16),
+        ...servers.map((s) {
+          final active = s.id == selectedId;
+          return Card(
+            margin: const EdgeInsets.only(bottom: 8),
+            child: ListTile(
+              selected: active,
+              leading: Icon(
+                active ? Icons.radio_button_checked : Icons.radio_button_off,
+                size: 20,
+              ),
+              title: Text(s.name),
+              subtitle: Text(
+                s.baseUrl,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+              onTap: () => _selectServer(s.id),
+              trailing: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  IconButton(
+                    tooltip: '编辑',
+                    icon: const Icon(Icons.edit_outlined, size: 20),
+                    onPressed: () => _editServer(s),
+                  ),
+                  IconButton(
+                    tooltip: '删除',
+                    icon: Icon(Icons.delete_outline, size: 20, color: cs.error),
+                    onPressed: servers.length <= 1
+                        ? null
+                        : () => _deleteServer(s),
+                  ),
+                ],
+              ),
+            ),
+          );
+        }),
+        const SizedBox(height: 8),
+        Align(
+          alignment: Alignment.centerLeft,
+          child: FilledButton.tonalIcon(
+            onPressed: _addServer,
+            icon: const Icon(Icons.add),
+            label: const Text('添加实例'),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Future<void> _persist(List<ComfyServer> list, {String? selectedId}) async {
+    await AppConfig.instance.setComfyServers(list);
+    if (selectedId != null) {
+      await AppConfig.instance.setComfySelectedServerId(selectedId);
+      ref.read(comfySelectedServerIdProvider.notifier).state = selectedId;
+    } else {
+      ref.read(comfySelectedServerIdProvider.notifier).state =
+          AppConfig.instance.comfySelectedServerId;
+    }
+    ref.read(comfyServersProvider.notifier).state =
+        AppConfig.instance.comfyServers;
+  }
+
+  Future<void> _selectServer(String id) async {
+    await AppConfig.instance.setComfySelectedServerId(id);
+    ref.read(comfySelectedServerIdProvider.notifier).state = id;
+  }
+
+  Future<void> _addServer() async {
+    final created = await _editServerDialog(context);
+    if (created == null) return;
+    final next = [...ref.read(comfyServersProvider), created];
+    await _persist(next, selectedId: created.id);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('已添加「${created.name}」')),
+    );
+  }
+
+  Future<void> _editServer(ComfyServer server) async {
+    final edited = await _editServerDialog(context, existing: server);
+    if (edited == null) return;
+    final next = ref
+        .read(comfyServersProvider)
+        .map((s) => s.id == server.id ? edited : s)
+        .toList();
+    await _persist(next);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('实例已更新')),
+    );
+  }
+
+  Future<void> _deleteServer(ComfyServer server) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('删除实例'),
+        content: Text('确定删除「${server.name}」？动作里该实例的配置会保留在文件中，但不再可选。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final next =
+        ref.read(comfyServersProvider).where((s) => s.id != server.id).toList();
+    await _persist(next);
+  }
+}
+
+Future<ComfyServer?> _editServerDialog(
+  BuildContext context, {
+  ComfyServer? existing,
+}) {
+  final nameCtrl = TextEditingController(text: existing?.name ?? '');
+  final urlCtrl = TextEditingController(
+    text: existing?.baseUrl ?? AppConfig.defaultComfyBaseUrl,
+  );
+  final keyCtrl = TextEditingController(text: existing?.apiKey ?? '');
+
+  return showDialog<ComfyServer>(
+    context: context,
+    builder: (ctx) {
+      return AlertDialog(
+        title: Text(existing == null ? '添加 ComfyUI 实例' : '编辑实例'),
+        content: SizedBox(
+          width: 420,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: nameCtrl,
+                decoration: const InputDecoration(
+                  labelText: '名称',
+                  hintText: '例如 本机 / 云 GPU',
+                  isDense: true,
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: urlCtrl,
+                decoration: const InputDecoration(
+                  labelText: 'Base URL',
+                  hintText: AppConfig.defaultComfyBaseUrl,
+                  isDense: true,
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: keyCtrl,
+                decoration: const InputDecoration(
+                  labelText: 'API Key（可选）',
+                  isDense: true,
+                ),
+                obscureText: true,
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () {
+              final name = nameCtrl.text.trim();
+              final url = urlCtrl.text.trim();
+              if (url.isEmpty) return;
+              Navigator.pop(
+                ctx,
+                ComfyServer(
+                  id: existing?.id ??
+                      'srv_${DateTime.now().millisecondsSinceEpoch}',
+                  name: name.isEmpty ? 'ComfyUI' : name,
+                  baseUrl: url,
+                  apiKey: keyCtrl.text,
+                ),
+              );
+            },
+            child: const Text('保存'),
+          ),
+        ],
+      );
+    },
+  );
 }
 
 Future<StartCmd?> _editStartCmd(BuildContext context, {StartCmd? existing}) {
