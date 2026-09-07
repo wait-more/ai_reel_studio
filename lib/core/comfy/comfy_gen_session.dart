@@ -9,12 +9,15 @@ class ComfyGenSession {
   final Map<String, bool> expanded;
   /// fieldId → 可 JSON 序列化的值（路径/文本/数字/布尔）。
   final Map<String, dynamic> values;
+  /// 保存文件名（无扩展名或带扩展名均可）；空则沿用 Comfy 返回名。
+  final String outputFileName;
 
   const ComfyGenSession({
     this.order = const [],
     this.enabled = const {},
     this.expanded = const {},
     this.values = const {},
+    this.outputFileName = '',
   });
 
   static const _kSessionPrefix = 'comfy_gen_session_v1:';
@@ -30,6 +33,7 @@ class ComfyGenSession {
         'enabled': enabled,
         'expanded': expanded,
         'values': values,
+        'outputFileName': outputFileName,
       };
 
   factory ComfyGenSession.fromJson(Map<String, dynamic> json) {
@@ -57,6 +61,7 @@ class ComfyGenSession {
       enabled: boolMap(json['enabled']),
       expanded: boolMap(json['expanded']),
       values: valueMap(json['values']),
+      outputFileName: json['outputFileName']?.toString() ?? '',
     );
   }
 
@@ -65,12 +70,14 @@ class ComfyGenSession {
     Map<String, bool>? enabled,
     Map<String, bool>? expanded,
     Map<String, dynamic>? values,
+    String? outputFileName,
   }) {
     return ComfyGenSession(
       order: order ?? this.order,
       enabled: enabled ?? this.enabled,
       expanded: expanded ?? this.expanded,
       values: values ?? this.values,
+      outputFileName: outputFileName ?? this.outputFileName,
     );
   }
 

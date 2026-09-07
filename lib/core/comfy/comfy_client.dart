@@ -665,9 +665,13 @@ class ComfyClient {
   }
 
   /// 下载全部输出到 [destDir]，返回写入的绝对路径。
+  ///
+  /// [preferredFileName] 非空时按该名保存（扩展名仍用 Comfy 实际格式）；
+  /// 多文件时为 `name.ext`、`name_2.ext`…
   Future<List<String>> saveOutputsToDir({
     required Map<String, dynamic> historyEntry,
     required String destDir,
+    String? preferredFileName,
   }) async {
     final outs = collectOutputs(historyEntry);
     if (outs.isEmpty) {
@@ -678,13 +682,43 @@ class ComfyClient {
       await dir.create(recursive: true);
     }
     final saved = <String>[];
-    for (final o in outs) {
+    for (var i = 0; i < outs.length; i++) {
+      final o = outs[i];
       final bytes = await downloadView(o);
-      final target = _uniquePath(destDir, o.filename);
+      final name = resolveOutputFileName(
+        preferredFileName: preferredFileName,
+        originalFilename: o.filename,
+        index: i,
+      );
+      final target = _uniquePath(destDir, name);
       await File(target).writeAsBytes(bytes, flush: true);
       saved.add(target);
     }
     return saved;
+  }
+
+  /// 将用户指定名与 Comfy 原名合成最终文件名（仅 basename，扩展名优先用实际输出）。
+  static String resolveOutputFileName({
+    required String? preferredFileName,
+    required String originalFilename,
+    required int index,
+  }) {
+    final raw = preferredFileName?.trim() ?? '';
+    if (raw.isEmpty) return originalFilename;
+
+    // 禁止路径穿越；非法 Windows 字符替换为 _
+    var safe = raw.replaceAll(RegExp(r'[<>:"/\\|?*\x00-\x1f]'), '_').trim();
+    safe = p.basename(safe);
+    if (safe.isEmpty || safe == '.' || safe == '..') {
+      return originalFilename;
+    }
+
+    final origExt = p.extension(originalFilename);
+    var base = p.basenameWithoutExtension(safe);
+    if (base.isEmpty) base = 'output';
+    final ext = origExt.isNotEmpty ? origExt : p.extension(safe);
+    if (index <= 0) return '$base$ext';
+    return '${base}_${index + 1}$ext';
   }
 
   static String _uniquePath(String dir, String filename) {

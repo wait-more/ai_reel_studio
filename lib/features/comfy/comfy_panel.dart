@@ -50,6 +50,7 @@ class _ComfyJob {
     required this.serverId,
     required this.baseUrl,
     required this.outputDir,
+    required this.outputFileName,
     required this.cancelToken,
     DateTime? createdAt,
   }) : createdAt = createdAt ?? DateTime.now();
@@ -60,6 +61,8 @@ class _ComfyJob {
   final String serverId;
   final String baseUrl;
   final String outputDir;
+  /// 入队时快照；空则保存时用 Comfy 原名。
+  final String outputFileName;
   final DateTime createdAt;
   final ComfyCancelToken cancelToken;
 
@@ -97,6 +100,7 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
   List<String> _nodeOrder = [];
 
   String? _outputDir;
+  final TextEditingController _outputNameCtrl = TextEditingController();
   bool _online = false;
   bool _checking = false;
   String? _formError;
@@ -121,6 +125,7 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
   void dispose() {
     _hotReloadTimer?.cancel();
     _sessionPersistTimer?.cancel();
+    _outputNameCtrl.dispose();
     for (final j in _jobs) {
       if (j.isActive) j.cancelToken.cancel();
     }
@@ -201,6 +206,7 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
     _nodeOrder = [];
     _formError = null;
     _workflow = null;
+    _outputNameCtrl.clear();
   }
 
   Future<void> _selectTemplate(ComfyTemplate template) async {
@@ -253,6 +259,7 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
         _selected = template;
         _workflow = wf;
         _nodeOrder = session.order;
+        _outputNameCtrl.text = session.outputFileName;
         _formError = null;
       });
     } catch (e) {
@@ -289,6 +296,7 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
         for (final e in _values.entries)
           if (e.value != null) e.key: e.value,
       },
+      outputFileName: _outputNameCtrl.text.trim(),
     );
     await ComfyGenSession.save(
       serverId: _serverId,
@@ -541,6 +549,7 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
       serverId: _serverId,
       baseUrl: ref.read(comfyBaseUrlProvider),
       outputDir: outputDir,
+      outputFileName: _outputNameCtrl.text.trim(),
       cancelToken: ComfyCancelToken(),
     );
 
@@ -651,6 +660,7 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
       final saved = await client.saveOutputsToDir(
         historyEntry: history,
         destDir: job.outputDir,
+        preferredFileName: job.outputFileName,
       );
       ref.read(treeRefreshTickProvider.notifier).state++;
       _mutateJob(job.id, (j) {
@@ -1065,6 +1075,27 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
                         ),
                       ],
                     ),
+                    const SizedBox(height: 10),
+                    Text('保存文件名', style: Theme.of(context).textTheme.titleSmall),
+                    const SizedBox(height: 6),
+                    TextField(
+                      controller: _outputNameCtrl,
+                      decoration: InputDecoration(
+                        isDense: true,
+                        hintText: '留空则用 Comfy 原名；多文件自动加 _2、_3…',
+                        hintStyle: TextStyle(
+                          fontSize: 12,
+                          color: cs.onSurfaceVariant,
+                        ),
+                        border: const OutlineInputBorder(),
+                        contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 10,
+                          vertical: 10,
+                        ),
+                      ),
+                      style: const TextStyle(fontSize: 13),
+                      onChanged: (_) => _schedulePersistSession(),
+                    ),
                     if (_formError != null) ...[
                       const SizedBox(height: 8),
                       SelectableText(
@@ -1256,6 +1287,15 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
             overflow: TextOverflow.ellipsis,
             style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant),
           ),
+          if (job.outputFileName.isNotEmpty) ...[
+            const SizedBox(height: 2),
+            Text(
+              '文件名：${job.outputFileName}',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant),
+            ),
+          ],
           if (job.runStatus != null) ...[
             const SizedBox(height: 4),
             Text(
