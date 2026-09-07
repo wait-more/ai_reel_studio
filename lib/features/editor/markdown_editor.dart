@@ -291,11 +291,17 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
     if (sel.isValid && !sel.isCollapsed) {
       _rememberedRange = sel;
     } else if (sel.isValid && sel.isCollapsed) {
-      // 失焦收成光标：端点仍在原选区内则保留记忆
-      final r = _rememberedRange;
-      if (r != null &&
-          (sel.baseOffset < r.start || sel.baseOffset > r.end)) {
+      if (_editorFocus.hasFocus) {
+        // 仍有焦点时收成光标：用户点击/方向键取消选区，必须清掉记忆，
+        // 否则切文件再回来会把旧选区从 EditorViewState 恢复出来。
         _rememberedRange = null;
+      } else {
+        // 失焦收成光标：端点仍在原选区内则保留（叠加层 / Agent 引用）。
+        final r = _rememberedRange;
+        if (r != null &&
+            (sel.baseOffset < r.start || sel.baseOffset > r.end)) {
+          _rememberedRange = null;
+        }
       }
     }
     _refreshCaretLine();
