@@ -22,7 +22,7 @@ class MainLayout extends ConsumerStatefulWidget {
 
 class _MainLayoutState extends ConsumerState<MainLayout> {
   double _treeWidth = 280;
-  double? _shellWidth; // null = 未初始化，首次布局时默认与中间栏对半
+  double? _shellWidth; // null = 未初始化，首次布局时默认中间栏/Shell = 6/4
   WorkspaceSnapshot? _lastWorkspaceSnap;
 
   void _persistWorkspace() {
@@ -112,11 +112,11 @@ class _MainLayoutState extends ConsumerState<MainLayout> {
         autofocus: true,
         child: LayoutBuilder(
       builder: (context, constraints) {
-        // 首次布局：默认终端栏与中间内容栏对半分
+        // 首次布局：中间栏 / Shell = 6 / 4
         if (_shellWidth == null) {
           const dividerW = 6.0; // 两处分隔条
           final avail = constraints.maxWidth - _treeWidth - dividerW;
-          _shellWidth = avail / 2;
+          _shellWidth = avail * 0.4;
           if (_shellWidth! < 280) _shellWidth = 280;
         }
 
