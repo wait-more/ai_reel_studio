@@ -507,7 +507,9 @@ class _TerminalViewClientState extends State<_TerminalViewClient> {
       child: TerminalView(
         widget.session.terminal,
         focusNode: widget.focusNode,
-        hardwareKeyboardOnly: true,
+        // false：走 CustomTextEdit，才能正确接收 Windows 中文 IME。
+        // true 时只吃硬件按键，拼音会飘到屏幕左上角且无法回车上屏。
+        hardwareKeyboardOnly: false,
         autofocus: widget.autofocus,
         textStyle: TerminalStyle(
           fontSize: widget.fontSize,

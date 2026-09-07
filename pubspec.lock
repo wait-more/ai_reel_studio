@@ -248,6 +248,14 @@ packages:
     description: flutter
     source: sdk
     version: "0.0.0"
+  ft_patch_package:
+    dependency: "direct dev"
+    description:
+      name: ft_patch_package
+      sha256: "327662cabacb506e55c29be0bbcb64b20ad0a7b5259e4c40d4f215b239ee5093"
+      url: "https://pub.dev"
+    source: hosted
+    version: "1.0.1"
   go_router:
     dependency: "direct main"
     description:
