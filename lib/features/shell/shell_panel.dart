@@ -153,10 +153,10 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
 
   void _focusActiveTerminal() {
     if (_tabs.isEmpty) return;
-    final node = _tabs[_activeIndex].focusNode;
+    final tab = _tabs[_activeIndex];
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
-      node.requestFocus();
+      if (!mounted || !_tabs.contains(tab)) return;
+      tab.focusNode.requestFocus();
     });
   }
 
@@ -205,8 +205,8 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
 
   void _closeTab(int index) {
     if (_tabs.length == 1) return;
+    final closed = _tabs.removeAt(index);
     setState(() {
-      _tabs.removeAt(index).dispose();
       if (_activeIndex >= _tabs.length) {
         _activeIndex = _tabs.length - 1;
       } else if (index < _activeIndex) {
@@ -215,6 +215,11 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
     });
     _registerHost();
     _schedulePersist();
+    // 等本帧树上的 TerminalView 先卸下 FocusNode，再 dispose，避免
+    // IndexedStack 无 Key 复用 Element 时访问已 dispose 的节点。
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      closed.dispose();
+    });
   }
 
   String? _resolveCwd(CwdStrategy strategy) {
@@ -324,6 +329,7 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
                     children: [
                       for (final tab in _tabs)
                         _TerminalViewClient(
+                          key: ObjectKey(tab),
                           tab.session,
                           focusNode: tab.focusNode,
                           fontSize: terminalFontSize,
@@ -465,6 +471,7 @@ class _TerminalViewClient extends StatefulWidget {
   final bool autofocus;
   const _TerminalViewClient(
     this.session, {
+    super.key,
     required this.focusNode,
     required this.fontSize,
     this.autofocus = false,
