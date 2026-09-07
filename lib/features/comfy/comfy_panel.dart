@@ -698,11 +698,23 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
           ? FileType.image
           : FileType.any,
       dialogTitle: '选择 ${field.label}',
+      // 打开该字段上次所选文件所在目录，避免多参考路径相距很远时反复翻目录。
+      initialDirectory: _mediaBrowseInitialDir(field),
     );
     if (result == null || result.files.isEmpty) return;
     final path = result.files.single.path;
     if (path == null) return;
     _setFieldValue(field.id, path);
+  }
+
+  /// 当前字段已有媒体路径时，返回其父目录（须存在）；否则让系统沿用默认目录。
+  String? _mediaBrowseInitialDir(ComfyExposedField field) {
+    final current = _values[field.id]?.toString().trim() ?? '';
+    if (current.isEmpty) return null;
+    final dir = p.dirname(current);
+    if (dir.isEmpty || dir == '.') return null;
+    if (!Directory(dir).existsSync()) return null;
+    return dir;
   }
 
   void _useSelectedFile(ComfyExposedField field) {
