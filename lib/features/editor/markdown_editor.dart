@@ -7,6 +7,7 @@ import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/agent_bridge.dart';
 import '../../core/providers.dart';
+import '../../core/toast.dart';
 import '../../core/workspace_memory.dart';
 import 'line_number_gutter.dart';
 import 'line_selection_overlay.dart';
@@ -228,7 +229,15 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
   int _lineCount = 1;
   Timer? _outlineDebounce;
   Timer? _viewPersistDebounce;
+  Timer? _diskWatchTimer;
+  Timer? _diskReloadDebounce;
   bool _restoringView = false;
+  bool _reloadingFromDisk = false;
+
+  /// 上次已知的磁盘 mtime/size，用于发现智能体等外部写入。
+  DateTime? _knownMtime;
+  int _knownSize = -1;
+  bool _diskConflictNotified = false;
 
   /// 记住最近一次非空选区。快捷键/失焦时 TextField 常收成光标或隐藏高亮。
   TextSelection? _rememberedRange;
@@ -249,6 +258,10 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
       if (mounted) _registerSave();
     });
     _load();
+    _diskWatchTimer = Timer.periodic(
+      const Duration(milliseconds: 800),
+      (_) => _pollDiskChange(),
+    );
   }
 
   void _onEditorFocusChanged() {
@@ -621,6 +634,120 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
     });
   }
 
+  Future<void> _captureDiskFingerprint() async {
+    try {
+      final stat = await File(widget.path).stat();
+      _knownMtime = stat.modified;
+      _knownSize = stat.size;
+      _diskConflictNotified = false;
+    } catch (_) {}
+  }
+
+  void _pollDiskChange() {
+    if (!mounted || _isDir || _loading || _reloadingFromDisk || _restoringView) {
+      return;
+    }
+    if (ref.read(selectedFileProvider) != widget.path) return;
+    unawaited(_pollDiskChangeAsync());
+  }
+
+  Future<void> _pollDiskChangeAsync() async {
+    try {
+      final file = File(widget.path);
+      if (!await file.exists()) return;
+      final stat = await file.stat();
+      if (_knownMtime == null) {
+        _knownMtime = stat.modified;
+        _knownSize = stat.size;
+        return;
+      }
+      if (stat.modified == _knownMtime && stat.size == _knownSize) return;
+
+      // 外部写入可能分多次落盘，稍作去抖再读。
+      _diskReloadDebounce?.cancel();
+      _diskReloadDebounce = Timer(const Duration(milliseconds: 350), () {
+        unawaited(_reloadFromDiskIfNeeded());
+      });
+    } catch (_) {}
+  }
+
+  Future<void> _reloadFromDiskIfNeeded() async {
+    if (!mounted || _isDir || _loading || _reloadingFromDisk) return;
+    final file = File(widget.path);
+    FileStat stat;
+    try {
+      if (!await file.exists()) return;
+      stat = await file.stat();
+    } catch (_) {
+      return;
+    }
+
+    if (_knownMtime != null &&
+        stat.modified == _knownMtime &&
+        stat.size == _knownSize) {
+      return;
+    }
+
+    if (_isDirty) {
+      // 本地有未保存修改：不覆盖，只提示一次。
+      _knownMtime = stat.modified;
+      _knownSize = stat.size;
+      if (!_diskConflictNotified && mounted) {
+        _diskConflictNotified = true;
+        showGlobalToast(context, '磁盘文件已更新，本地有未保存修改，未自动重载');
+      }
+      return;
+    }
+
+    _reloadingFromDisk = true;
+    try {
+      final content = await file.readAsString();
+      if (!mounted) return;
+      if (content == _controller.text) {
+        _knownMtime = stat.modified;
+        _knownSize = stat.size;
+        return;
+      }
+
+      final scroll = _scrollOffset;
+      final caret = _controller.selection.extentOffset.clamp(0, content.length);
+      _freezeSelection = true;
+      setState(() {
+        _content = content;
+        _controller.value = TextEditingValue(
+          text: content,
+          selection: TextSelection.collapsed(offset: caret),
+        );
+        _lineCount = countLines(content);
+        _outline = isMarkdownDoc ? parseMarkdownOutline(content) : const [];
+        _activeLine = lineIndexOfOffset(content, caret);
+        _activeOutline = activeOutlineIndex(_outline, _activeLine);
+        _isDirty = false;
+      });
+      _freezeSelection = false;
+      _knownMtime = stat.modified;
+      _knownSize = stat.size;
+      _diskConflictNotified = false;
+      _registerAgentRef();
+
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        final pos = _editorScrollPosition();
+        if (pos != null && pos.hasContentDimensions) {
+          final target = scroll.clamp(0.0, pos.maxScrollExtent);
+          if ((pos.pixels - target).abs() > 0.5) pos.jumpTo(target);
+          setState(() => _scrollOffset = target);
+        }
+      });
+
+      if (mounted) showGlobalToast(context, '已从磁盘重新加载');
+    } catch (_) {
+      // 读失败则下一轮再试
+    } finally {
+      _reloadingFromDisk = false;
+    }
+  }
+
   Future<void> _load() async {
     final entity = FileSystemEntity.typeSync(widget.path);
     if (entity == FileSystemEntityType.directory) {
@@ -652,6 +779,7 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
         _activeLine = 0;
         _loading = false;
       });
+      await _captureDiskFingerprint();
       _registerAgentRef();
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) _restoreViewState();
@@ -744,6 +872,7 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
         next.remove(widget.path);
         return next;
       });
+      await _captureDiskFingerprint();
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('已保存'), duration: Duration(seconds: 1)),
       );
@@ -759,6 +888,8 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
   void dispose() {
     _outlineDebounce?.cancel();
     _viewPersistDebounce?.cancel();
+    _diskWatchTimer?.cancel();
+    _diskReloadDebounce?.cancel();
     // 关闭 Tab / 切换文件前尽量落盘当前位置
     try {
       if (!_isDir && !_loading) {
