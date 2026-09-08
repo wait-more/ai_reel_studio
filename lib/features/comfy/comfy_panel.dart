@@ -95,9 +95,13 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
   final Map<String, dynamic> _values = {};
   final Map<String, bool> _enabled = {};
   final Map<String, bool> _expanded = {};
+  /// 分区展开：key = [ComfyNodeGroup.sortCategory] 整型字符串。
+  final Map<String, bool> _categoryExpanded = {};
   final Map<String, TextEditingController> _textCtrls = {};
   /// 用户自定义节点顺序（nodeId 列表）；空则按名称归类排序。
   List<String> _nodeOrder = [];
+  /// 分类分区顺序（sortCategory 整型）；空则 0→4。
+  List<int> _categoryOrder = [];
 
   String? _outputDir;
   final TextEditingController _outputNameCtrl = TextEditingController();
@@ -111,6 +115,10 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
   Timer? _sessionPersistTimer;
   String _lastSig = '';
   double _leftSplit = 0.38;
+  /// 忽略过期的连接检测 / 模板加载，避免切换 URL 时连环闪烁。
+  int _connGen = 0;
+  int _loadGen = 0;
+  bool _autoSelectScheduled = false;
 
   @override
   void initState() {
@@ -160,38 +168,85 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
       );
 
   Future<void> _checkConnection() async {
-    setState(() => _checking = true);
+    final gen = ++_connGen;
+    if (mounted) setState(() => _checking = true);
     final client = _client();
     try {
       final ok = await client.ping();
-      if (mounted) setState(() => _online = ok);
+      if (!mounted || gen != _connGen) return;
+      setState(() {
+        _online = ok;
+        _checking = false;
+      });
+    } catch (_) {
+      if (!mounted || gen != _connGen) return;
+      setState(() {
+        _online = false;
+        _checking = false;
+      });
     } finally {
       client.close();
-      if (mounted) setState(() => _checking = false);
     }
   }
 
   Future<void> _selectServer(String id) async {
+    final already = id == ref.read(comfySelectedServerIdProvider);
+    if (already) {
+      // 启动后默认就是第一个 URL 时，再点不会触发切换；若详情为空则补加载。
+      if (_selected == null) {
+        final bundle = ref.read(comfyBundleProvider).valueOrNull;
+        if (bundle != null) await _ensureSelectedFromBundle(bundle);
+      }
+      return;
+    }
+    _sessionPersistTimer?.cancel();
+    await _persistSession();
     await AppConfig.instance.setComfySelectedServerId(id);
     ref.read(comfySelectedServerIdProvider.notifier).state = id;
-    await _checkConnection();
+    // 连接检测由 listen 触发；这里不 await，避免挡住模板切换。
     final bundle = ref.read(comfyBundleProvider).valueOrNull;
     if (bundle == null) return;
-    final sel = bundle.bindings.forServer(id).selectedTemplateId;
-    ComfyTemplate? t;
-    if (sel != null) {
+    await _ensureSelectedFromBundle(bundle, force: true);
+  }
+
+  /// 按当前 URL 的绑定，选中「上次选中」或第一个已绑模板。
+  Future<void> _ensureSelectedFromBundle(
+    _ComfyBundle bundle, {
+    bool force = false,
+  }) async {
+    if (!force && _selected != null) return;
+    final serverId = ref.read(comfySelectedServerIdProvider);
+    final binding = bundle.bindings.forServer(serverId);
+    final boundIds = binding.templateIds.toSet();
+
+    ComfyTemplate? pick;
+    final sel = binding.selectedTemplateId;
+    if (sel != null && boundIds.contains(sel)) {
       for (final x in bundle.templates) {
         if (x.id == sel) {
-          t = x;
+          pick = x;
           break;
         }
       }
     }
-    if (t != null) {
-      await _selectTemplate(t);
-    } else {
+    if (pick == null) {
+      for (final id in binding.templateIds) {
+        for (final x in bundle.templates) {
+          if (x.id == id) {
+            pick = x;
+            break;
+          }
+        }
+        if (pick != null) break;
+      }
+    }
+
+    if (pick != null) {
+      await _selectTemplate(pick, persistCurrent: false);
+    } else if (force || _selected != null) {
+      _loadGen++;
       _clearForm();
-      setState(() => _selected = null);
+      if (mounted) setState(() => _selected = null);
     }
   }
 
@@ -203,30 +258,46 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
     _values.clear();
     _enabled.clear();
     _expanded.clear();
+    _categoryExpanded.clear();
     _nodeOrder = [];
+    _categoryOrder = [];
     _formError = null;
     _workflow = null;
     _outputNameCtrl.clear();
   }
 
-  Future<void> _selectTemplate(ComfyTemplate template) async {
-    _clearForm();
+  Future<void> _selectTemplate(
+    ComfyTemplate template, {
+    bool persistCurrent = true,
+  }) async {
+    final gen = ++_loadGen;
+    final serverId = ref.read(comfySelectedServerIdProvider);
+    if (persistCurrent) {
+      _sessionPersistTimer?.cancel();
+      await _persistSession();
+    }
     try {
       await ComfyTemplateStore.selectTemplate(
-        serverId: _serverId,
+        serverId: serverId,
         templateId: template.id,
       );
-      ref.read(comfyActionsTickProvider.notifier).state++;
+      // 不 bump tick：高亮用 [_selected]，整表刷新会让 FutureProvider 进 loading 闪屏。
 
       final wf = await ComfyTemplateStore.loadWorkflowMap(template);
       final session = await ComfyGenSession.load(
-        serverId: _serverId,
+        serverId: serverId,
         templateId: template.id,
       );
+      if (!mounted || gen != _loadGen) return;
+
+      final enabled = <String, bool>{};
+      final expanded = <String, bool>{};
+      final values = <String, dynamic>{};
+      final textCtrls = <String, TextEditingController>{};
       for (final node in template.nodes) {
-        _enabled[node.nodeId] =
+        enabled[node.nodeId] =
             session.enabled[node.nodeId] ?? node.defaultEnabled;
-        _expanded[node.nodeId] = session.expanded[node.nodeId] ?? true;
+        expanded[node.nodeId] = session.expanded[node.nodeId] ?? false;
         for (final field in node.fields) {
           final rawNode = wf[field.nodeId];
           dynamic def;
@@ -235,11 +306,10 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
           }
           def ??= _defaultFor(field.widget);
           final remembered = session.values[field.id];
-          final value = remembered ?? def;
-          _values[field.id] = value;
+          values[field.id] = remembered ?? def;
           if (field.widget != ComfyWidgetKind.bool && !field.widget.isMedia) {
-            _textCtrls[field.id] = TextEditingController(
-              text: '${_values[field.id] ?? ''}',
+            textCtrls[field.id] = TextEditingController(
+              text: '${values[field.id] ?? ''}',
             );
           }
         }
@@ -248,21 +318,50 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
       for (final node in template.nodes) {
         for (final field in node.fields) {
           if (!field.widget.isMedia || selectedFile == null) continue;
-          // 仅当会话未记住媒体路径时，才用当前选中文件填入。
           final remembered = session.values[field.id]?.toString() ?? '';
           if (remembered.isEmpty) {
-            _values[field.id] = selectedFile;
+            values[field.id] = selectedFile;
           }
         }
       }
+      if (!mounted || gen != _loadGen) {
+        for (final c in textCtrls.values) {
+          c.dispose();
+        }
+        return;
+      }
+
+      for (final c in _textCtrls.values) {
+        c.dispose();
+      }
       setState(() {
+        _textCtrls
+          ..clear()
+          ..addAll(textCtrls);
+        _values
+          ..clear()
+          ..addAll(values);
+        _enabled
+          ..clear()
+          ..addAll(enabled);
+        _expanded
+          ..clear()
+          ..addAll(expanded);
+        _categoryExpanded
+          ..clear()
+          ..addAll(session.categoryExpanded);
         _selected = template;
         _workflow = wf;
         _nodeOrder = session.order;
+        _categoryOrder = [
+          for (final raw in session.categoryOrder)
+            if (int.tryParse(raw) != null) int.parse(raw),
+        ];
         _outputNameCtrl.text = session.outputFileName;
         _formError = null;
       });
     } catch (e) {
+      if (!mounted || gen != _loadGen) return;
       setState(() {
         _selected = template;
         _workflow = null;
@@ -290,8 +389,10 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
     _syncTextValuesFromControllers();
     final session = ComfyGenSession(
       order: _nodeOrder,
+      categoryOrder: _categoryOrder.map((e) => '$e').toList(),
       enabled: Map<String, bool>.from(_enabled),
       expanded: Map<String, bool>.from(_expanded),
+      categoryExpanded: Map<String, bool>.from(_categoryExpanded),
       values: {
         for (final e in _values.entries)
           if (e.value != null) e.key: e.value,
@@ -320,16 +421,92 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
     );
   }
 
-  void _onReorderNodes(int oldIndex, int newIndex) {
-    final ordered = _orderedNodes();
-    if (oldIndex < 0 || oldIndex >= ordered.length) return;
-    if (newIndex > oldIndex) newIndex -= 1;
-    if (newIndex < 0 || newIndex > ordered.length) return;
-    final item = ordered.removeAt(oldIndex);
-    ordered.insert(newIndex.clamp(0, ordered.length), item);
+  /// 按分类分组；组内顺序跟随 [_orderedNodes]；分区顺序跟随 [_categoryOrder]。
+  List<({int category, String label, List<ComfyExposedNode> nodes})>
+      _nodeSections() {
+    final buckets = <int, List<ComfyExposedNode>>{
+      0: [],
+      1: [],
+      2: [],
+      3: [],
+      4: [],
+    };
+    for (final n in _orderedNodes()) {
+      buckets.putIfAbsent(ComfyNodeGroup.sortCategory(n.classType), () => [])
+          .add(n);
+    }
+    final present = [
+      for (final cat in const [0, 1, 2, 3, 4])
+        if (buckets[cat]!.isNotEmpty) cat,
+    ];
+    final orderedCats = <int>[];
+    for (final cat in _categoryOrder) {
+      if (present.contains(cat) && !orderedCats.contains(cat)) {
+        orderedCats.add(cat);
+      }
+    }
+    for (final cat in present) {
+      if (!orderedCats.contains(cat)) orderedCats.add(cat);
+    }
+    return [
+      for (final cat in orderedCats)
+        (
+          category: cat,
+          label: ComfyNodeGroup.categoryLabel(cat),
+          nodes: buckets[cat]!,
+        ),
+    ];
+  }
+
+  bool _isCategoryExpanded(int category) =>
+      _categoryExpanded['$category'] ??
+      ComfyNodeGroup.categoryExpandedByDefault(category);
+
+  void _toggleCategory(int category) {
     setState(() {
-      _nodeOrder = ordered.map((e) => e.nodeId).toList();
+      _categoryExpanded['$category'] = !_isCategoryExpanded(category);
     });
+    _schedulePersistSession();
+  }
+
+  void _onReorderCategories(int oldIndex, int newIndex) {
+    final sections = _nodeSections();
+    if (oldIndex < 0 ||
+        oldIndex >= sections.length ||
+        newIndex < 0 ||
+        newIndex > sections.length) {
+      return;
+    }
+    final cats = sections.map((s) => s.category).toList();
+    final item = cats.removeAt(oldIndex);
+    cats.insert(newIndex.clamp(0, cats.length), item);
+    setState(() => _categoryOrder = cats);
+    _schedulePersistSession();
+  }
+
+  void _moveNodeInCategory(int category, int fromIndex, int toIndex) {
+    if (fromIndex == toIndex) return;
+    final sections = _nodeSections();
+    final idx = sections.indexWhere((s) => s.category == category);
+    if (idx < 0) return;
+    final nodes = List<ComfyExposedNode>.of(sections[idx].nodes);
+    if (fromIndex < 0 ||
+        fromIndex >= nodes.length ||
+        toIndex < 0 ||
+        toIndex >= nodes.length) {
+      return;
+    }
+    final item = nodes.removeAt(fromIndex);
+    nodes.insert(toIndex, item);
+    final rebuilt = <String>[];
+    for (final s in sections) {
+      if (s.category == category) {
+        rebuilt.addAll(nodes.map((e) => e.nodeId));
+      } else {
+        rebuilt.addAll(s.nodes.map((e) => e.nodeId));
+      }
+    }
+    setState(() => _nodeOrder = rebuilt);
     _schedulePersistSession();
   }
 
@@ -762,19 +939,25 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
     ref.listen(comfyBundleProvider, (prev, next) {
       next.whenData((bundle) {
         final cur = _selected;
-        if (cur == null) return;
+        if (cur == null) {
+          _ensureSelectedFromBundle(bundle);
+          return;
+        }
         final match = bundle.templates.where((t) => t.id == cur.id).toList();
         if (match.isEmpty) {
           _clearForm();
           setState(() => _selected = null);
+          _ensureSelectedFromBundle(bundle, force: true);
         } else if (match.first.nodes.length != cur.nodes.length ||
             match.first.templatePath != cur.templatePath) {
-          _selectTemplate(match.first);
+          _selectTemplate(match.first, persistCurrent: false);
         }
       });
     });
 
     return bundleAsync.when(
+      // 目录轮询 / 绑定刷新时保留旧数据，避免整页转圈闪一下。
+      skipLoadingOnReload: true,
       loading: () => const Center(child: CircularProgressIndicator()),
       error: (e, _) => Center(child: Text('$e')),
       data: (bundle) {
@@ -787,6 +970,17 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
               break;
             }
           }
+        }
+        // 首次进入 / Provider 已有缓存时 listen 可能不补发，这里兜底自动选中。
+        if (_selected == null &&
+            boundTemplates.isNotEmpty &&
+            !_autoSelectScheduled) {
+          _autoSelectScheduled = true;
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            _autoSelectScheduled = false;
+            if (!mounted || _selected != null) return;
+            _ensureSelectedFromBundle(bundle);
+          });
         }
         return Row(
           children: [
@@ -1028,29 +1222,36 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Padding(
-          padding: const EdgeInsets.fromLTRB(12, 10, 12, 6),
+          padding: const EdgeInsets.fromLTRB(14, 10, 12, 8),
           child: Row(
             children: [
-              TextButton(
-                onPressed: () => _setAllExpanded(true),
-                style: TextButton.styleFrom(
-                  visualDensity: VisualDensity.compact,
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      t.name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.titleMedium,
+                    ),
+                    Text(
+                      t.workflowFile,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                            color: cs.onSurfaceVariant,
+                          ),
+                    ),
+                  ],
                 ),
-                child: const Text('展开'),
               ),
-              TextButton(
-                onPressed: () => _setAllExpanded(false),
-                style: TextButton.styleFrom(
-                  visualDensity: VisualDensity.compact,
-                ),
-                child: const Text('折叠'),
-              ),
-              const Spacer(),
+              const SizedBox(width: 12),
               FilledButton.icon(
                 onPressed: _workflow == null || t.nodes.isEmpty ? null : _run,
                 style: FilledButton.styleFrom(
                   visualDensity: VisualDensity.compact,
-                  minimumSize: const Size(0, 34),
+                  minimumSize: const Size(0, 36),
                 ),
                 icon: const Icon(Icons.play_arrow, size: 18),
                 label: Text(
@@ -1065,137 +1266,338 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
+              _buildRunOutputZone(cs, serverJobs),
+              _buildZoneDivider(
+                cs,
+                icon: Icons.tune,
+                title: '节点参数',
+                subtitle: '点选编辑 · 长按拖拽排序 · 拖分区标题调整顺序',
+                trailing: Row(
+                  mainAxisSize: MainAxisSize.min,
                   children: [
-                    Text(t.name, style: Theme.of(context).textTheme.titleMedium),
-                    Text(
-                      'workflow: ${t.workflowFile}',
-                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                            color: cs.onSurfaceVariant,
-                          ),
-                    ),
-                    const SizedBox(height: 12),
-                    Text('输出目录', style: Theme.of(context).textTheme.titleSmall),
-                    const SizedBox(height: 6),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: Text(
-                            (_outputDir != null && _outputDir!.trim().isNotEmpty)
-                                ? _outputDir!
-                                : (_defaultOutputDir().isNotEmpty
-                                    ? _defaultOutputDir()
-                                    : '未选择'),
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                              fontSize: 12,
-                              color: cs.onSurfaceVariant,
-                            ),
-                          ),
-                        ),
-                        TextButton(
-                          onPressed: _useSelectedAsOutputDir,
-                          child: const Text('用当前选中'),
-                        ),
-                        FilledButton.tonal(
-                          onPressed: _pickOutputDir,
-                          child: const Text('浏览'),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 10),
-                    Text('保存文件名', style: Theme.of(context).textTheme.titleSmall),
-                    const SizedBox(height: 6),
-                    TextField(
-                      controller: _outputNameCtrl,
-                      decoration: InputDecoration(
-                        isDense: true,
-                        hintText: '留空则用 Comfy 原名；多文件自动加 _2、_3…',
-                        hintStyle: TextStyle(
-                          fontSize: 12,
-                          color: cs.onSurfaceVariant,
-                        ),
-                        border: const OutlineInputBorder(),
-                        contentPadding: const EdgeInsets.symmetric(
-                          horizontal: 10,
-                          vertical: 10,
-                        ),
+                    TextButton(
+                      onPressed: () => _setAllExpanded(true),
+                      style: TextButton.styleFrom(
+                        visualDensity: VisualDensity.compact,
                       ),
-                      style: const TextStyle(fontSize: 13),
-                      onChanged: (_) => _schedulePersistSession(),
+                      child: const Text('全展开'),
                     ),
-                    const SizedBox(height: 4),
-                    SwitchListTile(
-                      contentPadding: EdgeInsets.zero,
-                      dense: true,
-                      title: const Text(
-                        '下载后删除远端输出',
-                        style: TextStyle(fontSize: 13),
+                    TextButton(
+                      onPressed: () => _setAllExpanded(false),
+                      style: TextButton.styleFrom(
+                        visualDensity: VisualDensity.compact,
                       ),
-                      subtitle: Text(
-                        '本地保存成功后清除 Comfy 上本次 history/output，适合云 GPU 省空间',
-                        style: TextStyle(
-                          fontSize: 11,
-                          color: cs.onSurfaceVariant,
-                        ),
-                      ),
-                      value: ref.watch(comfyDeleteRemoteAfterDownloadProvider),
-                      onChanged: (v) async {
-                        ref
-                            .read(
-                                comfyDeleteRemoteAfterDownloadProvider.notifier)
-                            .state = v;
-                        await AppConfig.instance
-                            .setComfyDeleteRemoteAfterDownload(v);
-                      },
-                    ),
-                    if (_formError != null) ...[
-                      const SizedBox(height: 8),
-                      SelectableText(
-                        _formError!,
-                        style: TextStyle(color: cs.error, fontSize: 12),
-                      ),
-                    ],
-                    if (serverJobs.isNotEmpty) ...[
-                      const SizedBox(height: 12),
-                      _buildJobList(cs, serverJobs),
-                    ],
-                    const SizedBox(height: 4),
-                    Text(
-                      '可继续改参数后再次点生成；任务按当前 URL 分列，其它 URL 任务切回去仍可见',
-                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                            color: cs.onSurfaceVariant,
-                            fontSize: 11,
-                          ),
+                      child: const Text('全折叠'),
                     ),
                   ],
                 ),
               ),
-              Expanded(
-                child: ReorderableListView.builder(
-                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-                  buildDefaultDragHandles: false,
-                  itemCount: _orderedNodes().length,
-                  onReorder: _onReorderNodes,
-                  itemBuilder: (context, index) {
-                    final nodes = _orderedNodes();
-                    final node = nodes[index];
-                    return _buildNodeBlock(
-                      node,
-                      index: index,
-                      key: ValueKey(node.nodeId),
-                    );
-                  },
-                ),
-              ),
+              Expanded(child: _buildNodeSectionsList()),
             ],
           ),
         ),
       ],
+    );
+  }
+
+  /// 运行输出功能区：目录 / 文件名 / 远端清理 / 任务队列。
+  Widget _buildRunOutputZone(ColorScheme cs, List<_ComfyJob> serverJobs) {
+    final dirText = (_outputDir != null && _outputDir!.trim().isNotEmpty)
+        ? _outputDir!
+        : (_defaultOutputDir().isNotEmpty ? _defaultOutputDir() : '未选择');
+    final deleteRemote = ref.watch(comfyDeleteRemoteAfterDownloadProvider);
+
+    return Container(
+      decoration: BoxDecoration(
+        color: cs.surfaceContainerLow,
+        border: Border(
+          bottom: BorderSide(color: cs.outlineVariant.withValues(alpha: 0.7)),
+        ),
+      ),
+      padding: const EdgeInsets.fromLTRB(14, 10, 14, 12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.folder_special_outlined, size: 16, color: cs.primary),
+              const SizedBox(width: 6),
+              Text(
+                '运行输出',
+                style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                      fontWeight: FontWeight.w700,
+                    ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  '生成结果保存位置与文件名',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          LayoutBuilder(
+            builder: (context, constraints) {
+              final wide = constraints.maxWidth >= 560;
+              final dirField = _buildOutputDirField(cs, dirText);
+              final nameField = TextField(
+                controller: _outputNameCtrl,
+                decoration: InputDecoration(
+                  isDense: true,
+                  labelText: '保存文件名',
+                  hintText: '留空用 Comfy 原名；多文件自动 _2、_3…',
+                  prefixIcon: const Icon(Icons.insert_drive_file_outlined, size: 18),
+                  border: const OutlineInputBorder(),
+                  contentPadding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 10,
+                  ),
+                ),
+                style: const TextStyle(fontSize: 13),
+                onChanged: (_) => _schedulePersistSession(),
+              );
+              if (wide) {
+                return Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Expanded(flex: 3, child: dirField),
+                    const SizedBox(width: 10),
+                    Expanded(flex: 2, child: nameField),
+                  ],
+                );
+              }
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  dirField,
+                  const SizedBox(height: 8),
+                  nameField,
+                ],
+              );
+            },
+          ),
+          const SizedBox(height: 8),
+          Material(
+            color: cs.surface.withValues(alpha: 0.55),
+            borderRadius: BorderRadius.circular(8),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+              child: Row(
+                children: [
+                  Icon(
+                    deleteRemote
+                        ? Icons.cloud_off_outlined
+                        : Icons.cloud_done_outlined,
+                    size: 18,
+                    color: deleteRemote ? cs.primary : cs.onSurfaceVariant,
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text(
+                          '下载后删除远端输出',
+                          style: TextStyle(fontSize: 13),
+                        ),
+                        Text(
+                          '本地保存成功后清除 Comfy history/output，适合云 GPU',
+                          style: TextStyle(
+                            fontSize: 11,
+                            color: cs.onSurfaceVariant,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  Switch(
+                    value: deleteRemote,
+                    onChanged: (v) async {
+                      ref
+                          .read(
+                              comfyDeleteRemoteAfterDownloadProvider.notifier)
+                          .state = v;
+                      await AppConfig.instance
+                          .setComfyDeleteRemoteAfterDownload(v);
+                    },
+                  ),
+                ],
+              ),
+            ),
+          ),
+          if (_formError != null) ...[
+            const SizedBox(height: 8),
+            SelectableText(
+              _formError!,
+              style: TextStyle(color: cs.error, fontSize: 12),
+            ),
+          ],
+          if (serverJobs.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            _buildJobList(cs, serverJobs),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildOutputDirField(ColorScheme cs, String dirText) {
+    return InputDecorator(
+      decoration: const InputDecoration(
+        isDense: true,
+        labelText: '输出目录',
+        prefixIcon: Icon(Icons.folder_outlined, size: 18),
+        border: OutlineInputBorder(),
+        contentPadding: EdgeInsets.fromLTRB(10, 8, 4, 8),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: Tooltip(
+              message: dirText,
+              child: Text(
+                dirText,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(fontSize: 12.5, color: cs.onSurface),
+              ),
+            ),
+          ),
+          TextButton(
+            onPressed: _useSelectedAsOutputDir,
+            style: TextButton.styleFrom(
+              visualDensity: VisualDensity.compact,
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              minimumSize: const Size(0, 32),
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            ),
+            child: const Text('当前选中'),
+          ),
+          FilledButton.tonal(
+            onPressed: _pickOutputDir,
+            style: FilledButton.styleFrom(
+              visualDensity: VisualDensity.compact,
+              padding: const EdgeInsets.symmetric(horizontal: 10),
+              minimumSize: const Size(0, 32),
+            ),
+            child: const Text('浏览'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildZoneDivider(
+    ColorScheme cs, {
+    required IconData icon,
+    required String title,
+    String? subtitle,
+    Widget? trailing,
+  }) {
+    return Container(
+      padding: const EdgeInsets.fromLTRB(14, 10, 8, 8),
+      decoration: BoxDecoration(
+        color: cs.surface,
+        border: Border(
+          bottom: BorderSide(color: cs.outlineVariant.withValues(alpha: 0.55)),
+        ),
+      ),
+      child: Row(
+        children: [
+          Icon(icon, size: 16, color: cs.primary),
+          const SizedBox(width: 6),
+          Text(
+            title,
+            style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                  fontWeight: FontWeight.w700,
+                ),
+          ),
+          if (subtitle != null) ...[
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                subtitle,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant),
+              ),
+            ),
+          ] else
+            const Spacer(),
+          if (trailing != null) trailing,
+        ],
+      ),
+    );
+  }
+
+  Widget _buildNodeSectionsList() {
+    return ReorderableListView.builder(
+      padding: const EdgeInsets.fromLTRB(14, 10, 14, 12),
+      buildDefaultDragHandles: false,
+      itemCount: _nodeSections().length,
+      onReorderItem: _onReorderCategories,
+      itemBuilder: (context, sectionIndex) {
+        final section = _nodeSections()[sectionIndex];
+        final open = _isCategoryExpanded(section.category);
+        final expandedNodes = [
+          for (final n in section.nodes)
+            if (_expanded[n.nodeId] == true) n,
+        ];
+        return Card(
+          key: ValueKey('cat-${section.category}'),
+          margin: const EdgeInsets.only(bottom: 8),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(8, 6, 8, 8),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                _buildCategoryHeader(
+                  section.category,
+                  section.label,
+                  section.nodes.length,
+                  sectionIndex: sectionIndex,
+                ),
+                if (open) ...[
+                  const SizedBox(height: 6),
+                  LayoutBuilder(
+                    builder: (context, constraints) {
+                      const gap = 6.0;
+                      const minTile = 156.0;
+                      final cols =
+                          (constraints.maxWidth / minTile).floor().clamp(1, 6);
+                      final tileW =
+                          (constraints.maxWidth - gap * (cols - 1)) / cols;
+                      return Wrap(
+                        spacing: gap,
+                        runSpacing: gap,
+                        children: [
+                          for (var i = 0; i < section.nodes.length; i++)
+                            SizedBox(
+                              width: tileW,
+                              child: _buildNodeTile(
+                                section.nodes[i],
+                                category: section.category,
+                                index: i,
+                              ),
+                            ),
+                        ],
+                      );
+                    },
+                  ),
+                  for (final node in expandedNodes) ...[
+                    const SizedBox(height: 8),
+                    _buildNodeEditor(node),
+                  ],
+                ],
+              ],
+            ),
+          ),
+        );
+      },
     );
   }
 
@@ -1389,168 +1791,302 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
     );
   }
 
-  Widget _buildNodeBlock(
+  Widget _buildCategoryHeader(
+    int category,
+    String label,
+    int count, {
+    required int sectionIndex,
+  }) {
+    final cs = Theme.of(context).colorScheme;
+    final open = _isCategoryExpanded(category);
+    return Row(
+      children: [
+        ReorderableDragStartListener(
+          index: sectionIndex,
+          child: Padding(
+            padding: const EdgeInsets.only(right: 4),
+            child: Icon(
+              Icons.drag_indicator,
+              size: 20,
+              color: cs.onSurfaceVariant,
+            ),
+          ),
+        ),
+        Expanded(
+          child: InkWell(
+            borderRadius: BorderRadius.circular(8),
+            onTap: () => _toggleCategory(category),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
+              child: Row(
+                children: [
+                  Icon(
+                    open ? Icons.expand_more : Icons.chevron_right,
+                    size: 20,
+                    color: cs.onSurfaceVariant,
+                  ),
+                  const SizedBox(width: 2),
+                  Text(
+                    label,
+                    style: const TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    '$count',
+                    style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  String _fieldPreview(ComfyExposedField field) {
+    final v = _values[field.id];
+    if (v == null) return '';
+    if (field.widget.isMedia) {
+      final s = v.toString().trim();
+      if (s.isEmpty) return '';
+      return p.basename(s);
+    }
+    if (field.widget == ComfyWidgetKind.bool) {
+      return v == true ? '${field.label}:开' : '${field.label}:关';
+    }
+    final s = v.toString().trim().replaceAll(RegExp(r'\s+'), ' ');
+    if (s.isEmpty) return '';
+    return s.length > 28 ? '${s.substring(0, 28)}…' : s;
+  }
+
+  String _nodeValuePreview(ComfyExposedNode node) {
+    final parts = <String>[];
+    for (final field in node.fields) {
+      final text = _fieldPreview(field);
+      if (text.isEmpty) continue;
+      parts.add(text);
+      if (parts.length >= 2) break;
+    }
+    return parts.join(' · ');
+  }
+
+  String _nodeDisplayLabel(ComfyExposedNode node) {
+    final consumers = _workflow == null
+        ? const <ComfyConsumerLink>[]
+        : ComfyDiscover.consumersOf(_workflow!, node.nodeId);
+    return ComfyNodeGroup.labelWithPins(node.label, consumers);
+  }
+
+  Widget _buildNodeTile(
     ComfyExposedNode node, {
+    required int category,
     required int index,
-    required Key key,
   }) {
     final cs = Theme.of(context).colorScheme;
     final canBypass = node.bypassWhenDisabled;
     final on = canBypass
         ? (_enabled[node.nodeId] ?? node.defaultEnabled)
         : true;
-    final expanded = _expanded[node.nodeId] ?? true;
-    final consumers = _workflow == null
-        ? const <ComfyConsumerLink>[]
-        : ComfyDiscover.consumersOf(_workflow!, node.nodeId);
-    final displayLabel = ComfyNodeGroup.labelWithPins(node.label, consumers);
+    final expanded = _expanded[node.nodeId] ?? false;
+    final displayLabel = _nodeDisplayLabel(node);
+    final preview = _nodeValuePreview(node);
 
-    return Card(
-      key: key,
-      margin: const EdgeInsets.only(bottom: 12),
-      child: Padding(
-        padding: EdgeInsets.fromLTRB(4, 4, 12, expanded ? 12 : 6),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Row(
-              children: [
-                ReorderableDragStartListener(
-                  index: index,
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 4),
-                    child: Icon(
-                      Icons.drag_handle,
-                      size: 22,
-                      color: cs.onSurfaceVariant,
+    final tile = Material(
+      color: expanded
+          ? cs.primaryContainer.withValues(alpha: 0.45)
+          : cs.surfaceContainerHighest,
+      borderRadius: BorderRadius.circular(8),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(8),
+        onTap: () {
+          setState(() {
+            // 同分区只展开一个，减少编辑区堆叠。
+            for (final n in _nodeSections()
+                .firstWhere((s) => s.category == category)
+                .nodes) {
+              _expanded[n.nodeId] = n.nodeId == node.nodeId ? !expanded : false;
+            }
+          });
+          _schedulePersistSession();
+        },
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(8, 6, 6, 6),
+          child: Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      displayLabel,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontWeight: FontWeight.w600,
+                        fontSize: 12,
+                      ),
                     ),
-                  ),
-                ),
-                IconButton(
-                  icon: Icon(
-                    expanded ? Icons.expand_less : Icons.expand_more,
-                    size: 22,
-                  ),
-                  onPressed: () {
-                    setState(() => _expanded[node.nodeId] = !expanded);
-                    _schedulePersistSession();
-                  },
-                ),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        displayLabel,
-                        style: const TextStyle(fontWeight: FontWeight.w600),
+                    const SizedBox(height: 2),
+                    Text(
+                      preview.isEmpty ? '未填写' : preview,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 10,
+                        color: cs.onSurfaceVariant,
                       ),
-                      Text(
-                        '${node.nodeId} · ${node.classType}'
-                        '${node.bypassWhenDisabled ? ' · 禁用即 Bypass' : ''}',
-                        style: TextStyle(
-                          fontSize: 11,
-                          color: cs.onSurfaceVariant,
-                        ),
-                      ),
-                      if (consumers.isNotEmpty)
-                        Padding(
-                          padding: const EdgeInsets.only(top: 2),
-                          child: Text(
-                            consumers.map((c) => c.shortLabel).join('\n'),
-                            style: TextStyle(
-                              fontSize: 11,
-                              color: cs.primary,
-                            ),
-                          ),
-                        ),
-                    ],
-                  ),
+                    ),
+                  ],
                 ),
-                if (canBypass)
-                  Switch(
+              ),
+              if (canBypass)
+                SizedBox(
+                  height: 28,
+                  child: Switch(
                     value: on,
+                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
                     onChanged: (v) => _setNodeEnabled(node.nodeId, v),
                   ),
-              ],
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+
+    return LongPressDraggable<({int category, int index})>(
+      data: (category: category, index: index),
+      feedback: Material(
+        elevation: 6,
+        borderRadius: BorderRadius.circular(8),
+        child: SizedBox(
+          width: 160,
+          child: Opacity(opacity: 0.92, child: tile),
+        ),
+      ),
+      childWhenDragging: Opacity(opacity: 0.35, child: tile),
+      child: DragTarget<({int category, int index})>(
+        onWillAcceptWithDetails: (details) =>
+            details.data.category == category && details.data.index != index,
+        onAcceptWithDetails: (details) {
+          _moveNodeInCategory(category, details.data.index, index);
+        },
+        builder: (context, candidate, rejected) {
+          final hovering = candidate.isNotEmpty;
+          return AnimatedContainer(
+            duration: const Duration(milliseconds: 120),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(8),
+              border: hovering
+                  ? Border.all(color: cs.primary, width: 1.5)
+                  : Border.all(color: Colors.transparent),
             ),
-            if (expanded) ...[
-              if (canBypass && !on)
-                Padding(
-                  padding: const EdgeInsets.only(left: 12, bottom: 6),
-                  child: Text(
-                    '已禁用：本次生成将 Bypass 整个节点',
-                    style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant),
-                  ),
-                ),
-              if (consumers.isNotEmpty)
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(12, 0, 8, 8),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        '下游输入点',
-                        style: TextStyle(
-                          fontSize: 11,
-                          fontWeight: FontWeight.w600,
-                          color: cs.onSurfaceVariant,
-                        ),
-                      ),
-                      const SizedBox(height: 4),
-                      ...consumers.map(
-                        (c) => Container(
-                          width: double.infinity,
-                          margin: const EdgeInsets.only(bottom: 4),
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 8,
-                            vertical: 6,
-                          ),
-                          decoration: BoxDecoration(
-                            color: cs.surfaceContainerHighest,
-                            borderRadius: BorderRadius.circular(6),
-                            border: Border.all(color: cs.outlineVariant),
-                          ),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                c.inputKey,
-                                style: TextStyle(
-                                  fontSize: 13,
-                                  fontWeight: FontWeight.w600,
-                                  fontFamily: 'Consolas',
-                                  color: cs.primary,
-                                ),
-                              ),
-                              Text(
-                                c.detailLine,
-                                style: TextStyle(
-                                  fontSize: 11,
-                                  color: cs.onSurfaceVariant,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              Opacity(
-                opacity: on ? 1 : 0.45,
-                child: IgnorePointer(
-                  ignoring: !on,
-                  child: Column(
-                    children: [
-                      for (final field in node.fields) _buildFieldBody(field),
-                    ],
+            child: tile,
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildNodeEditor(ComfyExposedNode node) {
+    final cs = Theme.of(context).colorScheme;
+    final canBypass = node.bypassWhenDisabled;
+    final on = canBypass
+        ? (_enabled[node.nodeId] ?? node.defaultEnabled)
+        : true;
+    final displayLabel = _nodeDisplayLabel(node);
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
+      decoration: BoxDecoration(
+        color: cs.surface,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: cs.outlineVariant),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  displayLabel,
+                  style: const TextStyle(
+                    fontWeight: FontWeight.w600,
+                    fontSize: 13,
                   ),
                 ),
               ),
+              IconButton(
+                tooltip: '收起',
+                visualDensity: VisualDensity.compact,
+                icon: const Icon(Icons.close, size: 18),
+                onPressed: () {
+                  setState(() => _expanded[node.nodeId] = false);
+                  _schedulePersistSession();
+                },
+              ),
             ],
-          ],
-        ),
+          ),
+          if (canBypass && !on)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 6),
+              child: Text(
+                '已禁用：本次生成将 Bypass 整个节点',
+                style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant),
+              ),
+            ),
+          Opacity(
+            opacity: on ? 1 : 0.45,
+            child: IgnorePointer(
+              ignoring: !on,
+              child: _buildFieldsLayout(node),
+            ),
+          ),
+        ],
       ),
+    );
+  }
+
+  bool _isWideField(ComfyExposedField field) =>
+      field.widget.isMedia || field.widget == ComfyWidgetKind.multiline;
+
+  Widget _buildFieldsLayout(ComfyExposedNode node) {
+    final wide = <ComfyExposedField>[];
+    final narrow = <ComfyExposedField>[];
+    for (final field in node.fields) {
+      if (_isWideField(field)) {
+        wide.add(field);
+      } else {
+        narrow.add(field);
+      }
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        for (final field in wide) _buildFieldBody(field),
+        for (var i = 0; i < narrow.length; i += 2)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 2),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(child: _buildFieldBody(narrow[i])),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: i + 1 < narrow.length
+                      ? _buildFieldBody(narrow[i + 1])
+                      : const SizedBox.shrink(),
+                ),
+              ],
+            ),
+          ),
+      ],
     );
   }
 
@@ -1559,7 +2095,9 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
       case ComfyWidgetKind.bool:
         return SwitchListTile(
           contentPadding: EdgeInsets.zero,
-          title: Text(field.label),
+          dense: true,
+          visualDensity: VisualDensity.compact,
+          title: Text(field.label, style: const TextStyle(fontSize: 13)),
           value: _values[field.id] == true,
           onChanged: (v) => _setFieldValue(field.id, v),
         );
@@ -1568,17 +2106,17 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
       case ComfyWidgetKind.video:
         final path = _values[field.id]?.toString() ?? '';
         return Padding(
-          padding: const EdgeInsets.only(bottom: 10),
+          padding: const EdgeInsets.only(bottom: 8),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(field.label, style: const TextStyle(fontSize: 13)),
+              Text(field.label, style: const TextStyle(fontSize: 12)),
               Row(
                 children: [
                   Expanded(
                     child: Text(
                       path.isEmpty ? '未选择' : path,
-                      maxLines: 2,
+                      maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
                         fontSize: 12,
@@ -1587,10 +2125,16 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
                     ),
                   ),
                   TextButton(
+                    style: TextButton.styleFrom(
+                      visualDensity: VisualDensity.compact,
+                    ),
                     onPressed: () => _useSelectedFile(field),
                     child: const Text('用当前选中'),
                   ),
                   FilledButton.tonal(
+                    style: FilledButton.styleFrom(
+                      visualDensity: VisualDensity.compact,
+                    ),
                     onPressed: () => _pickMedia(field),
                     child: const Text('浏览'),
                   ),
@@ -1601,15 +2145,20 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
         );
       case ComfyWidgetKind.multiline:
         return Padding(
-          padding: const EdgeInsets.only(bottom: 10),
+          padding: const EdgeInsets.only(bottom: 8),
           child: TextField(
             controller: _textCtrls[field.id],
-            maxLines: 5,
+            maxLines: 4,
             onChanged: (_) => _schedulePersistSession(),
             decoration: InputDecoration(
+              isDense: true,
               labelText: field.label,
               border: const OutlineInputBorder(),
               alignLabelWithHint: true,
+              contentPadding: const EdgeInsets.symmetric(
+                horizontal: 10,
+                vertical: 10,
+              ),
             ),
           ),
         );
@@ -1618,7 +2167,7 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
       case ComfyWidgetKind.text:
       case ComfyWidgetKind.choice:
         return Padding(
-          padding: const EdgeInsets.only(bottom: 10),
+          padding: const EdgeInsets.only(bottom: 8),
           child: TextField(
             controller: _textCtrls[field.id],
             onChanged: (_) => _schedulePersistSession(),
@@ -1627,8 +2176,13 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
                 ? const TextInputType.numberWithOptions(decimal: true)
                 : TextInputType.text,
             decoration: InputDecoration(
+              isDense: true,
               labelText: field.label,
               border: const OutlineInputBorder(),
+              contentPadding: const EdgeInsets.symmetric(
+                horizontal: 10,
+                vertical: 10,
+              ),
             ),
           ),
         );

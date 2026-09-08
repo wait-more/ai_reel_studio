@@ -224,6 +224,18 @@ class ComfyNodeGroup {
     return 4;
   }
 
+  /// 生成面板分区标题。
+  static String categoryLabel(int category) => switch (category) {
+        0 => '图片',
+        1 => '音频',
+        2 => '视频',
+        3 => '参数',
+        _ => '其它',
+      };
+
+  /// 媒体类分区默认展开；参数/其它默认收起，减少滚动。
+  static bool categoryExpandedByDefault(int category) => category <= 2;
+
   static int compareByName(
     String classTypeA,
     String labelA,

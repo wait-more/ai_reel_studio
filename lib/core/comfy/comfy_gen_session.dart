@@ -5,8 +5,12 @@ import 'package:shared_preferences/shared_preferences.dart';
 /// 生成面板会话状态（按 URL + 模板 一份），整合排序/使能/展开/输入值。
 class ComfyGenSession {
   final List<String> order;
+  /// 分类分区顺序（[ComfyNodeGroup.sortCategory] 的整型字符串）。
+  final List<String> categoryOrder;
   final Map<String, bool> enabled;
   final Map<String, bool> expanded;
+  /// 分类分区展开状态（category 整型字符串 → bool）。
+  final Map<String, bool> categoryExpanded;
   /// fieldId → 可 JSON 序列化的值（路径/文本/数字/布尔）。
   final Map<String, dynamic> values;
   /// 保存文件名（无扩展名或带扩展名均可）；空则沿用 Comfy 返回名。
@@ -14,8 +18,10 @@ class ComfyGenSession {
 
   const ComfyGenSession({
     this.order = const [],
+    this.categoryOrder = const [],
     this.enabled = const {},
     this.expanded = const {},
+    this.categoryExpanded = const {},
     this.values = const {},
     this.outputFileName = '',
   });
@@ -30,8 +36,10 @@ class ComfyGenSession {
 
   Map<String, dynamic> toJson() => {
         'order': order,
+        'categoryOrder': categoryOrder,
         'enabled': enabled,
         'expanded': expanded,
+        'categoryExpanded': categoryExpanded,
         'values': values,
         'outputFileName': outputFileName,
       };
@@ -58,8 +66,10 @@ class ComfyGenSession {
 
     return ComfyGenSession(
       order: strList(json['order']),
+      categoryOrder: strList(json['categoryOrder']),
       enabled: boolMap(json['enabled']),
       expanded: boolMap(json['expanded']),
+      categoryExpanded: boolMap(json['categoryExpanded']),
       values: valueMap(json['values']),
       outputFileName: json['outputFileName']?.toString() ?? '',
     );
@@ -67,15 +77,19 @@ class ComfyGenSession {
 
   ComfyGenSession copyWith({
     List<String>? order,
+    List<String>? categoryOrder,
     Map<String, bool>? enabled,
     Map<String, bool>? expanded,
+    Map<String, bool>? categoryExpanded,
     Map<String, dynamic>? values,
     String? outputFileName,
   }) {
     return ComfyGenSession(
       order: order ?? this.order,
+      categoryOrder: categoryOrder ?? this.categoryOrder,
       enabled: enabled ?? this.enabled,
       expanded: expanded ?? this.expanded,
+      categoryExpanded: categoryExpanded ?? this.categoryExpanded,
       values: values ?? this.values,
       outputFileName: outputFileName ?? this.outputFileName,
     );
