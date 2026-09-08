@@ -7,7 +7,7 @@
 #ifndef MyAppVersion
   #define MyAppVersion "0.1.0"
 #endif
-#define MyAppPublisher "CTTI"
+#define MyAppPublisher "AIReelStudio"
 #define MyAppExeName "ai_reel_studio.exe"
 #ifndef MyReleaseDir
   #define MyReleaseDir "..\..\build\windows\x64\runner\Release"
