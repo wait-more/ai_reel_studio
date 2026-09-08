@@ -106,6 +106,76 @@ $ZipName = "AIReelStudio-$Version-windows-x64.zip"
 $ZipPath = Join-Path $Dist $ZipName
 $FlutterBuildFlag = if ($Configuration -eq 'Debug') { '--debug' } else { '--release' }
 
+function Repair-FlutterConstFinder {
+  # Flutter 3.47 起引擎 windows-x64-flutter.zip 不再带 const_finder，
+  # 但工具链仍从 engine\windows-x64\ 读取；完整文件在 font-subset.zip。
+  $cacheRoot = $null
+  if ($env:FLUTTER_ROOT) {
+    $cacheRoot = Join-Path $env:FLUTTER_ROOT 'bin\cache'
+  } else {
+    $flutterCmd = Get-Command flutter.bat, flutter -ErrorAction SilentlyContinue |
+      Select-Object -First 1
+    if ($flutterCmd -and $flutterCmd.Source) {
+      # ...\flutter\bin\flutter.bat -> ...\flutter\bin\cache
+      $binDir = Split-Path -Parent $flutterCmd.Source
+      $cacheRoot = Join-Path $binDir 'cache'
+    }
+  }
+  if (-not $cacheRoot -or -not (Test-Path $cacheRoot)) {
+    foreach ($candidate in @(
+      'D:\Program Files\flutter\bin\cache',
+      'C:\flutter\bin\cache',
+      (Join-Path $env:LOCALAPPDATA 'flutter\bin\cache')
+    )) {
+      if (Test-Path $candidate) { $cacheRoot = $candidate; break }
+    }
+  }
+  if (-not $cacheRoot -or -not (Test-Path $cacheRoot)) { return }
+
+  $engineDir = Join-Path $cacheRoot 'artifacts\engine\windows-x64'
+  $constFinder = Join-Path $engineDir 'const_finder.dart.snapshot'
+  if (Test-Path $constFinder) { return }
+
+  $stamp = Get-Content (Join-Path $cacheRoot 'engine.stamp') -ErrorAction SilentlyContinue
+  if (-not $stamp) { return }
+  $stamp = $stamp.Trim()
+  $baseUrl = if ($env:FLUTTER_STORAGE_BASE_URL) {
+    $env:FLUTTER_STORAGE_BASE_URL.TrimEnd('/')
+  } else {
+    'https://storage.googleapis.com'
+  }
+  $url = "$baseUrl/flutter_infra_release/flutter/$stamp/windows-x64/font-subset.zip"
+  $tmp = Join-Path $env:TEMP "flutter-font-subset-$stamp"
+  New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+  $zip = Join-Path $tmp 'font-subset.zip'
+  Write-Host "==> Restoring missing const_finder from font-subset.zip" -ForegroundColor Yellow
+  Write-Host "    $url"
+  & curl.exe -L -k --fail --retry 3 -o $zip $url
+  if ($LASTEXITCODE -ne 0) {
+    throw "Failed to download font-subset.zip (needed for const_finder). $url"
+  }
+  $extract = Join-Path $tmp 'extract'
+  if (Test-Path $extract) { Remove-Item -Recurse -Force $extract }
+  Expand-Archive -Path $zip -DestinationPath $extract -Force
+  $found = Get-ChildItem $extract -Recurse -Filter 'const_finder.dart.snapshot' |
+    Select-Object -First 1
+  if (-not $found) {
+    throw 'font-subset.zip downloaded but const_finder.dart.snapshot not found inside'
+  }
+  New-Item -ItemType Directory -Force -Path $engineDir | Out-Null
+  Copy-Item -Force $found.FullName $constFinder
+  $fontSubsetExe = Get-ChildItem $extract -Recurse -Filter 'font-subset.exe' |
+    Select-Object -First 1
+  if ($fontSubsetExe) {
+    Copy-Item -Force $fontSubsetExe.FullName (Join-Path $engineDir 'font-subset.exe')
+  }
+  Write-Host "    Restored: $constFinder" -ForegroundColor Green
+}
+
+if ($Configuration -eq 'Release') {
+  Repair-FlutterConstFinder
+}
+
 Write-Host "==> Flutter pub get" -ForegroundColor Cyan
 flutter pub get
 if ($LASTEXITCODE -ne 0) { throw "flutter pub get failed" }
