@@ -1228,6 +1228,33 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
                                   border: InputBorder.none,
                                   contentPadding: _editorPadding,
                                 ),
+                                contextMenuBuilder: (ctx, editableTextState) {
+                                  final chord =
+                                      ref.read(sendAgentRefChordProvider);
+                                  final defaults = editableTextState
+                                      .contextMenuButtonItems;
+                                  return AdaptiveTextSelectionToolbar(
+                                    anchors:
+                                        editableTextState.contextMenuAnchors,
+                                    children: [
+                                      ...AdaptiveTextSelectionToolbar
+                                          .getAdaptiveButtons(ctx, defaults),
+                                      const Divider(height: 8),
+                                      ...AdaptiveTextSelectionToolbar
+                                          .getAdaptiveButtons(ctx, [
+                                        ContextMenuButtonItem(
+                                          label:
+                                              '填入智能体 (${chord.label})',
+                                          onPressed: () {
+                                            ContextMenuController.removeAny();
+                                            sendAgentReferenceToShell(
+                                                ctx, ref);
+                                          },
+                                        ),
+                                      ]),
+                                    ],
+                                  );
+                                },
                               ),
                             ),
                             if (showSelOverlay)

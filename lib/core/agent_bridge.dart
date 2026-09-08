@@ -1,10 +1,12 @@
 import 'dart:io';
 import 'dart:math' as math;
 
-import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'config.dart';
+import 'providers.dart';
+import 'toast.dart';
 
 /// 已知智能体 / Agent CLI 关键字（命令或终端近期输出命中即视为智能体会话）。
 const kKnownAgentTokens = <String>[
@@ -140,3 +142,44 @@ final agentRefBuilderProvider = StateProvider<AgentRefBuilder?>((ref) => null);
 final agentRefPreserveSelectionProvider =
     StateProvider<VoidCallback?>((ref) => null);
 final shellAgentHostProvider = StateProvider<ShellAgentHost?>((ref) => null);
+
+/// 把当前文档/选区引用填入活跃智能体输入框（不回车），并聚焦输入区。
+///
+/// 供快捷键与编辑器右键菜单共用。成功返回 true。
+bool sendAgentReferenceToShell(BuildContext context, WidgetRef ref) {
+  final builder = ref.read(agentRefBuilderProvider);
+  if (builder == null) {
+    showGlobalToast(context, '请先打开一个文档');
+    return false;
+  }
+  final refText = builder();
+  if (refText == null || refText.isEmpty) {
+    showGlobalToast(context, '请先打开一个文档');
+    return false;
+  }
+
+  if (!ref.read(shellVisibleProvider)) {
+    ref.read(shellVisibleProvider.notifier).state = true;
+  }
+
+  final host = ref.read(shellAgentHostProvider);
+  if (host == null) {
+    showGlobalToast(context, 'Shell 未就绪');
+    return false;
+  }
+  if (!host.isAgentActive()) {
+    showGlobalToast(
+      context,
+      '当前终端未检测到智能体，请先启动 opencode / dsh-tui 等',
+    );
+    return false;
+  }
+  if (!host.inject(refText)) {
+    showGlobalToast(context, '填入失败');
+    return false;
+  }
+  ref.read(agentRefPreserveSelectionProvider)?.call();
+  host.focusInput();
+  showGlobalToast(context, '已填入 $refText');
+  return true;
+}

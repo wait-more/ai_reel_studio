@@ -3,7 +3,6 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/agent_bridge.dart';
 import '../../core/providers.dart';
-import '../../core/toast.dart';
 import '../../core/workspace_memory.dart';
 import '../settings/settings_page.dart';
 import '../tree/project_tree.dart';
@@ -49,40 +48,7 @@ class _MainLayoutState extends ConsumerState<MainLayout> {
   }
 
   void _sendAgentReference() {
-    final builder = ref.read(agentRefBuilderProvider);
-    if (builder == null) {
-      showGlobalToast(context, '请先打开一个文档');
-      return;
-    }
-    final refText = builder();
-    if (refText == null || refText.isEmpty) {
-      showGlobalToast(context, '请先打开一个文档');
-      return;
-    }
-
-    if (!ref.read(shellVisibleProvider)) {
-      ref.read(shellVisibleProvider.notifier).state = true;
-    }
-
-    final host = ref.read(shellAgentHostProvider);
-    if (host == null) {
-      showGlobalToast(context, 'Shell 未就绪');
-      return;
-    }
-    if (!host.isAgentActive()) {
-      showGlobalToast(
-        context,
-        '当前终端未检测到智能体，请先启动 opencode / dsh-tui 等',
-      );
-      return;
-    }
-    if (!host.inject(refText)) {
-      showGlobalToast(context, '填入失败');
-      return;
-    }
-    ref.read(agentRefPreserveSelectionProvider)?.call();
-    host.focusInput();
-    showGlobalToast(context, '已填入 $refText');
+    sendAgentReferenceToShell(context, ref);
   }
 
   @override
