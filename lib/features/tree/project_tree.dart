@@ -6,10 +6,10 @@ import '../../core/config.dart';
 import '../../core/directory_parser.dart';
 import '../../core/directory_watcher.dart';
 import '../../core/file_actions.dart';
+import '../../core/fs_context_menu.dart';
 import '../../core/media_types.dart';
 import '../../core/progress.dart';
 import '../../core/providers.dart';
-import '../../core/toast.dart';
 import '../media/media_preview.dart';
 
 class ProjectTree extends ConsumerStatefulWidget {
@@ -457,191 +457,28 @@ class _TreeNodeWidgetState extends ConsumerState<_TreeNodeWidget> {
   }
 
   
-/// 通过右键菜单提取帧（首帧/末帧）并给出可见反馈。
-  Future<void> _extractFrameAndNotify(String tag,
-      {required bool lastFrame}) async {
-    final mediaPath = widget.node.path;
-    final result = await extractMediaFrame(
-      path: mediaPath,
-      tag: tag,
-      lastFrame: lastFrame,
-      hostContext: context,
-    );
-    if (!context.mounted) return;
-    showGlobalToast(context, result != null
-        ? '已保存：$result'
-        : '截帧失败：未取得帧数据');
-    if (result != null) {
-      // 新帧文件已生成，通知父级刷新该目录。
-      widget.onTreeChanged(Directory(mediaPath).parent.path);
-    }
-  }
-
-  /// 右键操作菜单：打开 / 在资源管理器显示 /（视频）截取首尾帧。
-  /// （目录）新建子文件夹、设置进度 / 重命名 /（文件）复制 / 删除。
-  /// 功能区之间以细分隔线划分。
+  /// 右键操作菜单（与中间素材栏共用 [showFsContextMenu]）。
   Future<void> _showMenu(BuildContext context) async {
     final node = widget.node;
     final isFile = node.type == ScriptNodeType.file;
-    final isVideo =
-        isFile && classifyMedia(node.path) == MediaKind.video;
-    final overlay = Overlay.of(context).context.findRenderObject()! as RenderBox;
-    final origin = overlay.globalToLocal(_menuPos);
-    final action = await showMenu<String>(
-      context: context,
-      position: RelativeRect.fromRect(
-        origin & const Size(1, 1),
-        Offset.zero & overlay.size,
-      ),
-      items: [
-        // 查看
-        PopupMenuItem(height: 32,
-          value: 'open',
-          child: Row(children: [
-            const Icon(Icons.open_in_new, size: 16),
-            const SizedBox(width: 8),
-            Text(isFile ? '打开' : '在当前目录查看'),
-          ]),
-        ),
-        PopupMenuItem(height: 32,
-          value: 'reveal',
-          child: Row(children: [
-            const Icon(Icons.folder_open, size: 16),
-            const SizedBox(width: 8),
-            const Text('在资源管理器显示'),
-          ]),
-        ),
-        // 媒体操作（仅视频）
-        if (isVideo) ...[
-          const PopupMenuDivider(height: 4),
-          PopupMenuItem(height: 32,
-            value: 'grabFirst',
-            child: Row(children: [
-              const Icon(Icons.first_page, size: 16, color: Colors.tealAccent),
-              const SizedBox(width: 8),
-              const Text('截取首帧'),
-            ]),
-          ),
-          PopupMenuItem(height: 32,
-            value: 'grabLast',
-            child: Row(children: [
-              const Icon(Icons.last_page, size: 16, color: Colors.tealAccent),
-              const SizedBox(width: 8),
-              const Text('截取末帧'),
-            ]),
-          ),
-        ],
-        // 目录管理（仅目录）
-        if (!isFile) ...[
-          const PopupMenuDivider(height: 4),
-          PopupMenuItem(height: 32,
-            value: 'newFolder',
-            child: Row(children: [
-              const Icon(Icons.create_new_folder_outlined, size: 16),
-              const SizedBox(width: 8),
-              const Text('新建子文件夹'),
-            ]),
-          ),
-          PopupMenuItem(height: 32,
-            value: 'progress',
-            child: Row(children: [
-              const Icon(Icons.donut_large, size: 16, color: Colors.teal),
-              const SizedBox(width: 8),
-              const Text('设置创作进度'),
-            ]),
-          ),
-        ],
-        // 文件操作
-        const PopupMenuDivider(height: 4),
-        PopupMenuItem(height: 32,
-          value: 'rename',
-          child: Row(children: [
-            const Icon(Icons.drive_file_rename_outline, size: 16),
-            const SizedBox(width: 8),
-            const Text('重命名'),
-          ]),
-        ),
-        if (!isFile)
-          PopupMenuItem(height: 32,
-            value: 'duplicate',
-            child: Row(children: [
-              const Icon(Icons.copy, size: 16),
-              const SizedBox(width: 8),
-              const Text('复制'),
-            ]),
-          ),
-        // 危险操作
-        const PopupMenuDivider(height: 4),
-        PopupMenuItem(height: 32,
-          value: 'delete',
-          child: Row(children: [
-            Icon(Icons.delete_outline, size: 16, color: Colors.red[300]),
-            const SizedBox(width: 8),
-            Text('删除', style: TextStyle(color: Colors.red[300])),
-          ]),
-        ),
-      ],
-    );
-
-    if (action == null) return;
     final dir = Directory(node.path).parent.path;
-    switch (action) {
-      case 'open':
+    await showFsContextMenu(
+      context: context,
+      ref: ref,
+      globalPosition: _menuPos,
+      path: node.path,
+      isDir: !isFile,
+      displayName: node.name,
+      onOpen: () async {
         if (isFile) {
           _openFile(node.path);
         } else {
           ref.read(selectedDirProvider.notifier).state = node.path;
           ref.read(contentModeProvider.notifier).state = 'assets';
         }
-        break;
-      case 'grabFirst':
-        await _extractFrameAndNotify('首帧', lastFrame: false);
-        break;
-      case 'grabLast':
-        await _extractFrameAndNotify('末帧', lastFrame: true);
-        break;
-      case 'reveal':
-        await revealInExplorer(node.path);
-        break;
-      case 'newFolder':
-        await newFolderDialog(
-          context,
-          parentDir: node.path,
-          onDone: () => widget.onTreeChanged(node.path),
-        );
-        break;
-      case 'progress':
-        await setProgressDialog(
-          context,
-          ref,
-          path: node.path,
-          displayName: node.name,
-        );
-        break;
-      case 'rename':
-        await renameEntityDialog(
-          context,
-          path: node.path,
-          isDir: !isFile,
-          onDone: () => widget.onTreeChanged(dir),
-        );
-        break;
-      case 'duplicate':
-        await duplicateFileDialog(
-          context,
-          path: node.path,
-          onDone: () => widget.onTreeChanged(dir),
-        );
-        break;
-      case 'delete':
-        await deleteEntityDialog(
-          context,
-          path: node.path,
-          isDir: !isFile,
-          onDone: () => widget.onTreeChanged(dir),
-        );
-        break;
-    }
+      },
+      onChanged: () => widget.onTreeChanged(isFile ? dir : node.path),
+    );
   }
 
   /// 折叠后中间栏回到的父目录；不超过项目根。
@@ -707,83 +544,99 @@ class _TreeNodeWidgetState extends ConsumerState<_TreeNodeWidget> {
       children: [
         Padding(
           padding: EdgeInsets.only(left: 8.0 + level * 12.0, right: 2),
-          child: DecoratedBox(
-            decoration: BoxDecoration(
-              color: selected
-                  ? Theme.of(context).colorScheme.primary.withOpacity(0.15)
-                  : null,
-              borderRadius: BorderRadius.circular(4),
-            ),
-            child: Row(
-              children: [
-                Expanded(
-                  child: InkWell(
-                    borderRadius: BorderRadius.circular(4),
-                    onTap: () {
-                      if (isFile) {
-                        _openFile(node.path);
-                      } else {
-                        // 单击名称：只切换中间栏，不折叠/展开
-                        _selectDirInAssets(node.path);
-                      }
-                    },
-                    onDoubleTap: isFile
-                        ? null
-                        : () {
-                            // 双击名称：展开/折叠（与箭头一致）
-                            _toggleExpand();
-                          },
-                    onSecondaryTapDown: (d) => _menuPos = d.globalPosition,
-                    onSecondaryTap: () => _showMenu(context),
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 4),
-                      child: Row(
-                        children: [
-                          Icon(
-                            _iconFor(node),
-                            size: 16,
-                            color: _iconColorFor(context, node),
-                          ),
-                          const SizedBox(width: 6),
-                          Expanded(
-                            child: Text(
-                              node.name,
-                              overflow: TextOverflow.ellipsis,
-                              style: TextStyle(
-                                fontSize: 13,
-                                fontWeight: FontWeight.w400,
-                                color: isExpanded
-                                    ? Theme.of(context).colorScheme.primary
-                                    : null,
+          child: FsContextMenuTarget(
+            path: node.path,
+            isDir: !isFile,
+            displayName: node.name,
+            ref: ref,
+            onOpen: () async {
+              if (isFile) {
+                _openFile(node.path);
+              } else {
+                ref.read(selectedDirProvider.notifier).state = node.path;
+                ref.read(contentModeProvider.notifier).state = 'assets';
+              }
+            },
+            onChanged: () =>
+                widget.onTreeChanged(isFile ? Directory(node.path).parent.path : node.path),
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                color: selected
+                    ? Theme.of(context).colorScheme.primary.withOpacity(0.15)
+                    : null,
+                borderRadius: BorderRadius.circular(4),
+              ),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: InkWell(
+                      borderRadius: BorderRadius.circular(4),
+                      onTap: () {
+                        if (isFile) {
+                          _openFile(node.path);
+                        } else {
+                          // 单击名称：只切换中间栏，不折叠/展开
+                          _selectDirInAssets(node.path);
+                        }
+                      },
+                      onDoubleTap: isFile
+                          ? null
+                          : () {
+                              // 双击名称：展开/折叠（与箭头一致）
+                              _toggleExpand();
+                            },
+                      onSecondaryTapDown: (d) => _menuPos = d.globalPosition,
+                      onSecondaryTap: () => _showMenu(context),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 4),
+                        child: Row(
+                          children: [
+                            Icon(
+                              _iconFor(node),
+                              size: 16,
+                              color: _iconColorFor(context, node),
+                            ),
+                            const SizedBox(width: 6),
+                            Expanded(
+                              child: Text(
+                                node.name,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w400,
+                                  color: isExpanded
+                                      ? Theme.of(context).colorScheme.primary
+                                      : null,
+                                ),
                               ),
                             ),
-                          ),
-                          _progressBubble(node),
-                        ],
+                            _progressBubble(node),
+                          ],
+                        ),
                       ),
                     ),
                   ),
-                ),
-                if (canExpand)
-                  InkWell(
-                    borderRadius: BorderRadius.circular(4),
-                    onTap: _toggleExpand,
-                    onSecondaryTapDown: (d) => _menuPos = d.globalPosition,
-                    onSecondaryTap: () => _showMenu(context),
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 4,
-                        vertical: 4,
-                      ),
-                      child: Icon(
-                        isExpanded
-                            ? Icons.keyboard_arrow_down
-                            : Icons.keyboard_arrow_right,
-                        size: 16,
+                  if (canExpand)
+                    InkWell(
+                      borderRadius: BorderRadius.circular(4),
+                      onTap: _toggleExpand,
+                      onSecondaryTapDown: (d) => _menuPos = d.globalPosition,
+                      onSecondaryTap: () => _showMenu(context),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 4,
+                          vertical: 4,
+                        ),
+                        child: Icon(
+                          isExpanded
+                              ? Icons.keyboard_arrow_down
+                              : Icons.keyboard_arrow_right,
+                          size: 16,
+                        ),
                       ),
                     ),
-                  ),
-              ],
+                ],
+              ),
             ),
           ),
         ),

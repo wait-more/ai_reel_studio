@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/file_actions.dart';
+import '../../core/fs_context_menu.dart';
 import '../../core/media_types.dart';
 import '../../core/progress.dart';
 import '../../core/providers.dart';
@@ -696,49 +697,64 @@ class _AssetCard extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    return InkWell(
-      onTap: () {
+    return FsContextMenuTarget(
+      path: entity.path,
+      isDir: _isDir,
+      displayName: _name,
+      ref: ref,
+      onOpen: () async {
         if (_isDir) {
           onEnterDir(entity.path);
         } else {
           onOpenFile(entity.path);
         }
       },
-      onSecondaryTapDown: (d) => _menuPos = d.globalPosition,
-      onSecondaryTap: () => _showMenu(context, ref),
-      borderRadius: BorderRadius.circular(8),
-      child: Container(
-        decoration: BoxDecoration(
-          color: Theme.of(context).colorScheme.surfaceContainerHigh,
-          borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: Colors.white10),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Expanded(child: _preview(context)),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
-              decoration: const BoxDecoration(
-                color: Colors.black26,
-                borderRadius:
-                    BorderRadius.vertical(bottom: Radius.circular(8)),
-              ),
-              child: Row(
-                children: [
-                  if (_isDir) _statusBubble(ref),
-                  Expanded(
-                    child: Text(
-                      _name,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(fontSize: 11),
+      onChanged: onChanged,
+      child: InkWell(
+        onTap: () {
+          if (_isDir) {
+            onEnterDir(entity.path);
+          } else {
+            onOpenFile(entity.path);
+          }
+        },
+        onSecondaryTapDown: (d) => _menuPos = d.globalPosition,
+        onSecondaryTap: () => _showMenu(context, ref),
+        borderRadius: BorderRadius.circular(8),
+        child: Container(
+          decoration: BoxDecoration(
+            color: Theme.of(context).colorScheme.surfaceContainerHigh,
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: Colors.white10),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Expanded(child: _preview(context)),
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+                decoration: const BoxDecoration(
+                  color: Colors.black26,
+                  borderRadius:
+                      BorderRadius.vertical(bottom: Radius.circular(8)),
+                ),
+                child: Row(
+                  children: [
+                    if (_isDir) _statusBubble(ref),
+                    Expanded(
+                      child: Text(
+                        _name,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(fontSize: 11),
+                      ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
@@ -786,121 +802,24 @@ class _AssetCard extends ConsumerWidget {
   }
 
   
-/// 右键操作菜单：打开 / 在资源管理器显示 / 重命名 / 复制 / 删除。
+  /// 右键操作菜单（与左树共用 [showFsContextMenu]）。
   Future<void> _showMenu(BuildContext context, WidgetRef ref) async {
-    final overlay = Overlay.of(context).context.findRenderObject()! as RenderBox;
-    final origin = overlay.globalToLocal(_menuPos);
-    final action = await showMenu<String>(
+    await showFsContextMenu(
       context: context,
-      position: RelativeRect.fromRect(
-        origin & const Size(1, 1),
-        Offset.zero & overlay.size,
-      ),
-      items: [
-        // 查看
-        PopupMenuItem(height: 32,
-          value: 'open',
-          child: Row(children: [
-            const Icon(Icons.open_in_new, size: 16),
-            const SizedBox(width: 8),
-            Text(_isDir ? '在当前目录查看' : '打开'),
-          ]),
-        ),
-        PopupMenuItem(height: 32,
-          value: 'reveal',
-          child: Row(children: [
-            const Icon(Icons.folder_open, size: 16),
-            const SizedBox(width: 8),
-            const Text('在资源管理器显示'),
-          ]),
-        ),
-        // 管理（仅目录）
-        if (_isDir) ...[
-          const PopupMenuDivider(height: 4),
-          PopupMenuItem(height: 32,
-            value: 'progress',
-            child: Row(children: [
-              const Icon(Icons.donut_large, size: 16, color: Colors.teal),
-              const SizedBox(width: 8),
-              const Text('设置创作进度'),
-            ]),
-          ),
-        ],
-        // 文件操作
-        const PopupMenuDivider(height: 4),
-        PopupMenuItem(height: 32,
-          value: 'rename',
-          child: Row(children: [
-            const Icon(Icons.drive_file_rename_outline, size: 16),
-            const SizedBox(width: 8),
-            const Text('重命名'),
-          ]),
-        ),
-        if (!_isDir)
-          PopupMenuItem(height: 32,
-            value: 'duplicate',
-            child: Row(children: [
-              const Icon(Icons.copy, size: 16),
-              const SizedBox(width: 8),
-              const Text('复制'),
-            ]),
-          ),
-        // 危险操作
-        const PopupMenuDivider(height: 4),
-        PopupMenuItem(height: 32,
-          value: 'delete',
-          child: Row(children: [
-            Icon(Icons.delete_outline, size: 16, color: Colors.red[300]),
-            const SizedBox(width: 8),
-            Text('删除', style: TextStyle(color: Colors.red[300])),
-          ]),
-        ),
-      ],
-    );
-    switch (action) {
-      case 'open':
+      ref: ref,
+      globalPosition: _menuPos,
+      path: entity.path,
+      isDir: _isDir,
+      displayName: _name,
+      onOpen: () async {
         if (_isDir) {
           onEnterDir(entity.path);
         } else {
           onOpenFile(entity.path);
         }
-        break;
-      case 'reveal':
-        await revealInExplorer(entity.path);
-        break;
-      case 'progress':
-        await setProgressDialog(
-          context,
-          ref,
-          path: entity.path,
-          displayName: _name,
-        );
-        break;
-      case 'rename':
-        if (await renameEntityDialog(
-              context,
-              path: entity.path,
-              isDir: _isDir,
-            ) !=
-            null) {
-          onChanged();
-        }
-        break;
-      case 'duplicate':
-        if (await duplicateFileDialog(context, path: entity.path) != null) {
-          onChanged();
-        }
-        break;
-      case 'delete':
-        if (await deleteEntityDialog(
-          context,
-          path: entity.path,
-          isDir: _isDir,
-        )) {
-          onChanged();
-        }
-        break;
-    }
+      },
+      onChanged: onChanged,
+    );
   }
 
   Widget _preview(BuildContext context) {
