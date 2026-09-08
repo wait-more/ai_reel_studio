@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'comfy/comfy_models.dart';
@@ -14,6 +16,64 @@ final selectedDirProvider = StateProvider<String?>((ref) => null);
 
 /// 已打开的 Tab 文件路径列表
 final openTabsProvider = StateProvider<List<String>>((ref) => []);
+
+/// 删除文件或目录后，关闭受影响的编辑器 Tab，并清理脏标记 / 视图状态。
+void closeOpenDocumentsAffectedBy(
+  ProviderContainer container, {
+  required String path,
+  required bool isDir,
+}) {
+  final sep = Platform.pathSeparator;
+  final pathNorm = path.toLowerCase();
+
+  bool affected(String candidate) {
+    final t = candidate.toLowerCase();
+    if (t == pathNorm) return true;
+    if (!isDir) return false;
+    final prefix = pathNorm.endsWith(sep) ? pathNorm : '$pathNorm$sep';
+    return t.startsWith(prefix);
+  }
+
+  final tabs = container.read(openTabsProvider);
+  final newTabs = tabs.where((t) => !affected(t)).toList();
+  if (newTabs.length != tabs.length) {
+    container.read(openTabsProvider.notifier).state = newTabs;
+  }
+
+  final dirty = container.read(dirtyFilesProvider);
+  final newDirty = dirty.where((p) => !affected(p)).toSet();
+  if (newDirty.length != dirty.length) {
+    container.read(dirtyFilesProvider.notifier).state = newDirty;
+  }
+
+  final saves = container.read(saveActionsProvider);
+  if (saves.keys.any(affected)) {
+    container.read(saveActionsProvider.notifier).state = {
+      for (final e in saves.entries)
+        if (!affected(e.key)) e.key: e.value,
+    };
+  }
+
+  final views = container.read(editorViewStatesProvider);
+  if (views.keys.any(affected)) {
+    container.read(editorViewStatesProvider.notifier).state = {
+      for (final e in views.entries)
+        if (!affected(e.key)) e.key: e.value,
+    };
+  }
+
+  final selected = container.read(selectedFileProvider);
+  if (selected != null && affected(selected)) {
+    container.read(selectedFileProvider.notifier).state =
+        newTabs.isNotEmpty ? newTabs.last : null;
+  }
+
+  final selectedDir = container.read(selectedDirProvider);
+  if (selectedDir != null && affected(selectedDir)) {
+    final parent = Directory(path).parent.path;
+    container.read(selectedDirProvider.notifier).state = parent;
+  }
+}
 
 /// 各文档光标/滚动位置（供工作区记忆持久化与恢复）。
 final editorViewStatesProvider =

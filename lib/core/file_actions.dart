@@ -187,16 +187,54 @@ Future<String?> newFolderDialog(
   return target;
 }
 
+/// 在 [parentDir] 下新建空文档。未写扩展名时默认 `.md`。成功返回新路径。
+Future<String?> newDocumentDialog(
+  BuildContext context, {
+  required String parentDir,
+  VoidCallback? onDone,
+}) async {
+  final name = await promptTextDialog(
+    context,
+    title: '新建文档',
+    label: '文件名（可省略 .md）：',
+  );
+  if (name == null || name.trim().isEmpty) return null;
+  var fileName = name.trim();
+  // 禁止路径分隔符，避免越出目标目录。
+  if (fileName.contains('/') ||
+      fileName.contains('\\') ||
+      fileName.contains('..')) {
+    _showError(context, '文件名不能包含路径');
+    return null;
+  }
+  if (!fileName.contains('.')) {
+    fileName = '$fileName.md';
+  }
+  final target = '$parentDir${Platform.pathSeparator}$fileName';
+  if (await File(target).exists()) {
+    _showError(context, '已存在同名文件：$fileName');
+    return null;
+  }
+  try {
+    await File(target).create(recursive: true);
+  } catch (e) {
+    _showError(context, '创建失败：$e');
+    return null;
+  }
+  onDone?.call();
+  return target;
+}
+
 /// 设置创作进度状态（记录到进度 provider + SharedPreferences）。
 Future<void> setProgressDialog(
   BuildContext context,
-  WidgetRef ref, {
+  ProviderContainer container, {
   required String path,
   required String displayName,
   VoidCallback? onDone,
 }) async {
   final current =
-      ref.read(episodeStatusesProvider)[path] ?? EpisodeStatus.notStarted;
+      container.read(episodeStatusesProvider)[path] ?? EpisodeStatus.notStarted;
   final selected = await showDialog<String>(
     context: context,
     builder: (ctx) => SimpleDialog(
@@ -233,8 +271,8 @@ Future<void> setProgressDialog(
     ),
   );
   if (selected == null || selected == current) return;
-  ref.read(episodeStatusesProvider.notifier).state = {
-    ...ref.read(episodeStatusesProvider),
+  container.read(episodeStatusesProvider.notifier).state = {
+    ...container.read(episodeStatusesProvider),
     path: selected,
   };
   await saveEpisodeStatus(path, selected);

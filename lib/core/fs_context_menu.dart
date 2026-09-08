@@ -2,22 +2,22 @@ import 'dart:async';
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/rendering.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../features/media/media_preview.dart';
 import 'file_actions.dart';
 import 'media_types.dart';
+import 'providers.dart';
 import 'toast.dart';
 
-/// 挂在可右键目标上，供「已有菜单时再右键」命中后打开新菜单。
+/// 兼容调用点的包装；切换菜单不依赖此组件做命中。
 class FsContextMenuTarget extends StatelessWidget {
   const FsContextMenuTarget({
     super.key,
     required this.path,
     required this.isDir,
     required this.displayName,
-    required this.ref,
     required this.onOpen,
     required this.onChanged,
     required this.child,
@@ -26,55 +26,46 @@ class FsContextMenuTarget extends StatelessWidget {
   final String path;
   final bool isDir;
   final String displayName;
-  final WidgetRef ref;
   final Future<void> Function() onOpen;
   final void Function() onChanged;
   final Widget child;
 
   @override
-  Widget build(BuildContext context) {
-    return MetaData(
-      metaData: _FsContextMenuAnchor(
-        path: path,
-        isDir: isDir,
-        displayName: displayName,
-        ref: ref,
-        onOpen: onOpen,
-        onChanged: onChanged,
-      ),
-      child: child,
-    );
-  }
-}
-
-class _FsContextMenuAnchor {
-  const _FsContextMenuAnchor({
-    required this.path,
-    required this.isDir,
-    required this.displayName,
-    required this.ref,
-    required this.onOpen,
-    required this.onChanged,
-  });
-
-  final String path;
-  final bool isDir;
-  final String displayName;
-  final WidgetRef ref;
-  final Future<void> Function() onOpen;
-  final void Function() onChanged;
+  Widget build(BuildContext context) => child;
 }
 
 OverlayEntry? _activeMenuEntry;
 void Function(String?)? _activeComplete;
+bool Function(KeyEvent)? _activeKeyHandler;
+void Function(PointerEvent)? _activePointerRoute;
+Rect? _activeMenuRect;
+final GlobalKey _menuKey = GlobalKey();
+
+void _detachPointerRoute() {
+  final route = _activePointerRoute;
+  _activePointerRoute = null;
+  if (route != null) {
+    GestureBinding.instance.pointerRouter.removeGlobalRoute(route);
+  }
+}
+
+void _detachKeyHandler() {
+  final handler = _activeKeyHandler;
+  _activeKeyHandler = null;
+  if (handler != null) {
+    HardwareKeyboard.instance.removeHandler(handler);
+  }
+}
 
 /// 左树与中间素材栏共用的文件系统右键菜单。
 ///
-/// 使用 Overlay 而非 [showMenu]，以便在菜单已打开时再次右键能直接切到新目标，
-/// 而不是只关掉旧菜单。
+/// 关键要点（修复「换地方右键只关不开」）：
+/// - Overlay **只放菜单面板**，没有全屏遮罩。全屏遮罩会截获 pointer，
+///   下层 InkWell 收不到右键，只能关掉旧菜单。
+/// - 用全局 pointer 路由检测「点在菜单外」→ 关闭；右键落到其它目标时，
+///   事件仍由该目标的 `onSecondaryTap` 处理并打开新菜单。
 Future<void> showFsContextMenu({
   required BuildContext context,
-  required WidgetRef ref,
   required Offset globalPosition,
   required String path,
   required bool isDir,
@@ -85,7 +76,9 @@ Future<void> showFsContextMenu({
   final overlayState = Overlay.maybeOf(context, rootOverlay: true);
   if (overlayState == null || !context.mounted) return;
 
-  // 关掉已有菜单（同目标再次右键也会先关再开）。
+  final hostContext = overlayState.context;
+  final container = ProviderScope.containerOf(context, listen: false);
+
   _dismissActiveMenu();
 
   final isVideo = !isDir && classifyMedia(path) == MediaKind.video;
@@ -93,37 +86,74 @@ Future<void> showFsContextMenu({
   late OverlayEntry entry;
 
   void close([String? action]) {
+    if (completer.isCompleted) return;
+    completer.complete(action);
+    _detachKeyHandler();
+    _detachPointerRoute();
+    _activeMenuRect = null;
     if (_activeMenuEntry == entry) {
       _activeMenuEntry = null;
       _activeComplete = null;
     }
-    if (entry.mounted) {
-      entry.remove();
+    scheduleMicrotask(() {
+      if (entry.mounted) entry.remove();
+    });
+  }
+
+  bool onKey(KeyEvent event) {
+    if (event is KeyDownEvent &&
+        event.logicalKey == LogicalKeyboardKey.escape) {
+      close();
+      return true;
     }
-    if (!completer.isCompleted) {
-      completer.complete(action);
+    return false;
+  }
+
+  void onGlobalPointer(PointerEvent event) {
+    if (event is! PointerDownEvent) return;
+    if (_activeComplete != close) return;
+
+    final rect = _activeMenuRect;
+    if (rect != null && rect.inflate(2).contains(event.position)) {
+      return;
     }
+
+    // 菜单外任意按下：关闭。右键点在其它文件/目录上时，目标仍会收到
+    // 该事件并在 onSecondaryTap 里打开新菜单。
+    close();
   }
 
   _activeComplete = close;
+  _activeKeyHandler = onKey;
+  _activePointerRoute = onGlobalPointer;
+  HardwareKeyboard.instance.addHandler(onKey);
+  GestureBinding.instance.pointerRouter.addGlobalRoute(onGlobalPointer);
 
   entry = OverlayEntry(
     builder: (ctx) {
-      final media = MediaQuery.of(ctx);
+      final size = MediaQuery.sizeOf(ctx);
       const menuWidth = 220.0;
       const itemH = 36.0;
-      // 粗略估算高度，用于贴边夹紧。
-      var itemCount = 2; // open + reveal
+      var itemCount = 2;
       if (isVideo) itemCount += 3;
-      if (isDir) itemCount += 3;
-      itemCount += 2; // rename + delete
-      if (!isDir) itemCount += 1; // duplicate
-      itemCount += 3; // dividers approx
+      if (isDir) itemCount += 4;
+      itemCount += 2;
+      if (!isDir) itemCount += 1;
+      itemCount += 3;
       final menuHeight = itemCount * itemH;
-      var left = globalPosition.dx;
-      var top = globalPosition.dy;
-      left = left.clamp(8.0, media.size.width - menuWidth - 8.0);
-      top = top.clamp(8.0, media.size.height - menuHeight - 8.0);
+      final left =
+          globalPosition.dx.clamp(8.0, size.width - menuWidth - 8.0);
+      final top =
+          globalPosition.dy.clamp(8.0, size.height - menuHeight - 8.0);
+
+      _activeMenuRect = Rect.fromLTWH(left, top, menuWidth, menuHeight);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        final box =
+            _menuKey.currentContext?.findRenderObject() as RenderBox?;
+        if (box != null && box.hasSize && box.attached) {
+          _activeMenuRect = box.localToGlobal(Offset.zero) & box.size;
+        }
+      });
 
       Widget item({
         required String value,
@@ -157,104 +187,90 @@ Future<void> showFsContextMenu({
 
       Widget divider() => const Divider(height: 4, thickness: 1);
 
-      return Stack(
-        children: [
-          // 遮罩：左键只关闭；右键关闭后按落点重新命中目标并打开新菜单。
-          Positioned.fill(
-            child: Listener(
-              behavior: HitTestBehavior.opaque,
-              onPointerDown: (e) {
-                final secondary =
-                    (e.buttons & kSecondaryMouseButton) != 0;
-                final pos = e.position;
-                close();
-                if (secondary) {
-                  WidgetsBinding.instance.addPostFrameCallback((_) {
-                    _openFromHitTest(context, pos);
-                  });
-                }
-              },
-            ),
-          ),
-          Positioned(
-            left: left,
-            top: top,
-            child: Material(
-              elevation: 8,
-              borderRadius: BorderRadius.circular(8),
-              clipBehavior: Clip.antiAlias,
-              color: Theme.of(ctx).colorScheme.surfaceContainerHigh,
-              child: SizedBox(
-                width: menuWidth,
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    item(
-                      value: 'open',
-                      icon: Icons.open_in_new,
-                      label: isDir ? '在当前目录查看' : '打开',
-                    ),
-                    item(
-                      value: 'reveal',
-                      icon: Icons.folder_open,
-                      label: '在资源管理器显示',
-                    ),
-                    if (isVideo) ...[
-                      divider(),
-                      item(
-                        value: 'grabFirst',
-                        icon: Icons.first_page,
-                        label: '截取首帧',
-                        iconColor: Colors.tealAccent,
-                      ),
-                      item(
-                        value: 'grabLast',
-                        icon: Icons.last_page,
-                        label: '截取末帧',
-                        iconColor: Colors.tealAccent,
-                      ),
-                    ],
-                    if (isDir) ...[
-                      divider(),
-                      item(
-                        value: 'newFolder',
-                        icon: Icons.create_new_folder_outlined,
-                        label: '新建子文件夹',
-                      ),
-                      item(
-                        value: 'progress',
-                        icon: Icons.donut_large,
-                        label: '设置创作进度',
-                        iconColor: Colors.teal,
-                      ),
-                    ],
-                    divider(),
-                    item(
-                      value: 'rename',
-                      icon: Icons.drive_file_rename_outline,
-                      label: '重命名',
-                    ),
-                    if (!isDir)
-                      item(
-                        value: 'duplicate',
-                        icon: Icons.copy,
-                        label: '复制',
-                      ),
-                    divider(),
-                    item(
-                      value: 'delete',
-                      icon: Icons.delete_outline,
-                      label: '删除',
-                      iconColor: Colors.red[300],
-                      labelColor: Colors.red[300],
-                    ),
-                  ],
+      // 只放面板，不铺全屏 Stack，避免截获下层命中。
+      return Positioned(
+        left: left,
+        top: top,
+        child: Material(
+          key: _menuKey,
+          elevation: 8,
+          borderRadius: BorderRadius.circular(8),
+          clipBehavior: Clip.antiAlias,
+          color: Theme.of(ctx).colorScheme.surfaceContainerHigh,
+          child: SizedBox(
+            width: menuWidth,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                item(
+                  value: 'open',
+                  icon: Icons.open_in_new,
+                  label: isDir ? '在当前目录查看' : '打开',
                 ),
-              ),
+                item(
+                  value: 'reveal',
+                  icon: Icons.folder_open,
+                  label: '在资源管理器显示',
+                ),
+                if (isVideo) ...[
+                  divider(),
+                  item(
+                    value: 'grabFirst',
+                    icon: Icons.first_page,
+                    label: '截取首帧',
+                    iconColor: Colors.tealAccent,
+                  ),
+                  item(
+                    value: 'grabLast',
+                    icon: Icons.last_page,
+                    label: '截取末帧',
+                    iconColor: Colors.tealAccent,
+                  ),
+                ],
+                if (isDir) ...[
+                  divider(),
+                  item(
+                    value: 'newDoc',
+                    icon: Icons.note_add_outlined,
+                    label: '新建文档',
+                  ),
+                  item(
+                    value: 'newFolder',
+                    icon: Icons.create_new_folder_outlined,
+                    label: '新建子文件夹',
+                  ),
+                  item(
+                    value: 'progress',
+                    icon: Icons.donut_large,
+                    label: '设置创作进度',
+                    iconColor: Colors.teal,
+                  ),
+                ],
+                divider(),
+                item(
+                  value: 'rename',
+                  icon: Icons.drive_file_rename_outline,
+                  label: '重命名',
+                ),
+                if (!isDir)
+                  item(
+                    value: 'duplicate',
+                    icon: Icons.copy,
+                    label: '复制',
+                  ),
+                divider(),
+                item(
+                  value: 'delete',
+                  icon: Icons.delete_outline,
+                  label: '删除',
+                  iconColor: Colors.red[300],
+                  labelColor: Colors.red[300],
+                ),
+              ],
             ),
           ),
-        ],
+        ),
       );
     },
   );
@@ -263,10 +279,14 @@ Future<void> showFsContextMenu({
   overlayState.insert(entry);
 
   final action = await completer.future;
-  if (action == null || !context.mounted) return;
+  _detachKeyHandler();
+  _detachPointerRoute();
+  if (action == null) return;
+  await _waitPostFrame();
+  if (!hostContext.mounted) return;
   await _runAction(
-    context: context,
-    ref: ref,
+    context: hostContext,
+    container: container,
     action: action,
     path: path,
     isDir: isDir,
@@ -276,47 +296,36 @@ Future<void> showFsContextMenu({
   );
 }
 
+Future<void> _waitPostFrame() {
+  final c = Completer<void>();
+  WidgetsBinding.instance.addPostFrameCallback((_) {
+    if (!c.isCompleted) c.complete();
+  });
+  return c.future;
+}
+
 void _dismissActiveMenu([String? action]) {
   final complete = _activeComplete;
   final entry = _activeMenuEntry;
   _activeComplete = null;
   _activeMenuEntry = null;
-  if (entry != null && entry.mounted) {
-    entry.remove();
-  }
-  complete?.call(action);
-}
-
-void _openFromHitTest(BuildContext context, Offset globalPos) {
-  if (!context.mounted) return;
-  final view = View.maybeOf(context);
-  if (view == null) return;
-
-  final result = HitTestResult();
-  WidgetsBinding.instance.hitTestInView(result, globalPos, view.viewId);
-
-  for (final entry in result.path) {
-    final target = entry.target;
-    if (target is! RenderMetaData) continue;
-    final data = target.metaData;
-    if (data is! _FsContextMenuAnchor) continue;
-    showFsContextMenu(
-      context: context,
-      ref: data.ref,
-      globalPosition: globalPos,
-      path: data.path,
-      isDir: data.isDir,
-      displayName: data.displayName,
-      onOpen: data.onOpen,
-      onChanged: data.onChanged,
-    );
+  _activeMenuRect = null;
+  if (complete != null) {
+    complete(action);
     return;
+  }
+  _detachKeyHandler();
+  _detachPointerRoute();
+  if (entry != null && entry.mounted) {
+    scheduleMicrotask(() {
+      if (entry.mounted) entry.remove();
+    });
   }
 }
 
 Future<void> _runAction({
   required BuildContext context,
-  required WidgetRef ref,
+  required ProviderContainer container,
   required String action,
   required String path,
   required bool isDir,
@@ -349,6 +358,13 @@ Future<void> _runAction({
         onChanged: onChanged,
       );
       break;
+    case 'newDoc':
+      final created = await newDocumentDialog(context, parentDir: path);
+      if (created != null) {
+        _openInEditor(container, created);
+        onChanged();
+      }
+      break;
     case 'newFolder':
       await newFolderDialog(
         context,
@@ -359,7 +375,7 @@ Future<void> _runAction({
     case 'progress':
       await setProgressDialog(
         context,
-        ref,
+        container,
         path: path,
         displayName: displayName,
       );
@@ -380,14 +396,30 @@ Future<void> _runAction({
       );
       break;
     case 'delete':
-      await deleteEntityDialog(
+      final ok = await deleteEntityDialog(
         context,
         path: path,
         isDir: isDir,
         onDone: onChanged,
       );
+      if (ok) {
+        closeOpenDocumentsAffectedBy(
+          container,
+          path: path,
+          isDir: isDir,
+        );
+      }
       break;
   }
+}
+
+void _openInEditor(ProviderContainer container, String path) {
+  container.read(selectedFileProvider.notifier).state = path;
+  final tabs = container.read(openTabsProvider);
+  if (!tabs.contains(path)) {
+    container.read(openTabsProvider.notifier).state = [...tabs, path];
+  }
+  container.read(contentModeProvider.notifier).state = 'editor';
 }
 
 Future<void> _grabFrame(

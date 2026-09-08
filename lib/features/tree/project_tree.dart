@@ -464,7 +464,6 @@ class _TreeNodeWidgetState extends ConsumerState<_TreeNodeWidget> {
     final dir = Directory(node.path).parent.path;
     await showFsContextMenu(
       context: context,
-      ref: ref,
       globalPosition: _menuPos,
       path: node.path,
       isDir: !isFile,
@@ -548,7 +547,6 @@ class _TreeNodeWidgetState extends ConsumerState<_TreeNodeWidget> {
             path: node.path,
             isDir: !isFile,
             displayName: node.name,
-            ref: ref,
             onOpen: () async {
               if (isFile) {
                 _openFile(node.path);

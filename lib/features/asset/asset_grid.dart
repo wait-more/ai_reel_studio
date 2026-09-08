@@ -299,6 +299,14 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
                 _buildFilterChips(),
                 const Spacer(),
                 IconButton(
+                  icon: const Icon(Icons.note_add_outlined, size: 18),
+                  onPressed: () => _newDocument(currentDir),
+                  tooltip: '新建文档',
+                  padding: EdgeInsets.zero,
+                  constraints:
+                      const BoxConstraints(minWidth: 32, minHeight: 32),
+                ),
+                IconButton(
                   icon: const Icon(Icons.create_new_folder_outlined, size: 18),
                   onPressed: () => _newFolder(currentDir),
                   tooltip: '新建文件夹',
@@ -428,7 +436,20 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
   }
 
   
-/// 新建文件夹：输入名称，创建于 [dir] 下。
+/// 新建文档：输入文件名，创建于 [dir] 下并打开编辑器。
+  Future<void> _newDocument(String dir) async {
+    final created = await newDocumentDialog(context, parentDir: dir);
+    if (created == null) return;
+    _reloadAndSyncTree();
+    ref.read(selectedFileProvider.notifier).state = created;
+    final tabs = ref.read(openTabsProvider);
+    if (!tabs.contains(created)) {
+      ref.read(openTabsProvider.notifier).state = [...tabs, created];
+    }
+    ref.read(contentModeProvider.notifier).state = 'editor';
+  }
+
+  /// 新建文件夹：输入名称，创建于 [dir] 下。
   Future<void> _newFolder(String dir) async {
     final created = await newFolderDialog(context, parentDir: dir);
     if (created != null) _reloadAndSyncTree();
@@ -701,7 +722,6 @@ class _AssetCard extends ConsumerWidget {
       path: entity.path,
       isDir: _isDir,
       displayName: _name,
-      ref: ref,
       onOpen: () async {
         if (_isDir) {
           onEnterDir(entity.path);
@@ -806,7 +826,6 @@ class _AssetCard extends ConsumerWidget {
   Future<void> _showMenu(BuildContext context, WidgetRef ref) async {
     await showFsContextMenu(
       context: context,
-      ref: ref,
       globalPosition: _menuPos,
       path: entity.path,
       isDir: _isDir,
