@@ -4,6 +4,7 @@ import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
 
+import 'package:crypto/crypto.dart';
 import 'package:path/path.dart' as p;
 
 /// ComfyUI HTTP API 客户端（桌面端，dart:io）。
@@ -63,8 +64,86 @@ class ComfyClient {
   }
 
   /// 上传本地文件到 Comfy input，返回 Comfy 侧文件名。
-  Future<String> uploadImage(File file, {String? overwriteName}) =>
-      uploadInputFile(file, overwriteName: overwriteName);
+  Future<String> uploadImage(File file, {String? overwriteName}) async {
+    if (overwriteName != null) {
+      return uploadInputFile(file, overwriteName: overwriteName);
+    }
+    return (await ensureInputFile(file)).name;
+  }
+
+  /// 内容寻址文件名：`ars_{hash16}_{本地名}{ext}`。
+  /// `/view` 只能按名字查存在；哈希相同且本地名相同则视为可复用。
+  static String contentAddressedInputName({
+    required String localPath,
+    required String sha256hex,
+  }) {
+    final hex = sha256hex.toLowerCase();
+    final short =
+        hex.length >= 16 ? hex.substring(0, 16) : hex.padRight(16, '0');
+    final base = p.basename(localPath);
+    var stem = p.basenameWithoutExtension(base);
+    var ext = p.extension(base).toLowerCase();
+    if (ext.contains('..') || ext.contains('/') || ext.contains('\\')) {
+      ext = '';
+    }
+    stem = stem
+        .replaceAll(RegExp(r'[\\/:*?"<>|\x00-\x1f]'), '_')
+        .replaceAll('..', '_');
+    if (stem.isEmpty) stem = 'file';
+    // 预留 ars_ + 16hex + _ + ext，避免远端名过长。
+    const maxStem = 80;
+    if (stem.length > maxStem) stem = stem.substring(0, maxStem);
+    return 'ars_${short}_$stem$ext';
+  }
+
+  /// 若 Comfy `input/` 已有相同内容则跳过上传。
+  Future<ComfyInputUpload> ensureInputFile(File file) async {
+    final digest = await sha256.bind(file.openRead()).first;
+    final name = contentAddressedInputName(
+      localPath: file.path,
+      sha256hex: digest.toString(),
+    );
+    if (await inputFileExists(name)) {
+      return ComfyInputUpload(name: name, reusedRemote: true);
+    }
+    final uploaded = await uploadInputFile(file, overwriteName: name);
+    return ComfyInputUpload(name: uploaded, reusedRemote: false);
+  }
+
+  /// 用 `/view` 探测 `input/` 是否已有该文件名（Range 只取 1 字节，避免整文件下载）。
+  Future<bool> inputFileExists(String filename) async {
+    final uri = _uri('/view', {
+      'filename': filename,
+      'type': 'input',
+    });
+    try {
+      final req = await _http.getUrl(uri);
+      await _auth(req);
+      req.headers.set(HttpHeaders.rangeHeader, 'bytes=0-0');
+      final res = await req.close().timeout(const Duration(seconds: 8));
+      final code = res.statusCode;
+      final exists = code == 200 || code == 206 || code == 416;
+      if (exists && (res.contentLength < 0 || res.contentLength > 64)) {
+        await _abortResponseBody(res);
+      } else {
+        await res.drain<void>();
+      }
+      return exists;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<void> _abortResponseBody(HttpClientResponse res) async {
+    try {
+      final socket = await res.detachSocket();
+      socket.destroy();
+    } catch (_) {
+      try {
+        await res.drain<void>();
+      } catch (_) {}
+    }
+  }
 
   /// 通用 input 目录上传（图/音/视频均走 /upload/image）。
   Future<String> uploadInputFile(File file, {String? overwriteName}) async {
@@ -509,6 +588,20 @@ class ComfyClient {
     await res.drain<void>();
   }
 
+  /// 删除 history 条目及其关联 output 文件（Comfy 标准 API）。
+  Future<void> deleteHistory(List<String> promptIds) async {
+    if (promptIds.isEmpty) return;
+    final req = await _http.postUrl(_uri('/history'));
+    await _auth(req);
+    req.headers.contentType = ContentType.json;
+    req.add(utf8.encode(jsonEncode({'delete': promptIds})));
+    final res = await req.close();
+    final text = await res.transform(utf8.decoder).join();
+    if (res.statusCode < 200 || res.statusCode >= 300) {
+      throw ComfyApiException('删除 history 失败 (${res.statusCode}): $text');
+    }
+  }
+
   /// 读取队列快照。
   Future<ComfyQueueSnapshot> getQueue() async {
     final req = await _http.getUrl(_uri('/queue'));
@@ -873,6 +966,16 @@ class ComfyCancelledException implements Exception {
   const ComfyCancelledException();
   @override
   String toString() => '已取消生成';
+}
+
+class ComfyInputUpload {
+  const ComfyInputUpload({
+    required this.name,
+    required this.reusedRemote,
+  });
+
+  final String name;
+  final bool reusedRemote;
 }
 
 class ComfyApiException implements Exception {

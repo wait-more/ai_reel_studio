@@ -613,9 +613,15 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
           final file = File(path);
           _mutateJob(job.id, (j) {
             j.phase = _ComfyJobPhase.uploading;
-            j.detail = '上传 ${node.label} · ${field.label}…';
+            j.detail = '同步素材 ${node.label} · ${field.label}…';
           });
-          runtimeValues[field.id] = await client.uploadInputFile(file);
+          final uploaded = await client.ensureInputFile(file);
+          runtimeValues[field.id] = uploaded.name;
+          _mutateJob(job.id, (j) {
+            j.detail = uploaded.reusedRemote
+                ? '复用远端已有文件 · ${uploaded.name}'
+                : '已上传 ${uploaded.name}';
+          });
         }
       }
 
@@ -663,9 +669,23 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
         preferredFileName: job.outputFileName,
       );
       ref.read(treeRefreshTickProvider.notifier).state++;
+
+      var detail = '完成，已保存 ${saved.length} 个文件';
+      final promptId = job.promptId;
+      if (ref.read(comfyDeleteRemoteAfterDownloadProvider) &&
+          promptId != null &&
+          promptId.isNotEmpty) {
+        try {
+          await client.deleteHistory([promptId]);
+          detail = '$detail；已清理远端输出';
+        } catch (_) {
+          detail = '$detail；远端清理失败（可手动在 Comfy 删除）';
+        }
+      }
+
       _mutateJob(job.id, (j) {
         j.phase = _ComfyJobPhase.completed;
-        j.detail = '完成，已保存 ${saved.length} 个文件';
+        j.detail = detail;
         j.outputs = saved;
         j.runStatus = null;
         j.cancelling = false;
@@ -1107,6 +1127,31 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
                       ),
                       style: const TextStyle(fontSize: 13),
                       onChanged: (_) => _schedulePersistSession(),
+                    ),
+                    const SizedBox(height: 4),
+                    SwitchListTile(
+                      contentPadding: EdgeInsets.zero,
+                      dense: true,
+                      title: const Text(
+                        '下载后删除远端输出',
+                        style: TextStyle(fontSize: 13),
+                      ),
+                      subtitle: Text(
+                        '本地保存成功后清除 Comfy 上本次 history/output，适合云 GPU 省空间',
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: cs.onSurfaceVariant,
+                        ),
+                      ),
+                      value: ref.watch(comfyDeleteRemoteAfterDownloadProvider),
+                      onChanged: (v) async {
+                        ref
+                            .read(
+                                comfyDeleteRemoteAfterDownloadProvider.notifier)
+                            .state = v;
+                        await AppConfig.instance
+                            .setComfyDeleteRemoteAfterDownload(v);
+                      },
                     ),
                     if (_formError != null) ...[
                       const SizedBox(height: 8),

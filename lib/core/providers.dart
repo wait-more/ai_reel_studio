@@ -156,3 +156,8 @@ final startCmdsProvider = StateProvider<List<StartCmd>>(
 final sendAgentRefChordProvider = StateProvider<KeyChord>(
   (ref) => AppConfig.instance.sendAgentRefChord,
 );
+
+/// 本地保存成功后是否删除 Comfy 远端本次 history/output。
+final comfyDeleteRemoteAfterDownloadProvider = StateProvider<bool>(
+  (ref) => AppConfig.instance.comfyDeleteRemoteAfterDownload,
+);

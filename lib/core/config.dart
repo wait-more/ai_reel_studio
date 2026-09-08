@@ -70,6 +70,8 @@ class AppConfig {
   static const _kComfyApiKey = 'comfyApiKey';
   static const _kComfyServers = 'comfyServers';
   static const _kComfySelectedServerId = 'comfySelectedServerId';
+  static const _kComfyDeleteRemoteAfterDownload =
+      'comfyDeleteRemoteAfterDownload';
 
   static const defaultComfyBaseUrl = 'http://127.0.0.1:8188';
 
@@ -89,6 +91,7 @@ class AppConfig {
   KeyChord _sendAgentRefChord = KeyChord.defaultSendAgentRef;
   List<ComfyServer> _comfyServers = [ComfyServer.localDefault()];
   String _comfySelectedServerId = 'local';
+  bool _comfyDeleteRemoteAfterDownload = true;
 
   String get projectRoot => _projectRoot;
   ThemeMode get themeMode => _themeMode;
@@ -99,6 +102,7 @@ class AppConfig {
   KeyChord get sendAgentRefChord => _sendAgentRefChord;
   List<ComfyServer> get comfyServers => List.unmodifiable(_comfyServers);
   String get comfySelectedServerId => _comfySelectedServerId;
+  bool get comfyDeleteRemoteAfterDownload => _comfyDeleteRemoteAfterDownload;
 
   ComfyServer get comfySelectedServer {
     for (final s in _comfyServers) {
@@ -135,6 +139,8 @@ class AppConfig {
     } else {
       _comfySelectedServerId = _comfyServers.first.id;
     }
+    _comfyDeleteRemoteAfterDownload =
+        prefs.getBool(_kComfyDeleteRemoteAfterDownload) ?? true;
   }
 
   Future<void> setProjectRoot(String path) async {
@@ -221,6 +227,12 @@ class AppConfig {
     if (i < 0) return;
     next[i] = cur.copyWith(apiKey: key);
     await setComfyServers(next);
+  }
+
+  Future<void> setComfyDeleteRemoteAfterDownload(bool value) async {
+    _comfyDeleteRemoteAfterDownload = value;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_kComfyDeleteRemoteAfterDownload, value);
   }
 
   static List<ComfyServer> _loadComfyServers(
