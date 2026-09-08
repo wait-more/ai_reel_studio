@@ -62,5 +62,30 @@ void main() {
     test('Get-ChildItem is not an agent', () {
       expect(commandLooksLikeAgent('Get-ChildItem'), isFalse);
     });
+
+    test('pow / ComfyUI shortcuts are not agents', () {
+      expect(commandLooksLikeAgent('pow'), isFalse);
+      expect(commandLooksLikeAgent('ComfyUI'), isFalse);
+    });
+  });
+
+  group('terminalTextLooksLikeAgent', () {
+    test('PowerShell banner is not an agent session', () {
+      const banner =
+          'Windows PowerShell\nCopyright (C) Microsoft Corporation.\nPS E:\\CTTI\\project\\code>';
+      expect(terminalTextLooksLikeAgent(banner), isFalse);
+    });
+
+    test('opencode TUI output is an agent session', () {
+      expect(
+        terminalTextLooksLikeAgent('opencode v1.0\n> ask anything'),
+        isTrue,
+      );
+    });
+
+    test('pow substring inside powershell does not match', () {
+      expect(containsAgentToken('powershell', 'pow'), isFalse);
+      expect(containsAgentToken(' pow ', 'pow'), isTrue);
+    });
   });
 }

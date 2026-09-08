@@ -67,14 +67,11 @@
 
 ```bash
 flutter pub get
-powershell -ExecutionPolicy Bypass -File scripts/apply_patches.ps1
 flutter run -d windows
 
 # Release 绿色包（zip；可选 Inno 安装器需本机 Inno Setup 6）
 powershell -ExecutionPolicy Bypass -File scripts/pack_windows.ps1
 ```
-
-`apply_patches.ps1` 会打上 `patches/` 里的依赖补丁（如 xterm Windows 中文 IME）。打包脚本会自动执行。
 
 产物默认在 `dist/`：
 
@@ -89,7 +86,7 @@ powershell -ExecutionPolicy Bypass -File scripts/pack_windows.ps1
 |---|---|
 | 框架 | Flutter / Dart 3.6+，Material 3 |
 | 状态 | Riverpod |
-| 终端 | `kyroon_pty` + `xterm` |
+| 终端 | `kyroon_pty` + `flterm`（libghostty） |
 | 媒体 | `media_kit`（libmpv） |
 | 配置与记忆 | SharedPreferences |
 | 窗口 | `window_manager` + `screen_retriever` |
@@ -111,8 +108,7 @@ ai_reel_studio/
 ├── lib/
 │   ├── core/             # 配置、解析、记忆、搜索、进度等
 │   └── features/         # tree / editor / asset / media / shell / search / settings / layout
-├── patches/              # pub 依赖补丁（ft_patch_package）
-├── scripts/              # pack_windows / apply_patches，不是创作项目根
+├── scripts/              # pack_windows 等，不是创作项目根
 ├── installer/windows/    # Inno Setup
 ├── windows/ linux/ android/
 └── dist/                 # 打包输出（本地生成）

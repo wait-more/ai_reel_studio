@@ -78,9 +78,25 @@ class AppConfig {
   static const defaultStartCmds = <StartCmd>[
     StartCmd(name: 'opencode', command: 'opencode'),
     StartCmd(name: 'dsh-tui', command: 'dsh-tui'),
-    StartCmd(name: 'ComfyUI', command: 'ComfyUI'),
-    StartCmd(name: 'pow', command: 'pow'),
   ];
+
+  /// 旧默认快捷项：已从默认栏移除（Comfy 走生成面板；终端本身已是 PowerShell）。
+  static bool _isRetiredDefaultStartCmd(StartCmd cmd) {
+    final c = cmd.command.trim().toLowerCase();
+    return c == 'pow' || c == 'comfyui';
+  }
+
+  static bool _rawStartCmdsContainRetired(String raw) {
+    try {
+      final list = jsonDecode(raw) as List<dynamic>;
+      return list.whereType<Map>().any((e) {
+        final cmd = StartCmd.fromJson(Map<String, dynamic>.from(e));
+        return _isRetiredDefaultStartCmd(cmd);
+      });
+    } catch (_) {
+      return false;
+    }
+  }
 
   String _projectRoot = '';
   ThemeMode _themeMode = ThemeMode.dark;
@@ -126,7 +142,15 @@ class AppConfig {
         (prefs.getDouble(_kEditorFontSize) ?? 14).clamp(11, 24);
     _terminalFontSize =
         (prefs.getDouble(_kTerminalFontSize) ?? 12).clamp(10, 22);
-    _startCmds = _loadStartCmds(prefs.getString(_kStartCmds));
+    final rawStartCmds = prefs.getString(_kStartCmds);
+    _startCmds = _loadStartCmds(rawStartCmds);
+    if (rawStartCmds != null &&
+        rawStartCmds.isNotEmpty &&
+        _rawStartCmdsContainRetired(rawStartCmds)) {
+      final encoded =
+          jsonEncode(_startCmds.map((e) => e.toJson()).toList());
+      await prefs.setString(_kStartCmds, encoded);
+    }
     _sendAgentRefChord = _loadChord(prefs.getString(_kSendAgentRefChord));
     _comfyServers = _loadComfyServers(
       prefs.getString(_kComfyServers),
@@ -287,6 +311,7 @@ class AppConfig {
           .whereType<Map>()
           .map((e) => StartCmd.fromJson(Map<String, dynamic>.from(e)))
           .where((e) => e.name.trim().isNotEmpty && e.command.trim().isNotEmpty)
+          .where((e) => !_isRetiredDefaultStartCmd(e))
           .toList();
       return cmds.isEmpty ? List.of(defaultStartCmds) : cmds;
     } catch (_) {

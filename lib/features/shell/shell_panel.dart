@@ -1,9 +1,11 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:flterm/flterm.dart' hide Scrollbar;
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:xterm/xterm.dart';
 
 import '../../core/agent_bridge.dart';
 import '../../core/config.dart';
@@ -85,7 +87,7 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
       final cmd = tab.launchCommand?.trim();
       if (cmd == null || cmd.isEmpty) continue;
       final label = tab.launchedAgentHint ?? cmd.split(RegExp(r'\s+')).first;
-      tab.session.terminal.write(
+      tab.session.writeText(
         '\r\n\x1b[90m[已恢复会话：$label'
         '${tab.cwd != null && tab.cwd!.isNotEmpty ? ' @ ${tab.cwd}' : ''}]'
         '\x1b[0m\r\n',
@@ -482,9 +484,12 @@ class _TerminalViewClient extends StatefulWidget {
 }
 
 class _TerminalViewClientState extends State<_TerminalViewClient> {
+  late final TerminalScrollController _scrollController;
+
   @override
   void initState() {
     super.initState();
+    _scrollController = TerminalScrollController();
     widget.session.addListener(_onSessionChanged);
   }
 
@@ -504,23 +509,64 @@ class _TerminalViewClientState extends State<_TerminalViewClient> {
   @override
   void dispose() {
     widget.session.removeListener(_onSessionChanged);
+    _scrollController.dispose();
     super.dispose();
+  }
+
+  Future<void> _onSecondaryPointer(PointerDownEvent event) async {
+    if (event.buttons & kSecondaryMouseButton == 0) return;
+    final controller = widget.session.controller;
+    if (controller.hasSelection) {
+      final text = controller.selectedText();
+      controller.clearSelection();
+      if (text.isNotEmpty) {
+        await Clipboard.setData(ClipboardData(text: text));
+      }
+      return;
+    }
+    final data = await Clipboard.getData(Clipboard.kTextPlain);
+    final text = data?.text;
+    if (text != null && text.isNotEmpty) {
+      controller.paste(text);
+    }
   }
 
   @override
   Widget build(BuildContext context) {
+    final theme = TerminalTheme.dark().copyWith(
+      fontSize: widget.fontSize,
+      fontFamily: 'Cascadia Mono',
+      fontFamilyFallback: const [
+        'Consolas',
+        'Microsoft YaHei',
+        'Segoe UI Emoji',
+        'Noto Color Emoji',
+      ],
+      palette: ColorPalette(
+        ansiColors: TerminalTheme.dark().palette.ansiColors,
+        background: const Color(0xFF1E1E1E),
+        foreground: TerminalTheme.dark().palette.foreground,
+      ),
+    );
+
     return Container(
       color: const Color(0xFF1E1E1E),
-      child: TerminalView(
-        widget.session.terminal,
-        focusNode: widget.focusNode,
-        // false：走 CustomTextEdit，才能正确接收 Windows 中文 IME。
-        // true 时只吃硬件按键，拼音会飘到屏幕左上角且无法回车上屏。
-        hardwareKeyboardOnly: false,
-        autofocus: widget.autofocus,
-        textStyle: TerminalStyle(
-          fontSize: widget.fontSize,
-          fontFamily: 'Cascadia Mono, Consolas, Microsoft YaHei',
+      child: Listener(
+        onPointerDown: _onSecondaryPointer,
+        child: Scrollbar(
+          controller: _scrollController,
+          thumbVisibility: true,
+          trackVisibility: true,
+          interactive: true,
+          child: TerminalView(
+            controller: widget.session.controller,
+            focusNode: widget.focusNode,
+            autofocus: widget.autofocus,
+            showKeyboard: false,
+            scrollController: _scrollController,
+            padding: const EdgeInsets.all(4),
+            theme: theme,
+          ),
         ),
       ),
     );

@@ -1,23 +1,32 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
+import 'package:flterm/flterm.dart';
 import 'package:flutter/widgets.dart';
 import 'package:kyroon_pty/kyroon_pty.dart';
-import 'package:xterm/xterm.dart';
 
-/// 单个终端会话：连接一个 Pty (ConPTY/forkpty) 与一个 xterm Terminal 仿真器。
+/// 单个终端会话：连接一个 Pty (ConPTY/forkpty) 与 flterm/Ghostty VT 引擎。
 class TerminalSession extends ChangeNotifier {
   TerminalSession({String? workingDirectory}) {
     _workingDirectory = workingDirectory;
+    controller = TerminalController(
+      config: const TerminalConfig(
+        cols: 120,
+        rows: 32,
+        scrollbackLimit: 8 * 1024 * 1024,
+      ),
+    );
   }
 
-  /// 供 TerminalView 渲染的终端仿真器。
-  final Terminal terminal = Terminal(maxLines: 12000);
+  /// 供 [TerminalView] 使用的控制器。
+  late final TerminalController controller;
 
   Pty? _pty;
-  StreamSubscription<String>? _ptyOutputSub;
+  StreamSubscription<Uint8List>? _ptyOutputSub;
   bool _disposed = false;
+  bool _wired = false;
 
   /// 会话是否已启动（PTY 已 spawn）。
   bool get isRunning => _pty != null;
@@ -25,7 +34,7 @@ class TerminalSession extends ChangeNotifier {
   String? _workingDirectory;
   String? get workingDirectory => _workingDirectory;
 
-  /// 启动底层 shell（Windows 用 cmd，其它平台用用户默认 shell）。
+  /// 启动底层 shell（Windows 默认 PowerShell）。
   void start({String? executable, String? workingDirectory}) {
     if (_pty != null || _disposed) return;
     _workingDirectory = workingDirectory ?? _workingDirectory;
@@ -41,9 +50,9 @@ class TerminalSession extends ChangeNotifier {
 
     final env = Map<String, String>.from(Platform.environment);
 
-    // viewWidth/viewHeight 在终端未布局时可能为 0，需兜底为合理尺寸
-    final cols = terminal.viewWidth > 0 ? terminal.viewWidth : 120;
-    final rows = terminal.viewHeight > 0 ? terminal.viewHeight : 32;
+    // 布局前用 config 默认尺寸；视图就绪后 onResize 会更新 PTY。
+    final cols = controller.config.cols;
+    final rows = controller.config.rows;
 
     // Windows 的进程启动工作目录不支持 UNC 路径（会回退到系统盘）。
     // 对 UNC，先以系统目录启动，再在 shell 就绪后通过 Set-Location 切入。
@@ -59,12 +68,13 @@ class TerminalSession extends ChangeNotifier {
         workingDirectory: ptyCwd,
       );
     } catch (e) {
-      terminal.write('无法启动终端: $e\r\n');
+      writeText('无法启动终端: $e\r\n');
       return;
     }
 
+    _wireController();
+
     // 等 shell 就绪后，把工作目录切到目标目录。
-    // PowerShell 的 Set-Location 对 UNC 与本地路径均可靠，且 UNC 不创建盘符映射。
     if (targetDir != null && targetDir.isNotEmpty) {
       Future<void>.delayed(const Duration(milliseconds: 400), () {
         if (_pty == null || _disposed) return;
@@ -75,78 +85,82 @@ class TerminalSession extends ChangeNotifier {
       });
     }
 
-    // PTY 输出 → 终端仿真器（xterm 负责 ANSI/VT 解析）
-    _ptyOutputSub = _pty!.output
-        .cast<List<int>>()
-        .transform(const Utf8Decoder())
-        .listen(terminal.write, onDone: () {
-      if (!_disposed) {
-        terminal.write('\r\n[进程已退出]\r\n');
-      }
-    });
+    // PTY 输出 → VT 引擎（原始字节，避免二次解码破坏序列）
+    _ptyOutputSub = _pty!.output.listen(
+      controller.write,
+      onDone: () {
+        if (!_disposed) writeText('\r\n[进程已退出]\r\n');
+      },
+      onError: (Object e) {
+        if (!_disposed) writeText('\r\n[终端输出错误: $e]\r\n');
+      },
+    );
 
     _pty!.exitCode.then((code) {
-      if (!_disposed) {
-        terminal.write('\r\n[进程已退出: $code]\r\n');
-      }
+      if (!_disposed) writeText('\r\n[进程已退出: $code]\r\n');
     });
-
-    // 键盘/粘贴 → PTY stdin（注意 Enter 用 \r）
-    terminal.onOutput = (data) {
-      _pty?.write(const Utf8Encoder().convert(data));
-    };
-
-    // 视口尺寸变化 → 转发给 PTY（注意 rows, cols 顺序）
-    terminal.onResize = (w, h, pw, ph) {
-      _pty?.resize(h, w);
-    };
 
     notifyListeners();
   }
 
+  void _wireController() {
+    if (_wired) return;
+    _wired = true;
+    controller.onOutput = (bytes) {
+      _pty?.write(bytes);
+    };
+    controller.onResize = (cols, rows) {
+      _pty?.resize(rows, cols);
+    };
+  }
+
+  /// 向终端缓冲区写入纯文本（含 ANSI）。
+  void writeText(String text) {
+    if (text.isEmpty) return;
+    controller.write(Uint8List.fromList(utf8.encode(text)));
+  }
+
   /// 向当前终端发送一段命令作为输入（常用于快捷启动）。
   void sendCommand(String command) {
-    _pty?.write(const Utf8Encoder().convert('$command\r'));
+    _pty?.write(Uint8List.fromList(utf8.encode('$command\r')));
   }
 
   /// 向终端写入文本，不加回车（用于填入智能体输入区）。
   void sendInput(String text) {
     if (text.isEmpty) return;
-    _pty?.write(const Utf8Encoder().convert(text));
+    _pty?.write(Uint8List.fromList(utf8.encode(text)));
   }
 
-  /// 读取终端缓冲区最近若干行纯文本（供智能体检测）。
+  /// 读取终端活动屏纯文本（供智能体检测），取末尾若干行。
   String recentBufferText({int maxLines = 48}) {
-    final buf = terminal.buffer;
-    final height = buf.height;
-    if (height <= 0) return '';
-    final startY = height > maxLines ? height - maxLines : 0;
-    final endX = buf.viewWidth > 0 ? buf.viewWidth - 1 : 0;
-    return buf.getText(
-      BufferRangeLine(
-        CellOffset(0, startY),
-        CellOffset(endX, height - 1),
-      ),
+    final formatter = controller.createFormatter(
+      format: FormatterFormat.plain,
+      unwrap: true,
+      trim: true,
     );
+    try {
+      final text = formatter.format();
+      if (maxLines <= 0) return text;
+      final lines = const LineSplitter().convert(text);
+      if (lines.length <= maxLines) return text;
+      return lines.sublist(lines.length - maxLines).join('\n');
+    } finally {
+      formatter.dispose();
+    }
   }
 
   /// 结束并清理底层 PTY。
-  ///
-  /// 先给 shell 发 exit 让它正常退出（PowerShell/cmd 退出时会自动回收其
-  /// 临时状态，例如 UNC 上下文，避免残留网络盘符映射）；短暂等待后仍不退
-  /// 再强杀兜底。
   void kill() {
     _ptyOutputSub?.cancel();
     _ptyOutputSub = null;
     final pty = _pty;
     if (pty != null) {
       try {
-        pty.write(const Utf8Encoder().convert('exit\r'));
+        pty.write(Uint8List.fromList(utf8.encode('exit\r')));
       } catch (_) {
         // 管道已关闭则直接强杀
       }
       _pty = null;
-      // 给 shell 一个正常退出的机会，超时后再强杀
       Future<void>.delayed(const Duration(milliseconds: 1500), () {
         pty.kill();
       });
@@ -157,6 +171,7 @@ class TerminalSession extends ChangeNotifier {
   void dispose() {
     _disposed = true;
     kill();
+    controller.dispose();
     super.dispose();
   }
 }

@@ -4,7 +4,7 @@ publish_to: 'none'
 version: 0.1.0+1
 
 environment:
-  sdk: ^3.6.1
+  sdk: ^3.12.0
 
 dependencies:
   file_picker: ^11.0.3
@@ -27,13 +27,14 @@ dependencies:
   shared_preferences: ^2.5.3
   watcher: ^1.2.1
   window_manager: ^0.4.3
-  xterm: ^4.0.0
+  # pub.dev 最新仍为 0.0.5；TUI 滚轮修复在 upstream main 未发版。
+  # 发版后可升版本；发版前勿把整库 vendor 进仓库。
+  flterm: ^0.0.5
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^5.0.0
-  ft_patch_package: ^1.0.1
 
 flutter:
   uses-material-design: true

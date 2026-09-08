@@ -18,24 +18,47 @@ const kKnownAgentTokens = <String>[
   'codex',
   'crush',
   'goose',
-  'amp ',
+  'amp',
   'cursor-agent',
   'openinterpreter',
   'continue',
 ];
 
+/// 按「词边界」匹配，避免 `pow` 误伤 `PowerShell`、`amp` 误伤路径等。
+bool containsAgentToken(String text, String token) {
+  final t = token.trim().toLowerCase();
+  if (t.isEmpty) return false;
+  final pattern = RegExp(
+    '(^|[^A-Za-z0-9_])${RegExp.escape(t)}([^A-Za-z0-9_]|\$)',
+    caseSensitive: false,
+  );
+  return pattern.hasMatch(text);
+}
+
+bool _matchesKnownAgentToken(String text) {
+  for (final token in kKnownAgentTokens) {
+    if (containsAgentToken(text, token)) return true;
+  }
+  return false;
+}
+
 /// 判断一段命令文本是否像在启动智能体。
+///
+/// 只认已知 Agent CLI 关键字，不用全部快捷启动项做子串匹配
+/// （否则 `pow` 会把任意 PowerShell 会话当成智能体）。
 bool commandLooksLikeAgent(String command) {
   final lower = command.toLowerCase();
-  for (final token in kKnownAgentTokens) {
-    if (lower.contains(token.trim())) return true;
-  }
-  // 用户配置的快捷启动命令也算候选
+  if (_matchesKnownAgentToken(lower)) return true;
+  // 用户把智能体命令改了显示名时：仅当该快捷项本身仍含已知关键字才算
   for (final cmd in AppConfig.instance.startCmds) {
-    final tip = cmd.command.trim().toLowerCase();
+    final tip = cmd.command.trim();
     if (tip.isEmpty) continue;
-    final first = tip.split(RegExp(r'\s+')).first;
-    if (first.length >= 2 && lower.contains(first)) return true;
+    if (!_matchesKnownAgentToken(tip) &&
+        !_matchesKnownAgentToken(cmd.name)) {
+      continue;
+    }
+    final first = tip.toLowerCase().split(RegExp(r'\s+')).first;
+    if (first.length >= 2 && containsAgentToken(lower, first)) return true;
   }
   return false;
 }
@@ -44,14 +67,16 @@ bool commandLooksLikeAgent(String command) {
 bool terminalTextLooksLikeAgent(String recentText) {
   final lower = recentText.toLowerCase();
   if (lower.trim().isEmpty) return false;
-  for (final token in kKnownAgentTokens) {
-    if (lower.contains(token.trim())) return true;
-  }
+  if (_matchesKnownAgentToken(lower)) return true;
   for (final cmd in AppConfig.instance.startCmds) {
-    final tip = cmd.command.trim().toLowerCase();
+    final tip = cmd.command.trim();
     if (tip.isEmpty) continue;
-    final first = tip.split(RegExp(r'\s+')).first;
-    if (first.length >= 2 && lower.contains(first)) return true;
+    if (!_matchesKnownAgentToken(tip) &&
+        !_matchesKnownAgentToken(cmd.name)) {
+      continue;
+    }
+    final first = tip.toLowerCase().split(RegExp(r'\s+')).first;
+    if (first.length >= 2 && containsAgentToken(lower, first)) return true;
   }
   return false;
 }

@@ -110,11 +110,6 @@ Write-Host "==> Flutter pub get" -ForegroundColor Cyan
 flutter pub get
 if ($LASTEXITCODE -ne 0) { throw "flutter pub get failed" }
 
-Write-Host "==> Apply pub patches (xterm IME etc.)" -ForegroundColor Cyan
-$env:PUB_CACHE = if ($env:PUB_CACHE) { $env:PUB_CACHE } else { Join-Path $env:LOCALAPPDATA 'Pub\Cache' }
-dart run ft_patch_package apply
-if ($LASTEXITCODE -ne 0) { throw "ft_patch_package apply failed" }
-
 Write-Host "==> flutter build windows $FlutterBuildFlag (v$Version, $Configuration)" -ForegroundColor Cyan
 flutter build windows $FlutterBuildFlag
 if ($LASTEXITCODE -ne 0) { throw "flutter build windows failed" }
