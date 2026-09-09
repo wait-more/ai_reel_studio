@@ -403,6 +403,85 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
     });
   }
 
+  Future<void> _openExpandedTextEditor(
+    ComfyExposedField field, {
+    required String nodeTitle,
+  }) async {
+    final ctrl = _textCtrls[field.id];
+    if (ctrl == null) return;
+    _textFocus[field.id]?.unfocus();
+
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: true,
+      builder: (ctx) {
+        final size = MediaQuery.sizeOf(ctx);
+        final width = (size.width * 0.72).clamp(420.0, 820.0);
+        final height = (size.height * 0.58).clamp(280.0, 560.0);
+        return Dialog(
+          insetPadding:
+              const EdgeInsets.symmetric(horizontal: 24, vertical: 24),
+          child: SizedBox(
+            width: width,
+            height: height,
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 12, 8, 12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          nodeTitle,
+                          style: Theme.of(ctx).textTheme.titleMedium?.copyWith(
+                                fontWeight: FontWeight.w600,
+                              ),
+                        ),
+                      ),
+                      IconButton(
+                        tooltip: '关闭',
+                        icon: const Icon(Icons.close),
+                        onPressed: () => Navigator.of(ctx).pop(),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Expanded(
+                    child: TextField(
+                      controller: ctrl,
+                      autofocus: true,
+                      maxLines: null,
+                      expands: true,
+                      textAlignVertical: TextAlignVertical.top,
+                      onChanged: (_) => _schedulePersistSession(),
+                      decoration: const InputDecoration(
+                        border: OutlineInputBorder(),
+                        contentPadding: EdgeInsets.all(12),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  Align(
+                    alignment: Alignment.centerRight,
+                    child: FilledButton(
+                      onPressed: () => Navigator.of(ctx).pop(),
+                      child: const Text('完成'),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+
+    if (!mounted) return;
+    _syncTextValuesFromControllers();
+    _schedulePersistSession();
+  }
+
   Future<void> _persistSession() async {
     final t = _selected;
     if (t == null) return;
@@ -2075,7 +2154,7 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
             opacity: on ? 1 : 0.45,
             child: IgnorePointer(
               ignoring: !on,
-              child: _buildFieldsLayout(node),
+              child: _buildFieldsLayout(node, nodeTitle: displayLabel),
             ),
           ),
         ],
@@ -2128,7 +2207,10 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
   bool _isWideField(ComfyExposedField field) =>
       field.widget.isMedia || field.widget == ComfyWidgetKind.multiline;
 
-  Widget _buildFieldsLayout(ComfyExposedNode node) {
+  Widget _buildFieldsLayout(
+    ComfyExposedNode node, {
+    required String nodeTitle,
+  }) {
     final wide = <ComfyExposedField>[];
     final narrow = <ComfyExposedField>[];
     for (final field in node.fields) {
@@ -2141,18 +2223,21 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        for (final field in wide) _buildFieldBody(field),
+        for (final field in wide)
+          _buildFieldBody(field, nodeTitle: nodeTitle),
         for (var i = 0; i < narrow.length; i += 2)
           Padding(
             padding: const EdgeInsets.only(bottom: 2),
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Expanded(child: _buildFieldBody(narrow[i])),
+                Expanded(
+                  child: _buildFieldBody(narrow[i], nodeTitle: nodeTitle),
+                ),
                 const SizedBox(width: 8),
                 Expanded(
                   child: i + 1 < narrow.length
-                      ? _buildFieldBody(narrow[i + 1])
+                      ? _buildFieldBody(narrow[i + 1], nodeTitle: nodeTitle)
                       : const SizedBox.shrink(),
                 ),
               ],
@@ -2162,7 +2247,10 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
     );
   }
 
-  Widget _buildFieldBody(ComfyExposedField field) {
+  Widget _buildFieldBody(
+    ComfyExposedField field, {
+    required String nodeTitle,
+  }) {
     switch (field.widget) {
       case ComfyWidgetKind.bool:
         return SwitchListTile(
@@ -2228,23 +2316,50 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
           ),
         );
       case ComfyWidgetKind.multiline:
+        final cs = Theme.of(context).colorScheme;
         return Padding(
           padding: const EdgeInsets.only(bottom: 8),
-          child: TextField(
-            controller: _textCtrls[field.id],
-            focusNode: _textFocus[field.id],
-            maxLines: 4,
-            onChanged: (_) => _schedulePersistSession(),
-            decoration: InputDecoration(
-              isDense: true,
-              labelText: field.label,
-              border: const OutlineInputBorder(),
-              alignLabelWithHint: true,
-              contentPadding: const EdgeInsets.symmetric(
-                horizontal: 10,
-                vertical: 10,
+          child: Stack(
+            children: [
+              TextField(
+                controller: _textCtrls[field.id],
+                focusNode: _textFocus[field.id],
+                maxLines: 4,
+                onChanged: (_) => _schedulePersistSession(),
+                decoration: InputDecoration(
+                  isDense: true,
+                  labelText: field.label,
+                  border: const OutlineInputBorder(),
+                  alignLabelWithHint: true,
+                  // 右下角留给斜线抓手，避免文字压住。
+                  contentPadding: const EdgeInsets.fromLTRB(10, 10, 22, 18),
+                ),
               ),
-            ),
+              Positioned(
+                right: 1,
+                bottom: 1,
+                child: Tooltip(
+                  message: '放大编辑',
+                  waitDuration: const Duration(milliseconds: 400),
+                  child: InkWell(
+                    onTap: () => _openExpandedTextEditor(
+                      field,
+                      nodeTitle: nodeTitle,
+                    ),
+                    borderRadius: BorderRadius.circular(4),
+                    child: SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CustomPaint(
+                        painter: _TextareaExpandGripPainter(
+                          color: cs.onSurfaceVariant.withValues(alpha: 0.7),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ],
           ),
         );
       case ComfyWidgetKind.int:
@@ -2274,4 +2389,35 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
         );
     }
   }
+}
+
+/// 网页 textarea 右下角抓手：靠右下角的小三角，由若干条 `/` 斜线组成。
+class _TextareaExpandGripPainter extends CustomPainter {
+  final Color color;
+
+  _TextareaExpandGripPainter({required this.color});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = color
+      ..strokeWidth = 1.2
+      ..strokeCap = StrokeCap.round
+      ..style = PaintingStyle.stroke;
+
+    // 三条平行 `/`：从底边连到右边，越靠外越长，整体呈右下角三角。
+    // d = 距右下角的距离（同时作为线段在两轴上的跨度）。
+    const ds = <double>[4, 7.5, 11];
+    for (final d in ds) {
+      canvas.drawLine(
+        Offset(size.width - d, size.height - 1),
+        Offset(size.width - 1, size.height - d),
+        paint,
+      );
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _TextareaExpandGripPainter oldDelegate) =>
+      oldDelegate.color != color;
 }
