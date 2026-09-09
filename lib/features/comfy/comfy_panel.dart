@@ -12,6 +12,7 @@ import '../../core/comfy/comfy_gen_session.dart';
 import '../../core/comfy/comfy_models.dart';
 import '../../core/comfy/comfy_template_store.dart';
 import '../../core/config.dart';
+import '../../core/path_ellipsis_text.dart';
 import '../../core/providers.dart';
 import '../../core/toast.dart';
 import 'comfy_template_library.dart';
@@ -1476,14 +1477,9 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
       child: Row(
         children: [
           Expanded(
-            child: Tooltip(
-              message: dirText,
-              child: Text(
-                dirText,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(fontSize: 12.5, color: cs.onSurface),
-              ),
+            child: PathEllipsisText(
+              dirText,
+              style: TextStyle(fontSize: 12.5, color: cs.onSurface),
             ),
           ),
           TextButton(
@@ -1759,18 +1755,26 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
             style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500),
           ),
           const SizedBox(height: 4),
-          Text(
-            '输出：${job.outputDir}',
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
-            style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                '输出：',
+                style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant),
+              ),
+              Expanded(
+                child: PathEllipsisText(
+                  job.outputDir,
+                  maxLines: 2,
+                  style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant),
+                ),
+              ),
+            ],
           ),
           if (job.outputFileName.isNotEmpty) ...[
             const SizedBox(height: 2),
-            Text(
+            PathEllipsisText(
               '文件名：${job.outputFileName}',
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
               style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant),
             ),
           ],
@@ -1798,10 +1802,9 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
           ],
           if (job.outputs.isNotEmpty) ...[
             const SizedBox(height: 4),
-            Text(
+            PathEllipsisText(
               '输出文件：${job.outputs.map(p.basename).join('、')}',
               maxLines: 2,
-              overflow: TextOverflow.ellipsis,
               style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant),
             ),
           ],
@@ -2183,15 +2186,27 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
               Row(
                 children: [
                   Expanded(
-                    child: Text(
-                      path.isEmpty ? '未选择' : path,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        fontSize: 12,
-                        color: Theme.of(context).colorScheme.onSurfaceVariant,
-                      ),
-                    ),
+                    child: path.isEmpty
+                        ? Text(
+                            '未选择',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: Theme.of(context)
+                                  .colorScheme
+                                  .onSurfaceVariant,
+                            ),
+                          )
+                        : PathEllipsisText(
+                            path,
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: Theme.of(context)
+                                  .colorScheme
+                                  .onSurfaceVariant,
+                            ),
+                          ),
                   ),
                   TextButton(
                     style: TextButton.styleFrom(
