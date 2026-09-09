@@ -686,6 +686,142 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
     ref.read(comfyActionsTickProvider.notifier).state++;
   }
 
+  /// 将当前模板的节点参数与 bypass 使能复制到其它 Comfy 实例，便于并行同跑。
+  Future<void> _twinTaskToOtherServer() async {
+    final template = _selected;
+    if (template == null) return;
+
+    final currentId = _serverId;
+    final others = ref
+        .read(comfyServersProvider)
+        .where((s) => s.id != currentId)
+        .toList(growable: false);
+    if (others.isEmpty) {
+      if (mounted) {
+        showGlobalToast(context, '请先在设置中添加其它 Comfy 实例');
+      }
+      return;
+    }
+
+    final target = await showDialog<ComfyServer>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: const Text('选择孪生目标实例'),
+        children: [
+          for (final s in others)
+            SimpleDialogOption(
+              onPressed: () => Navigator.of(ctx).pop(s),
+              child: ListTile(
+                contentPadding: EdgeInsets.zero,
+                dense: true,
+                title: Text(s.name),
+                subtitle: Text(
+                  s.baseUrl,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 11),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+    if (target == null || !mounted) return;
+
+    final bindings = await ComfyTemplateStore.loadBindings();
+    if (!mounted) return;
+    final bound = bindings.forServer(target.id).templateIds.contains(template.id);
+    if (!bound) {
+      final ok = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('尚未绑定模板'),
+          content: Text(
+            '目标实例「${target.name}」尚未绑定模板「${template.name}」。\n'
+            '是否绑定并孪生参数？',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(false),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(ctx).pop(true),
+              child: const Text('绑定并孪生'),
+            ),
+          ],
+        ),
+      );
+      if (ok != true || !mounted) return;
+      await ComfyTemplateStore.bindTemplates(
+        serverId: target.id,
+        addTemplateIds: [template.id],
+      );
+      ref.read(comfyActionsTickProvider.notifier).state++;
+    }
+
+    await _persistSession();
+    if (!mounted) return;
+
+    _syncTextValuesFromControllers();
+    final sourceName = _outputNameCtrl.text.trim();
+    final targetSession = await ComfyGenSession.load(
+      serverId: target.id,
+      templateId: template.id,
+    );
+
+    final enabled = Map<String, bool>.from(targetSession.enabled);
+    for (final node in template.nodes) {
+      if (!node.bypassWhenDisabled) continue;
+      enabled[node.nodeId] =
+          _enabled[node.nodeId] ?? node.defaultEnabled;
+    }
+
+    final next = targetSession.copyWith(
+      values: Map<String, dynamic>.from(_values),
+      enabled: enabled,
+      outputFileName: sourceName.isEmpty
+          ? targetSession.outputFileName
+          : _withMinusOneSuffix(sourceName),
+    );
+    await ComfyGenSession.save(
+      serverId: target.id,
+      templateId: template.id,
+      session: next,
+    );
+    await ComfyTemplateStore.selectTemplate(
+      serverId: target.id,
+      templateId: template.id,
+    );
+    ref.read(comfyActionsTickProvider.notifier).state++;
+
+    if (!mounted) return;
+    showGlobalToast(context, '已孪生到「${target.name}」');
+    await _selectServer(target.id);
+    if (!mounted) return;
+    // 切到目标 URL 后明确打开刚孪生的模板（载入目标会话中的值/使能）。
+    await _selectTemplate(template, persistCurrent: false);
+  }
+
+  /// `foo` → `foo-1`；`foo.png` → `foo-1.png`；
+  /// 基名已是 `*-N`（N 为正整数）则改为 `*-(N+1)`。
+  static String _withMinusOneSuffix(String fileName) {
+    final trimmed = fileName.trim();
+    if (trimmed.isEmpty) return trimmed;
+    final dot = trimmed.lastIndexOf('.');
+    final hasExt = dot > 0 && dot < trimmed.length - 1;
+    final base = hasExt ? trimmed.substring(0, dot) : trimmed;
+    final ext = hasExt ? trimmed.substring(dot) : '';
+
+    final m = RegExp(r'^(.*)-(\d+)$').firstMatch(base);
+    if (m != null) {
+      final stem = m.group(1)!;
+      final n = int.tryParse(m.group(2)!) ?? 0;
+      return '$stem-${n + 1}$ext';
+    }
+    return '$base-1$ext';
+  }
+
   String _defaultOutputDir() {
     final selectedDir = ref.read(selectedDirProvider);
     final root = AppConfig.instance.projectRoot;
@@ -1345,7 +1481,24 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
                   ],
                 ),
               ),
-              const SizedBox(width: 12),
+              const SizedBox(width: 8),
+              Tooltip(
+                message: '将当前节点参数与使能复制到其它 Comfy 实例，便于并行同跑',
+                waitDuration: const Duration(milliseconds: 400),
+                child: TextButton.icon(
+                  onPressed: _twinTaskToOtherServer,
+                  style: TextButton.styleFrom(
+                    visualDensity: VisualDensity.compact,
+                    minimumSize: const Size(0, 36),
+                  ),
+                  icon: const Icon(
+                    Icons.control_point_duplicate_outlined,
+                    size: 18,
+                  ),
+                  label: const Text('任务孪生'),
+                ),
+              ),
+              const SizedBox(width: 8),
               FilledButton.icon(
                 onPressed: _workflow == null || t.nodes.isEmpty ? null : _run,
                 style: FilledButton.styleFrom(
