@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -348,14 +349,8 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
     ref.read(editorViewStatesProvider.notifier).state = next;
   }
 
-  /// TextField 内部 Scrollable。
+  /// TextField 内部 Scrollable（只在编辑器子树内查找，避免误绑到外层）。
   ScrollPosition? _editorScrollPosition() {
-    final focusCtx = _editorFocus.context;
-    if (focusCtx != null) {
-      final viaFocus = Scrollable.maybeOf(focusCtx)?.position;
-      if (viaFocus != null) return viaFocus;
-    }
-    // TextField 的 context 在 Scrollable 之上，需向下找
     final root = _editorFieldKey.currentContext as Element?;
     if (root == null) return null;
     ScrollPosition? found;
@@ -498,73 +493,92 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
     });
   }
 
-  /// 测量目标字符在文档中的 Y（含 padding），用于精确定位滚动。
+  /// 测量目标字符在文档中的 Y（内容坐标，含滚动），优先用 RenderEditable 真值。
   double _measureDocY(int charOffset, TextStyle style) {
+    final o = charOffset.clamp(0, _controller.text.length);
+    final editable = findRenderEditable(
+      _editorFieldKey.currentContext?.findRenderObject(),
+    );
+    if (editable != null && editable.hasSize) {
+      final local = editable.getLocalRectForCaret(TextPosition(offset: o));
+      return local.top + editable.offset.pixels;
+    }
+
     final box = _editorFieldKey.currentContext?.findRenderObject() as RenderBox?;
     final maxWidth = (box?.size.width ?? 800) - _editorPadding.horizontal;
+    // 测量阶段禁止走 Theme.of(context)/buildTextSpan，避免在非 build 阶段注册 Inherited 依赖。
     final tp = TextPainter(
       text: TextSpan(text: _controller.text, style: style),
       textDirection: TextDirection.ltr,
+      strutStyle: StrutStyle(
+        fontSize: style.fontSize,
+        height: style.height,
+        fontFamily: style.fontFamily,
+        forceStrutHeight: true,
+      ),
     )..layout(maxWidth: maxWidth > 40 ? maxWidth : 800);
     final caret = tp.getOffsetForCaret(
-      TextPosition(offset: charOffset.clamp(0, _controller.text.length)),
+      TextPosition(offset: o),
       Rect.zero,
     );
     return _editorPadding.top + caret.dy;
   }
 
+  bool _jumpingToHeading = false;
+
   Future<void> _jumpToHeading(OutlineHeading h) async {
     final caret = h.charOffset.clamp(0, _controller.text.length);
     final fontSize = ref.read(editorFontSizeProvider);
-    final style = TextStyle(
-      fontSize: fontSize,
-      height: _lineHeightFactor,
-      fontFamily: 'Consolas',
-    );
+    final style = _editorTextStyle(fontSize);
 
     setState(() {
       _activeLine = h.lineIndex;
       _activeOutline = activeOutlineIndex(_outline, h.lineIndex);
     });
 
+    _jumpingToHeading = true;
     _editorFocus.requestFocus();
     await WidgetsBinding.instance.endOfFrame;
-    if (!mounted) return;
+    if (!mounted) {
+      _jumpingToHeading = false;
+      return;
+    }
 
-    bool pinTargetInView() {
+    void pinTargetInView() {
       final pos = _editorScrollPosition();
-      if (pos == null || !pos.hasContentDimensions) return false;
+      if (pos == null || !pos.hasContentDimensions) return;
       final docY = _measureDocY(caret, style);
-      // 目标行落在视口上方约 1/4，下面留出大部分正文
+      // 目标行落在视口上方约 1/4
       final target =
           (docY - pos.viewportDimension * 0.25).clamp(0.0, pos.maxScrollExtent);
       if ((pos.pixels - target).abs() > 0.5) {
         pos.jumpTo(target);
       }
-      if ((_scrollOffset - target).abs() > 0.5) {
-        setState(() {
-          _scrollOffset = target;
-          _viewportHeight = pos.viewportDimension;
-        });
-        if (!_restoringView) _schedulePersistView();
-      }
-      return true;
+      _scrollOffset = target;
+      _viewportHeight = pos.viewportDimension;
     }
 
-    // 1) 先滚动到位（尚未改 selection → 不会触发 bringIntoView）
+    // 先滚到位，再设光标；随后再纠正一次 bringIntoView 的偏移。
     pinTargetInView();
     await WidgetsBinding.instance.endOfFrame;
-    if (!mounted) return;
+    if (!mounted) {
+      _jumpingToHeading = false;
+      return;
+    }
     pinTargetInView();
 
-    // 2) 再设光标；若目标已在视口中上部，bringIntoView 通常不再大挪
     _controller.selection = TextSelection.collapsed(offset: caret);
+    await WidgetsBinding.instance.endOfFrame;
+    if (!mounted) {
+      _jumpingToHeading = false;
+      return;
+    }
+    pinTargetInView();
 
-    // 3) 盯梢约 200ms，挡住迟到的 bringIntoView（向后跳时会把光标顶到底部）
-    final deadline = DateTime.now().add(const Duration(milliseconds: 220));
-    while (mounted && DateTime.now().isBefore(deadline)) {
-      await WidgetsBinding.instance.endOfFrame;
-      pinTargetInView();
+    _jumpingToHeading = false;
+    if (mounted) {
+      setState(() {});
+      if (!_restoringView) _schedulePersistView();
     }
   }
 
@@ -1185,6 +1199,7 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
                           children: [
                             NotificationListener<ScrollNotification>(
                               onNotification: (n) {
+                                if (_jumpingToHeading) return false;
                                 if (n.metrics.axis != Axis.vertical) {
                                   return false;
                                 }

@@ -34,6 +34,7 @@ class _OutlineRailState extends State<OutlineRail> {
   Timer? _openTimer;
   Timer? _closeTimer;
   OverlayEntry? _overlay;
+  final GlobalKey _anchorKey = GlobalKey();
 
   @override
   void dispose() {
@@ -49,14 +50,16 @@ class _OutlineRailState extends State<OutlineRail> {
     if (widget.pinned) {
       _removeOverlay();
       _hoverOpen = false;
-    } else if (_hoverOpen) {
-      _overlay?.markNeedsBuild();
+      return;
     }
-    // 标题列表 / 高亮变化时刷新浮层
+    // 不可在父级 build/didUpdateWidget 里同步 markNeedsBuild，
+    // 否则 Overlay 重入 build 时 InheritedWidget 依赖会断言失败。
     if (_overlay != null &&
         (oldWidget.headings != widget.headings ||
             oldWidget.activeIndex != widget.activeIndex)) {
-      _overlay!.markNeedsBuild();
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _overlay != null) _overlay!.markNeedsBuild();
+      });
     }
   }
 
@@ -67,24 +70,40 @@ class _OutlineRailState extends State<OutlineRail> {
 
   void _ensureOverlay() {
     if (_overlay != null || widget.pinned) return;
-    final box = context.findRenderObject() as RenderBox?;
+    final box = _anchorKey.currentContext?.findRenderObject() as RenderBox? ??
+        context.findRenderObject() as RenderBox?;
     if (box == null || !box.hasSize) return;
     final overlayState = Overlay.maybeOf(context, rootOverlay: true);
     if (overlayState == null) return;
 
     final origin = box.localToGlobal(Offset.zero);
     final height = box.size.height;
+    final originX = origin.dx;
+    final originY = origin.dy;
 
     _overlay = OverlayEntry(
-      builder: (ctx) {
-        // 每次 build 取最新 widget 状态
-        final rail = context.findAncestorStateOfType<_OutlineRailState>();
-        final w = rail?.widget ?? widget;
+      builder: (overlayCtx) {
+        // 只用 Overlay 自己的 context 查 Theme；几何用 GlobalKey，避免跨树 Inherited 依赖断言。
+        if (!mounted) return const SizedBox.shrink();
+        final w = widget;
+        final anchorBox =
+            _anchorKey.currentContext?.findRenderObject() as RenderBox?;
+        final pos = (anchorBox != null &&
+                anchorBox.hasSize &&
+                anchorBox.attached)
+            ? anchorBox.localToGlobal(Offset.zero)
+            : Offset(originX, originY);
+        final h = (anchorBox != null &&
+                anchorBox.hasSize &&
+                anchorBox.attached)
+            ? anchorBox.size.height
+            : height;
+        if (h <= 0) return const SizedBox.shrink();
         return Positioned(
-          left: origin.dx,
-          top: origin.dy,
+          left: pos.dx,
+          top: pos.dy,
           width: w.panelWidth,
-          height: height,
+          height: h,
           child: MouseRegion(
             onEnter: (_) {
               _closeTimer?.cancel();
@@ -94,8 +113,8 @@ class _OutlineRailState extends State<OutlineRail> {
             child: Material(
               elevation: 8,
               shadowColor: Colors.black45,
-              color: Theme.of(ctx).colorScheme.surfaceContainerHigh,
-              child: _panel(ctx, w),
+              color: Theme.of(overlayCtx).colorScheme.surfaceContainerHigh,
+              child: _panel(overlayCtx, w),
             ),
           ),
         );
@@ -132,6 +151,7 @@ class _OutlineRailState extends State<OutlineRail> {
   Widget build(BuildContext context) {
     if (widget.pinned) {
       return SizedBox(
+        key: _anchorKey,
         width: widget.panelWidth,
         child: DecoratedBox(
           decoration: BoxDecoration(
@@ -148,6 +168,7 @@ class _OutlineRailState extends State<OutlineRail> {
     }
 
     return SizedBox(
+      key: _anchorKey,
       width: OutlineRail.hotZoneWidth,
       child: MouseRegion(
         onEnter: (_) => _scheduleOpen(),
