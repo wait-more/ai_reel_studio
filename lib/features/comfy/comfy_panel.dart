@@ -11,6 +11,7 @@ import '../../core/comfy/comfy_discover.dart';
 import '../../core/comfy/comfy_gen_session.dart';
 import '../../core/comfy/comfy_models.dart';
 import '../../core/comfy/comfy_template_store.dart';
+import '../../core/comfy_prompt_bridge.dart';
 import '../../core/config.dart';
 import '../../core/path_ellipsis_text.dart';
 import '../../core/providers.dart';
@@ -619,6 +620,70 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
     _schedulePersistSession();
   }
 
+  Future<void> _applyPromptInject(ComfyPromptInjectRequest req) async {
+    // 消费掉，避免重复触发。
+    ref.read(comfyPromptInjectRequestProvider.notifier).state = null;
+
+    await _selectServer(req.serverId);
+    if (!mounted) return;
+
+    ComfyTemplate? template;
+    final bundle = ref.read(comfyBundleProvider).valueOrNull;
+    if (bundle != null) {
+      for (final t in bundle.templates) {
+        if (t.id == req.templateId) {
+          template = t;
+          break;
+        }
+      }
+    }
+    if (template == null) {
+      for (final t in await ComfyTemplateStore.loadTemplates()) {
+        if (t.id == req.templateId) {
+          template = t;
+          break;
+        }
+      }
+    }
+    if (template == null || !mounted) {
+      if (mounted) showGlobalToast(context, '找不到目标模板');
+      return;
+    }
+
+    await _selectTemplate(template, persistCurrent: false);
+    if (!mounted) return;
+
+    setState(() {
+      _values[req.fieldId] = req.text;
+      _enabled[req.nodeId] = true;
+      _expanded[req.nodeId] = true;
+      final ctrl = _textCtrls[req.fieldId];
+      if (ctrl != null && ctrl.text != req.text) {
+        ctrl.text = req.text;
+        ctrl.selection = TextSelection.collapsed(offset: req.text.length);
+      }
+    });
+    _schedulePersistSession();
+
+    final focus = _textFocus[req.fieldId];
+    if (focus != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        focus.requestFocus();
+        final ctrl = _textCtrls[req.fieldId];
+        if (ctrl != null) {
+          ctrl.selection = TextSelection.collapsed(offset: ctrl.text.length);
+        }
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted || !focus.hasFocus) return;
+          final c = _textCtrls[req.fieldId];
+          if (c == null) return;
+          c.selection = TextSelection.collapsed(offset: c.text.length);
+        });
+      });
+    }
+  }
+
   void _setAllExpanded(bool value) {
     final t = _selected;
     if (t == null) return;
@@ -1188,6 +1253,12 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
           _selectTemplate(match.first, persistCurrent: false);
         }
       });
+    });
+
+    ref.listen(comfyPromptInjectRequestProvider, (prev, next) {
+      if (next == null) return;
+      if (prev?.nonce == next.nonce) return;
+      _applyPromptInject(next);
     });
 
     return bundleAsync.when(

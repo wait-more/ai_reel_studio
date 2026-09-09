@@ -8,6 +8,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/agent_bridge.dart';
+import '../../core/comfy_prompt_bridge.dart';
 import '../../core/providers.dart';
 import '../../core/toast.dart';
 import '../../core/workspace_memory.dart';
@@ -258,6 +259,7 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
     // 延后到首帧构建完成后注册，避免在 build 期间修改 provider
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) _registerSave();
+      if (mounted) ComfyPromptSendMemory.hydrateProvider(ref);
     });
     _load();
     _diskWatchTimer = Timer.periodic(
@@ -1252,6 +1254,14 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
                                       ref.read(sendAgentRefChordProvider);
                                   final defaults = editableTextState
                                       .contextMenuButtonItems;
+                                  final value =
+                                      editableTextState.textEditingValue;
+                                  final sel = value.selection;
+                                  final hasSel =
+                                      sel.isValid && !sel.isCollapsed;
+                                  final selectedText = hasSel
+                                      ? sel.textInside(value.text)
+                                      : '';
                                   return AdaptiveTextSelectionToolbar(
                                     anchors:
                                         editableTextState.contextMenuAnchors,
@@ -1271,6 +1281,12 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
                                           },
                                         ),
                                       ]),
+                                      if (hasSel &&
+                                          selectedText.trim().isNotEmpty)
+                                        ComfyPromptFillSubmenuButton(
+                                          selectedText: selectedText,
+                                          hostContext: context,
+                                        ),
                                     ],
                                   );
                                 },
