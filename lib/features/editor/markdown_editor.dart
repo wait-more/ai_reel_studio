@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
+import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
@@ -1236,6 +1237,9 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
                                 },
                                 maxLines: null,
                                 expands: true,
+                                // 桌面默认 BoxWidthStyle.max 会在行末选区按段落最宽行拉齐，
+                                // 短行选到最后一字时高亮像盖住整行；改用 tight 贴合字符。
+                                selectionWidthStyle: ui.BoxWidthStyle.tight,
                                 keyboardType: TextInputType.multiline,
                                 style: textStyle,
                                 strutStyle: _editorStrut(fontSize),
