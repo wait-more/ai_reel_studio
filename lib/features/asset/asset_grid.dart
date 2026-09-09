@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
 
@@ -6,6 +7,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/asset_panel_prefs.dart';
+import '../../core/config.dart';
 import '../../core/file_actions.dart';
 import '../../core/fs_context_menu.dart';
 import '../../core/fs_drag.dart';
@@ -22,6 +25,85 @@ enum _AssetFilter {
   videos,
   audios,
   docs,
+}
+
+/// 素材栏展示模式。
+enum _AssetViewMode { grid, list }
+
+/// 列表排序列（对齐资源管理器详细信息）。
+enum _ListSortColumn { name, modified, type, size }
+
+class _EntryMeta {
+  final DateTime? modified;
+  final int? sizeBytes; // 文件夹不显示大小
+  final String typeLabel;
+
+  const _EntryMeta({
+    required this.modified,
+    required this.sizeBytes,
+    required this.typeLabel,
+  });
+}
+
+String _formatListBytes(int? n) {
+  if (n == null) return '';
+  if (n < 1024) return '$n B';
+  if (n < 1024 * 1024) return '${(n / 1024).toStringAsFixed(1)} KB';
+  if (n < 1024 * 1024 * 1024) {
+    return '${(n / (1024 * 1024)).toStringAsFixed(1)} MB';
+  }
+  return '${(n / (1024 * 1024 * 1024)).toStringAsFixed(2)} GB';
+}
+
+String _formatListTime(DateTime? t) {
+  if (t == null) return '—';
+  String two(int v) => v.toString().padLeft(2, '0');
+  return '${t.year}/${t.month}/${t.day} ${two(t.hour)}:${two(t.minute)}';
+}
+
+String _explorerTypeLabel(String name, bool isDir) {
+  if (isDir) return '文件夹';
+  final lower = name.toLowerCase();
+  final dot = lower.lastIndexOf('.');
+  final ext = (dot > 0 && dot < lower.length - 1)
+      ? lower.substring(dot + 1)
+      : '';
+  final extUp = ext.toUpperCase();
+  switch (classifyMedia(name)) {
+    case MediaKind.image:
+      return extUp.isEmpty ? '图像' : '$extUp 图像';
+    case MediaKind.video:
+      return extUp.isEmpty ? '视频' : '$extUp 视频';
+    case MediaKind.audio:
+      return extUp.isEmpty ? '音频' : '$extUp 音频';
+    case MediaKind.markdown:
+      return 'Markdown 文档';
+    case MediaKind.other:
+      return extUp.isEmpty ? '文件' : '$extUp 文件';
+  }
+}
+
+/// 列表列宽（名称列默认较窄，可拖拽调节并记忆）。
+const double _kListNameMinW = 120;
+const double _kListDateMinW = 100;
+const double _kListTypeMinW = 72;
+const double _kListSizeMinW = 64;
+const double _kListRowH = 34;
+const double _kListHeaderH = 32;
+const double _kListResizeHandleW = 5;
+
+_ListSortColumn _parseListSortColumn(String raw) {
+  switch (raw) {
+    case 'modified':
+      return _ListSortColumn.modified;
+    case 'type':
+      return _ListSortColumn.type;
+    case 'size':
+      return _ListSortColumn.size;
+    case 'name':
+    default:
+      return _ListSortColumn.name;
+  }
 }
 
 /// 物料网格：以卡片方式展示某个目录下的物料（图片/视频/音频/文件）。
@@ -44,6 +126,24 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
   final TextEditingController _searchCtrl = TextEditingController();
   String _query = '';
   _AssetFilter _filter = _AssetFilter.all;
+  _AssetViewMode _viewMode = AppConfig.instance.assetViewMode == 'list'
+      ? _AssetViewMode.list
+      : _AssetViewMode.grid;
+  _ListSortColumn _listSort =
+      _parseListSortColumn(AppConfig.instance.assetListSortColumn);
+  bool _listSortAsc = AppConfig.instance.assetListSortAsc;
+  final Map<String, _EntryMeta> _meta = {};
+
+  double _colName =
+      AppConfig.instance.assetListColWidths['name'] ?? 280;
+  double _colDate =
+      AppConfig.instance.assetListColWidths['modified'] ?? 148;
+  double _colType =
+      AppConfig.instance.assetListColWidths['type'] ?? 110;
+  double _colSize =
+      AppConfig.instance.assetListColWidths['size'] ?? 88;
+  final ScrollController _listHScroll = ScrollController();
+  Timer? _colWidthSaveTimer;
 
   /// 当前多选路径。
   final Set<String> _selected = {};
@@ -63,7 +163,7 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
           : null;
 
   
-/// 过滤后的条目（先类型后关键字，且保留排序）。
+/// 过滤后的条目（先类型后关键字；列表模式可按列排序）。
   List<FileSystemEntity> get _visibleEntries {
     final entries = _entries.where((e) {
       final dir = e is Directory;
@@ -98,7 +198,92 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
       }
       return true;
     }).toList();
+    if (_viewMode == _AssetViewMode.list) {
+      entries.sort(_compareListEntries);
+    }
     return entries;
+  }
+
+  int _compareListEntries(FileSystemEntity a, FileSystemEntity b) {
+    final dirA = a is Directory;
+    final dirB = b is Directory;
+    // 名称排序时保持文件夹优先，贴近资源管理器默认观感。
+    if (_listSort == _ListSortColumn.name && dirA != dirB) {
+      return dirA ? -1 : 1;
+    }
+    final metaA = _meta[a.path];
+    final metaB = _meta[b.path];
+    final nameA = a.path.split(Platform.pathSeparator).last.toLowerCase();
+    final nameB = b.path.split(Platform.pathSeparator).last.toLowerCase();
+    int cmp;
+    switch (_listSort) {
+      case _ListSortColumn.name:
+        cmp = nameA.compareTo(nameB);
+        break;
+      case _ListSortColumn.modified:
+        final ta = metaA?.modified?.millisecondsSinceEpoch ?? 0;
+        final tb = metaB?.modified?.millisecondsSinceEpoch ?? 0;
+        cmp = ta.compareTo(tb);
+        break;
+      case _ListSortColumn.type:
+        cmp = (metaA?.typeLabel ?? '').compareTo(metaB?.typeLabel ?? '');
+        break;
+      case _ListSortColumn.size:
+        final sa = metaA?.sizeBytes ?? -1;
+        final sb = metaB?.sizeBytes ?? -1;
+        cmp = sa.compareTo(sb);
+        break;
+    }
+    if (cmp == 0) cmp = nameA.compareTo(nameB);
+    return _listSortAsc ? cmp : -cmp;
+  }
+
+  void _toggleListSort(_ListSortColumn col) {
+    setState(() {
+      if (_listSort == col) {
+        _listSortAsc = !_listSortAsc;
+      } else {
+        _listSort = col;
+        _listSortAsc = col != _ListSortColumn.modified &&
+            col != _ListSortColumn.size;
+      }
+    });
+    AppConfig.instance.setAssetListSort(
+      column: _listSort.name,
+      asc: _listSortAsc,
+    );
+  }
+
+  void _resetListSort() {
+    setState(() {
+      _listSort = _parseListSortColumn(AssetPanelPrefs.defaultSortColumn);
+      _listSortAsc = AssetPanelPrefs.defaultSortAsc;
+    });
+    AppConfig.instance.resetAssetListSort();
+  }
+
+  void _resetColWidths() {
+    final d = AssetPanelPrefs.defaultColWidths;
+    setState(() {
+      _colName = d['name']!;
+      _colDate = d['modified']!;
+      _colType = d['type']!;
+      _colSize = d['size']!;
+    });
+    AppConfig.instance.resetAssetListColWidths();
+  }
+
+  void _resetListLayoutPrefs() {
+    final d = AssetPanelPrefs.defaultColWidths;
+    setState(() {
+      _listSort = _parseListSortColumn(AssetPanelPrefs.defaultSortColumn);
+      _listSortAsc = AssetPanelPrefs.defaultSortAsc;
+      _colName = d['name']!;
+      _colDate = d['modified']!;
+      _colType = d['type']!;
+      _colSize = d['size']!;
+    });
+    AppConfig.instance.resetAssetListLayoutPrefs();
   }
 
   @override
@@ -114,8 +299,53 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
 
   @override
   void dispose() {
+    _colWidthSaveTimer?.cancel();
+    _listHScroll.dispose();
     _searchCtrl.dispose();
     super.dispose();
+  }
+
+  double get _listContentWidth =>
+      _colName + _colDate + _colType + _colSize;
+
+  void _setViewMode(_AssetViewMode mode) {
+    if (_viewMode == mode) return;
+    setState(() => _viewMode = mode);
+    AppConfig.instance.setAssetViewMode(
+      mode == _AssetViewMode.list ? 'list' : 'grid',
+    );
+  }
+
+  void _scheduleSaveColWidths() {
+    _colWidthSaveTimer?.cancel();
+    _colWidthSaveTimer = Timer(const Duration(milliseconds: 400), () {
+      AppConfig.instance.setAssetListColWidths({
+        'name': _colName,
+        'modified': _colDate,
+        'type': _colType,
+        'size': _colSize,
+      });
+    });
+  }
+
+  void _resizeColumn(_ListSortColumn col, double delta) {
+    setState(() {
+      switch (col) {
+        case _ListSortColumn.name:
+          _colName = (_colName + delta).clamp(_kListNameMinW, 640);
+          break;
+        case _ListSortColumn.modified:
+          _colDate = (_colDate + delta).clamp(_kListDateMinW, 400);
+          break;
+        case _ListSortColumn.type:
+          _colType = (_colType + delta).clamp(_kListTypeMinW, 320);
+          break;
+        case _ListSortColumn.size:
+          _colSize = (_colSize + delta).clamp(_kListSizeMinW, 240);
+          break;
+      }
+    });
+    _scheduleSaveColWidths();
   }
 
   @override
@@ -165,9 +395,24 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
     setState(() => _loading = true);
     try {
       final entries = <FileSystemEntity>[];
+      final meta = <String, _EntryMeta>{};
       if (await Directory(dirPath).exists()) {
         await for (final e in Directory(dirPath).list()) {
           entries.add(e);
+          final name = e.path.split(Platform.pathSeparator).last;
+          final isDir = e is Directory;
+          DateTime? modified;
+          int? sizeBytes;
+          try {
+            final st = await e.stat();
+            modified = st.modified;
+            if (!isDir) sizeBytes = st.size;
+          } catch (_) {}
+          meta[e.path] = _EntryMeta(
+            modified: modified,
+            sizeBytes: sizeBytes,
+            typeLabel: _explorerTypeLabel(name, isDir),
+          );
         }
       }
       entries.sort((a, b) {
@@ -183,6 +428,9 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
         final keep = entries.map((e) => e.path).toSet();
         _selected.removeWhere((p) => !keep.contains(p));
         _itemKeys.removeWhere((k, _) => !keep.contains(k));
+        _meta
+          ..clear()
+          ..addAll(meta);
         setState(() => _entries = entries);
       }
     } finally {
@@ -454,6 +702,24 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
                 const Spacer(),
                 _buildFilterChips(),
                 const Spacer(),
+                IconButton(
+                  icon: Icon(
+                    _viewMode == _AssetViewMode.grid
+                        ? Icons.view_list_outlined
+                        : Icons.grid_view_outlined,
+                    size: 18,
+                  ),
+                  onPressed: () => _setViewMode(
+                    _viewMode == _AssetViewMode.grid
+                        ? _AssetViewMode.list
+                        : _AssetViewMode.grid,
+                  ),
+                  tooltip:
+                      _viewMode == _AssetViewMode.grid ? '列表展示' : '网格展示',
+                  padding: EdgeInsets.zero,
+                  constraints:
+                      const BoxConstraints(minWidth: 32, minHeight: 32),
+                ),
                 IconButton(
                   icon: const Icon(Icons.note_add_outlined, size: 18),
                   onPressed: () => _newDocument(currentDir),
@@ -788,16 +1054,15 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
     } else {
       final entries = _visibleEntries;
       final primary = Theme.of(context).colorScheme.primary;
-      body = Listener(
-        behavior: HitTestBehavior.translucent,
-        onPointerDown: _onGridPointerDown,
-        onPointerMove: _onGridPointerMove,
-        onPointerUp: _onGridPointerUp,
-        onPointerCancel: _onGridPointerCancel,
-        child: Stack(
-          key: _gridStackKey,
-          children: [
-            GridView.builder(
+      final content = _viewMode == _AssetViewMode.list
+          ? ListView.builder(
+              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+              itemCount: entries.length,
+              itemExtent: _kListRowH,
+              itemBuilder: (context, index) =>
+                  _buildAssetItem(entries[index], list: true),
+            )
+          : GridView.builder(
               padding: const EdgeInsets.all(12),
               gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
                 maxCrossAxisExtent: 160,
@@ -806,28 +1071,19 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
                 childAspectRatio: 0.9,
               ),
               itemCount: entries.length,
-              itemBuilder: (context, index) {
-                final entity = entries[index];
-                final itemKey =
-                    _itemKeys.putIfAbsent(entity.path, GlobalKey.new);
-                return KeyedSubtree(
-                  key: itemKey,
-                  child: _AssetCard(
-                    entity: entity,
-                    selected: _selected.contains(entity.path),
-                    selectedItems: _selectedItems(),
-                    onSelect: (toggle) =>
-                        _selectPath(entity.path, toggle: toggle),
-                    onEnterDir: _enterDir,
-                    onOpenFile: _openFileEntry,
-                    onChanged: () {
-                      _clearSelection();
-                      _reloadAndSyncTree();
-                    },
-                  ),
-                );
-              },
-            ),
+              itemBuilder: (context, index) =>
+                  _buildAssetItem(entries[index], list: false),
+            );
+      final selectable = Listener(
+        behavior: HitTestBehavior.translucent,
+        onPointerDown: _onGridPointerDown,
+        onPointerMove: _onGridPointerMove,
+        onPointerUp: _onGridPointerUp,
+        onPointerCancel: _onGridPointerCancel,
+        child: Stack(
+          key: _gridStackKey,
+          children: [
+            content,
             if (_marqueeRect != null)
               Positioned.fill(
                 child: IgnorePointer(
@@ -842,6 +1098,34 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
           ],
         ),
       );
+      body = _viewMode == _AssetViewMode.list
+          ? LayoutBuilder(
+              builder: (context, constraints) {
+                final w = math.max(_listContentWidth, constraints.maxWidth);
+                return Scrollbar(
+                  controller: _listHScroll,
+                  thumbVisibility: _listContentWidth > constraints.maxWidth,
+                  notificationPredicate: (n) =>
+                      n.metrics.axis == Axis.horizontal,
+                  child: SingleChildScrollView(
+                    controller: _listHScroll,
+                    scrollDirection: Axis.horizontal,
+                    child: SizedBox(
+                      width: w,
+                      height: constraints.maxHeight,
+                      child: Column(
+                        children: [
+                          _buildListHeader(context),
+                          const Divider(height: 1, color: Colors.white12),
+                          Expanded(child: selectable),
+                        ],
+                      ),
+                    ),
+                  ),
+                );
+              },
+            )
+          : selectable;
     }
     if (dir == null || dir.isEmpty) return body;
     return FsDirDropTarget(
@@ -852,6 +1136,176 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
       },
       child: body,
     );
+  }
+
+  Widget _buildAssetItem(FileSystemEntity entity, {required bool list}) {
+    final itemKey = _itemKeys.putIfAbsent(entity.path, GlobalKey.new);
+    return KeyedSubtree(
+      key: itemKey,
+      child: _AssetCard(
+        entity: entity,
+        listMode: list,
+        meta: _meta[entity.path],
+        colName: _colName,
+        colDate: _colDate,
+        colType: _colType,
+        colSize: _colSize,
+        selected: _selected.contains(entity.path),
+        selectedItems: _selectedItems(),
+        onSelect: (toggle) => _selectPath(entity.path, toggle: toggle),
+        onEnterDir: _enterDir,
+        onOpenFile: _openFileEntry,
+        onChanged: () {
+          _clearSelection();
+          _reloadAndSyncTree();
+        },
+      ),
+    );
+  }
+
+  Widget _buildListHeader(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+
+    Widget headerCell({
+      required String label,
+      required _ListSortColumn sort,
+      required double width,
+      TextAlign align = TextAlign.left,
+    }) {
+      final active = _listSort == sort;
+      return SizedBox(
+        width: width,
+        child: Stack(
+          children: [
+            Positioned.fill(
+              child: InkWell(
+                onTap: () => _toggleListSort(sort),
+                onSecondaryTapDown: (d) => _showHeaderMenu(context, d.globalPosition),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 8),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          label,
+                          textAlign: align,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight:
+                                active ? FontWeight.w600 : FontWeight.w500,
+                            color: active
+                                ? scheme.primary
+                                : scheme.onSurfaceVariant,
+                          ),
+                        ),
+                      ),
+                      if (active)
+                        Icon(
+                          _listSortAsc
+                              ? Icons.arrow_upward
+                              : Icons.arrow_downward,
+                          size: 12,
+                          color: scheme.primary,
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+            Positioned(
+              right: 0,
+              top: 0,
+              bottom: 0,
+              child: MouseRegion(
+                cursor: SystemMouseCursors.resizeColumn,
+                child: GestureDetector(
+                  behavior: HitTestBehavior.translucent,
+                  onHorizontalDragUpdate: (d) =>
+                      _resizeColumn(sort, d.delta.dx),
+                  onDoubleTap: _resetColWidths,
+                  child: SizedBox(
+                    width: _kListResizeHandleW,
+                    child: Center(
+                      child: Container(
+                        width: 1,
+                        color: Colors.white24,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    return Material(
+      color: scheme.surfaceContainerHigh,
+      child: SizedBox(
+        height: _kListHeaderH,
+        child: Row(
+          children: [
+            headerCell(
+              label: '名称',
+              sort: _ListSortColumn.name,
+              width: _colName,
+            ),
+            headerCell(
+              label: '修改日期',
+              sort: _ListSortColumn.modified,
+              width: _colDate,
+            ),
+            headerCell(
+              label: '类型',
+              sort: _ListSortColumn.type,
+              width: _colType,
+            ),
+            headerCell(
+              label: '大小',
+              sort: _ListSortColumn.size,
+              width: _colSize,
+              align: TextAlign.right,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _showHeaderMenu(BuildContext context, Offset global) async {
+    final overlay =
+        Overlay.of(context).context.findRenderObject()! as RenderBox;
+    final selected = await showMenu<String>(
+      context: context,
+      position: RelativeRect.fromRect(
+        global & const Size(1, 1),
+        Offset.zero & overlay.size,
+      ),
+      items: const [
+        PopupMenuItem(
+          value: 'resetSort',
+          child: Text('重置排序'),
+        ),
+        PopupMenuItem(
+          value: 'resetCols',
+          child: Text('重置列宽'),
+        ),
+        PopupMenuItem(
+          value: 'resetAll',
+          child: Text('重置排序与列宽'),
+        ),
+      ],
+    );
+    if (selected == 'resetSort') {
+      _resetListSort();
+    } else if (selected == 'resetCols') {
+      _resetColWidths();
+    } else if (selected == 'resetAll') {
+      _resetListLayoutPrefs();
+    }
   }
 
   
@@ -893,10 +1347,16 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
   }
 }
 
-/// 单个物料卡片。
+/// 单个物料卡片 / 列表行。
 // ignore: must_be_immutable
 class _AssetCard extends ConsumerWidget {
   final FileSystemEntity entity;
+  final bool listMode;
+  final _EntryMeta? meta;
+  final double colName;
+  final double colDate;
+  final double colType;
+  final double colSize;
   final bool selected;
   final List<FsClipboardItem> selectedItems;
   final void Function(bool toggle) onSelect;
@@ -907,6 +1367,12 @@ class _AssetCard extends ConsumerWidget {
 
   _AssetCard({
     required this.entity,
+    required this.listMode,
+    required this.meta,
+    required this.colName,
+    required this.colDate,
+    required this.colType,
+    required this.colSize,
     required this.selected,
     required this.selectedItems,
     required this.onSelect,
@@ -930,6 +1396,9 @@ class _AssetCard extends ConsumerWidget {
       onOpenFile(entity.path);
     }
   }
+
+  String get _typeLabel =>
+      meta?.typeLabel ?? _explorerTypeLabel(_name, _isDir);
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -963,48 +1432,145 @@ class _AssetCard extends ConsumerWidget {
           onDoubleTap: _open,
           onSecondaryTapDown: (d) => _menuPos = d.globalPosition,
           onSecondaryTap: () => _showMenu(context, ref),
-          borderRadius: BorderRadius.circular(8),
-          child: Container(
-            decoration: BoxDecoration(
-              color: selected
-                  ? scheme.primary.withValues(alpha: 0.16)
-                  : scheme.surfaceContainerHigh,
-              borderRadius: BorderRadius.circular(8),
-              border: Border.all(
-                color: selected ? scheme.primary : Colors.white10,
-                width: selected ? 1.5 : 1,
-              ),
+          borderRadius: BorderRadius.circular(listMode ? 6 : 8),
+          child: listMode
+              ? _buildListBody(context, ref, scheme)
+              : _buildGridBody(context, ref, scheme),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildGridBody(
+    BuildContext context,
+    WidgetRef ref,
+    ColorScheme scheme,
+  ) {
+    return Container(
+      decoration: BoxDecoration(
+        color: selected
+            ? scheme.primary.withValues(alpha: 0.16)
+            : scheme.surfaceContainerHigh,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(
+          color: selected ? scheme.primary : Colors.white10,
+          width: selected ? 1.5 : 1,
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Expanded(child: _preview(context, size: 44)),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+            decoration: const BoxDecoration(
+              color: Colors.black26,
+              borderRadius: BorderRadius.vertical(bottom: Radius.circular(8)),
             ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
+            child: Row(
               children: [
-                Expanded(child: _preview(context)),
-                Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
-                  decoration: const BoxDecoration(
-                    color: Colors.black26,
-                    borderRadius:
-                        BorderRadius.vertical(bottom: Radius.circular(8)),
-                  ),
-                  child: Row(
-                    children: [
-                      if (_isDir) _statusBubble(ref),
-                      Expanded(
-                        child: Text(
-                          _name,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(fontSize: 11),
-                        ),
-                      ),
-                    ],
+                if (_isDir) _statusBubble(ref),
+                Expanded(
+                  child: Text(
+                    _name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontSize: 11),
                   ),
                 ),
               ],
             ),
           ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildListBody(
+    BuildContext context,
+    WidgetRef ref,
+    ColorScheme scheme,
+  ) {
+    final muted = TextStyle(fontSize: 12, color: scheme.onSurfaceVariant);
+    Widget cell({
+      required double width,
+      required Widget child,
+      TextAlign align = TextAlign.left,
+    }) {
+      return SizedBox(
+        width: width,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 8),
+          child: align == TextAlign.right
+              ? Align(alignment: Alignment.centerRight, child: child)
+              : child,
         ),
+      );
+    }
+
+    return Container(
+      decoration: BoxDecoration(
+        color: selected
+            ? scheme.primary.withValues(alpha: 0.16)
+            : Colors.transparent,
+        borderRadius: BorderRadius.circular(4),
+      ),
+      child: Row(
+        children: [
+          cell(
+            width: colName,
+            child: Row(
+              children: [
+                SizedBox(
+                  width: 22,
+                  height: 22,
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(3),
+                    child: _preview(context, size: 18, listThumb: true),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                if (_isDir) _statusBubble(ref),
+                Expanded(
+                  child: Text(
+                    _name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontSize: 13),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          cell(
+            width: colDate,
+            child: Text(
+              _formatListTime(meta?.modified),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: muted,
+            ),
+          ),
+          cell(
+            width: colType,
+            child: Text(
+              _typeLabel,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: muted,
+            ),
+          ),
+          cell(
+            width: colSize,
+            align: TextAlign.right,
+            child: Text(
+              _formatListBytes(meta?.sizeBytes),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: muted,
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -1066,12 +1632,17 @@ class _AssetCard extends ConsumerWidget {
     );
   }
 
-  Widget _preview(BuildContext context) {
+  Widget _preview(
+    BuildContext context, {
+    required double size,
+    bool listThumb = false,
+  }) {
     final lower = _name.toLowerCase();
     if (_isDir) {
       return Container(
         alignment: Alignment.center,
-        child: Icon(Icons.folder, color: Colors.orange[400], size: 44),
+        color: listThumb ? Colors.black12 : null,
+        child: Icon(Icons.folder, color: Colors.orange[400], size: size),
       );
     }
     if (classifyMedia(_name) == MediaKind.image) {
@@ -1079,21 +1650,22 @@ class _AssetCard extends ConsumerWidget {
         File(entity.path),
         fit: BoxFit.cover,
         errorBuilder: (_, __, ___) =>
-            _fallbackIcon(context, Icons.broken_image_outlined),
+            _fallbackIcon(context, Icons.broken_image_outlined, size),
       );
     }
     final icon = _iconFor(lower);
     return Container(
       alignment: Alignment.center,
-      child: Icon(icon.$1, color: icon.$2, size: 44),
+      color: listThumb ? Colors.black12 : null,
+      child: Icon(icon.$1, color: icon.$2, size: size),
     );
   }
 
-  Widget _fallbackIcon(BuildContext context, IconData icon) {
+  Widget _fallbackIcon(BuildContext context, IconData icon, double size) {
     return Container(
       alignment: Alignment.center,
       child: Icon(icon,
-          color: Theme.of(context).colorScheme.onSurfaceVariant, size: 44),
+          color: Theme.of(context).colorScheme.onSurfaceVariant, size: size),
     );
   }
 

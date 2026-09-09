@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'comfy/comfy_models.dart';
+import 'asset_panel_prefs.dart';
 import 'key_chord.dart';
 
 /// 快捷启动工作目录策略。
@@ -80,6 +81,13 @@ class AppConfig {
     StartCmd(name: 'dsh-tui', command: 'dsh-tui'),
   ];
 
+  /// 素材栏默认列宽（兼容旧调用）。
+  static Map<String, double> get defaultAssetListColWidths =>
+      Map<String, double>.of(AssetPanelPrefs.defaultColWidths);
+  static String get defaultAssetListSortColumn =>
+      AssetPanelPrefs.defaultSortColumn;
+  static bool get defaultAssetListSortAsc => AssetPanelPrefs.defaultSortAsc;
+
   /// 旧默认快捷项：已从默认栏移除（Comfy 走生成面板；终端本身已是 PowerShell）。
   static bool _isRetiredDefaultStartCmd(StartCmd cmd) {
     final c = cmd.command.trim().toLowerCase();
@@ -108,6 +116,7 @@ class AppConfig {
   List<ComfyServer> _comfyServers = [ComfyServer.localDefault()];
   String _comfySelectedServerId = 'local';
   bool _comfyDeleteRemoteAfterDownload = true;
+  AssetPanelPrefs _assetPanelPrefs = AssetPanelPrefs.defaults();
 
   String get projectRoot => _projectRoot;
   ThemeMode get themeMode => _themeMode;
@@ -119,6 +128,15 @@ class AppConfig {
   List<ComfyServer> get comfyServers => List.unmodifiable(_comfyServers);
   String get comfySelectedServerId => _comfySelectedServerId;
   bool get comfyDeleteRemoteAfterDownload => _comfyDeleteRemoteAfterDownload;
+  /// 素材栏偏好整包（视图 / 列宽 / 排序）。
+  AssetPanelPrefs get assetPanelPrefs => _assetPanelPrefs;
+  /// `grid` | `list`
+  String get assetViewMode => _assetPanelPrefs.viewMode;
+  Map<String, double> get assetListColWidths =>
+      Map.unmodifiable(_assetPanelPrefs.colWidths);
+  /// `name` | `modified` | `type` | `size`
+  String get assetListSortColumn => _assetPanelPrefs.sortColumn;
+  bool get assetListSortAsc => _assetPanelPrefs.sortAsc;
 
   ComfyServer get comfySelectedServer {
     for (final s in _comfyServers) {
@@ -165,6 +183,91 @@ class AppConfig {
     }
     _comfyDeleteRemoteAfterDownload =
         prefs.getBool(_kComfyDeleteRemoteAfterDownload) ?? true;
+    _assetPanelPrefs = await _loadAssetPanelPrefs(prefs);
+  }
+
+  Future<AssetPanelPrefs> _loadAssetPanelPrefs(SharedPreferences prefs) async {
+    final unified = AssetPanelPrefs.tryParse(
+      prefs.getString(AssetPanelPrefs.prefsKey),
+    );
+    if (unified != null) return unified;
+
+    // 兼容迁移：旧版三个分散 key → 合一，并清掉旧 key。
+    final migrated = AssetPanelPrefs.fromLegacy(
+      viewModeRaw: prefs.getString(AssetPanelPrefs.legacyViewModeKey),
+      colWidthsRaw: prefs.getString(AssetPanelPrefs.legacyColWidthsKey),
+      sortRaw: prefs.getString(AssetPanelPrefs.legacySortKey),
+    );
+    await prefs.setString(
+      AssetPanelPrefs.prefsKey,
+      jsonEncode(migrated.toJson()),
+    );
+    await prefs.remove(AssetPanelPrefs.legacyViewModeKey);
+    await prefs.remove(AssetPanelPrefs.legacyColWidthsKey);
+    await prefs.remove(AssetPanelPrefs.legacySortKey);
+    return migrated;
+  }
+
+  Future<void> setAssetPanelPrefs(AssetPanelPrefs prefs) async {
+    _assetPanelPrefs = prefs.sanitized();
+    final sp = await SharedPreferences.getInstance();
+    await sp.setString(
+      AssetPanelPrefs.prefsKey,
+      jsonEncode(_assetPanelPrefs.toJson()),
+    );
+  }
+
+  Future<void> updateAssetPanelPrefs(
+    AssetPanelPrefs Function(AssetPanelPrefs current) update,
+  ) async {
+    await setAssetPanelPrefs(update(_assetPanelPrefs));
+  }
+
+  Future<void> setAssetViewMode(String mode) async {
+    await updateAssetPanelPrefs(
+      (p) => p.copyWith(viewMode: mode == 'list' ? 'list' : 'grid'),
+    );
+  }
+
+  Future<void> setAssetListColWidths(Map<String, double> widths) async {
+    await updateAssetPanelPrefs((p) => p.copyWith(colWidths: widths));
+  }
+
+  Future<void> resetAssetListColWidths() async {
+    await updateAssetPanelPrefs(
+      (p) => p.copyWith(
+        colWidths: Map<String, double>.of(AssetPanelPrefs.defaultColWidths),
+      ),
+    );
+  }
+
+  Future<void> setAssetListSort({
+    required String column,
+    required bool asc,
+  }) async {
+    await updateAssetPanelPrefs(
+      (p) => p.copyWith(sortColumn: column, sortAsc: asc),
+    );
+  }
+
+  Future<void> resetAssetListSort() async {
+    await updateAssetPanelPrefs(
+      (p) => p.copyWith(
+        sortColumn: AssetPanelPrefs.defaultSortColumn,
+        sortAsc: AssetPanelPrefs.defaultSortAsc,
+      ),
+    );
+  }
+
+  /// 重置素材栏列表相关偏好（排序 + 列宽；保留视图模式）。
+  Future<void> resetAssetListLayoutPrefs() async {
+    await updateAssetPanelPrefs(
+      (p) => p.copyWith(
+        colWidths: Map<String, double>.of(AssetPanelPrefs.defaultColWidths),
+        sortColumn: AssetPanelPrefs.defaultSortColumn,
+        sortAsc: AssetPanelPrefs.defaultSortAsc,
+      ),
+    );
   }
 
   Future<void> setProjectRoot(String path) async {
