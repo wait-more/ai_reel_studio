@@ -790,6 +790,54 @@ class ComfyClient {
     return saved;
   }
 
+  /// 常见媒体扩展名（小写，含点）。用户文件名里的其它「点号段」不当扩展名。
+  static const _knownMediaExtensions = <String>{
+    '.mp4',
+    '.webm',
+    '.mov',
+    '.mkv',
+    '.avi',
+    '.gif',
+    '.png',
+    '.jpg',
+    '.jpeg',
+    '.webp',
+    '.bmp',
+    '.tif',
+    '.tiff',
+    '.wav',
+    '.mp3',
+    '.flac',
+    '.m4a',
+    '.ogg',
+  };
+
+  /// 仅剥离「真实媒体扩展名」或与 [originalExt] 相同的后缀。
+  ///
+  /// 例如 `scene.1.2-3` 整段作为基名；`scene.1.2-3.mp4` → 基名 `scene.1.2-3`。
+  /// 切勿使用 [p.basenameWithoutExtension]：它会把 `.2-3` 当成扩展名。
+  static String splitUserOutputBase(
+    String name, {
+    String originalExt = '',
+  }) {
+    final trimmed = name.trim();
+    if (trimmed.isEmpty) return trimmed;
+    final lower = trimmed.toLowerCase();
+    final orig = originalExt.trim();
+    if (orig.isNotEmpty) {
+      final o = orig.startsWith('.') ? orig.toLowerCase() : '.${orig.toLowerCase()}';
+      if (lower.endsWith(o) && trimmed.length > o.length) {
+        return trimmed.substring(0, trimmed.length - o.length);
+      }
+    }
+    for (final e in _knownMediaExtensions) {
+      if (lower.endsWith(e) && trimmed.length > e.length) {
+        return trimmed.substring(0, trimmed.length - e.length);
+      }
+    }
+    return trimmed;
+  }
+
   /// 将用户指定名与 Comfy 原名合成最终文件名（仅 basename，扩展名优先用实际输出）。
   static String resolveOutputFileName({
     required String? preferredFileName,
@@ -807,14 +855,23 @@ class ComfyClient {
     }
 
     final origExt = p.extension(originalFilename);
-    var base = p.basenameWithoutExtension(safe);
+    var base = splitUserOutputBase(safe, originalExt: origExt);
     if (base.isEmpty) base = 'output';
-    final ext = origExt.isNotEmpty ? origExt : p.extension(safe);
+    late final String ext;
+    if (origExt.isNotEmpty) {
+      ext = origExt;
+    } else {
+      final stripped = splitUserOutputBase(safe);
+      ext = stripped.length < safe.length
+          ? safe.substring(stripped.length)
+          : '';
+    }
     if (index <= 0) return '$base$ext';
     return '${base}_${index + 1}$ext';
   }
 
   static String _uniquePath(String dir, String filename) {
+    // 此处 filename 已带真实扩展名（如 .mp4），用 path 拆分安全。
     final base = p.basenameWithoutExtension(filename);
     final ext = p.extension(filename);
     var candidate = p.join(dir, filename);

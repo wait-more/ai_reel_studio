@@ -870,13 +870,14 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
 
   /// `foo` → `foo-1`；`foo.png` → `foo-1.png`；
   /// 基名已是 `*-N`（N 为正整数）则改为 `*-(N+1)`。
+  /// 注意：`scene.1.2-3` 整段是基名，不会把 `.2-3` 当成扩展名。
   static String _withMinusOneSuffix(String fileName) {
     final trimmed = fileName.trim();
     if (trimmed.isEmpty) return trimmed;
-    final dot = trimmed.lastIndexOf('.');
-    final hasExt = dot > 0 && dot < trimmed.length - 1;
-    final base = hasExt ? trimmed.substring(0, dot) : trimmed;
-    final ext = hasExt ? trimmed.substring(dot) : '';
+    final base = ComfyClient.splitUserOutputBase(trimmed);
+    final ext = base.length < trimmed.length
+        ? trimmed.substring(base.length)
+        : '';
 
     final m = RegExp(r'^(.*)-(\d+)$').firstMatch(base);
     if (m != null) {
