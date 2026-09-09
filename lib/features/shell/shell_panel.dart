@@ -303,6 +303,13 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
     final startCmds = ref.watch(startCmdsProvider);
 
     ref.listen(shellVisibleProvider, (_, __) => _schedulePersist());
+    ref.listen(shellOpenCwdRequestProvider, (prev, next) {
+      if (next == null || next.isEmpty) return;
+      final dir = Directory(next);
+      final cwd = dir.existsSync() ? next : _projectRoot;
+      _newTab(workingDirectory: cwd);
+      ref.read(shellOpenCwdRequestProvider.notifier).state = null;
+    });
 
     if (!_bootstrapped) {
       return const ColoredBox(

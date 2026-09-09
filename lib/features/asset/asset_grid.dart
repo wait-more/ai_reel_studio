@@ -1,6 +1,5 @@
 import 'dart:io';
 
-import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -457,29 +456,11 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
 
   /// 导入物料：系统文件选择器多选，复制到 [dir]。
   Future<void> _importFiles(String dir) async {
-    const XTypeGroup any = XTypeGroup(label: '所有文件');
-    final paths = await openFiles(acceptedTypeGroups: const [any]);
-    if (paths.isEmpty) return;
-    var ok = 0;
-    for (final src in paths) {
-      try {
-        final name = src.name;
-        final dest = '$dir${Platform.pathSeparator}$name';
-        await src.saveTo(dest);
-        ok++;
-      } catch (_) {
-        // 单个失败继续
-      }
-    }
-    if (ok > 0) _reloadAndSyncTree();
-    if (ok < paths.length) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('部分文件导入失败', style: TextStyle(fontSize: 12)),
-          duration: Duration(seconds: 3),
-        ),
-      );
-    }
+    await importFilesToDir(
+      context,
+      dir: dir,
+      onDone: _reloadAndSyncTree,
+    );
   }
 
   

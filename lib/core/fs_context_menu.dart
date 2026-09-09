@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -77,6 +78,7 @@ Future<void> showFsContextMenu({
   if (overlayState == null || !context.mounted) return;
 
   final hostContext = overlayState.context;
+  final callerContext = context;
   final container = ProviderScope.containerOf(context, listen: false);
 
   _dismissActiveMenu();
@@ -132,28 +134,9 @@ Future<void> showFsContextMenu({
   entry = OverlayEntry(
     builder: (ctx) {
       final size = MediaQuery.sizeOf(ctx);
-      const menuWidth = 220.0;
-      const itemH = 36.0;
-      var itemCount = 2;
-      if (isVideo) itemCount += 3;
-      if (isDir) itemCount += 4;
-      itemCount += 2;
-      if (!isDir) itemCount += 1;
-      itemCount += 3;
-      final menuHeight = itemCount * itemH;
-      final left =
-          globalPosition.dx.clamp(8.0, size.width - menuWidth - 8.0);
-      final top =
-          globalPosition.dy.clamp(8.0, size.height - menuHeight - 8.0);
-
-      _activeMenuRect = Rect.fromLTWH(left, top, menuWidth, menuHeight);
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        final box =
-            _menuKey.currentContext?.findRenderObject() as RenderBox?;
-        if (box != null && box.hasSize && box.attached) {
-          _activeMenuRect = box.localToGlobal(Offset.zero) & box.size;
-        }
-      });
+      const menuWidth = 240.0;
+      final clipboard = container.read(fsClipboardProvider);
+      final canPaste = clipboard != null;
 
       Widget item({
         required String value,
@@ -187,6 +170,132 @@ Future<void> showFsContextMenu({
 
       Widget divider() => const Divider(height: 4, thickness: 1);
 
+      final children = <Widget>[
+        item(
+          value: 'open',
+          icon: Icons.open_in_new,
+          label: isDir ? '在当前目录查看' : '打开',
+        ),
+        item(
+          value: 'reveal',
+          icon: Icons.folder_open,
+          label: '在资源管理器显示',
+        ),
+        if (isDir)
+          item(
+            value: 'openTerminal',
+            icon: Icons.terminal,
+            label: '在终端打开',
+          ),
+        if (isDir)
+          item(
+            value: 'importHere',
+            icon: Icons.file_upload_outlined,
+            label: '在此导入物料',
+          ),
+        if (isVideo) ...[
+          divider(),
+          item(
+            value: 'grabFirst',
+            icon: Icons.first_page,
+            label: '截取首帧',
+            iconColor: Colors.tealAccent,
+          ),
+          item(
+            value: 'grabLast',
+            icon: Icons.last_page,
+            label: '截取末帧',
+            iconColor: Colors.tealAccent,
+          ),
+        ],
+        if (isDir) ...[
+          divider(),
+          item(
+            value: 'newDoc',
+            icon: Icons.note_add_outlined,
+            label: '新建文档',
+          ),
+          item(
+            value: 'newFolder',
+            icon: Icons.create_new_folder_outlined,
+            label: '新建子文件夹',
+          ),
+          item(
+            value: 'progress',
+            icon: Icons.donut_large,
+            label: '设置创作进度',
+            iconColor: Colors.teal,
+          ),
+        ],
+        divider(),
+        item(
+          value: 'copyAbsPath',
+          icon: Icons.link,
+          label: '复制绝对路径',
+        ),
+        item(
+          value: 'copyRelPath',
+          icon: Icons.account_tree_outlined,
+          label: '复制相对路径',
+        ),
+        item(
+          value: 'copyName',
+          icon: Icons.text_fields,
+          label: '复制名称',
+        ),
+        divider(),
+        item(
+          value: 'cut',
+          icon: Icons.content_cut,
+          label: '剪切',
+        ),
+        item(
+          value: 'copy',
+          icon: Icons.copy,
+          label: '复制',
+        ),
+        if (canPaste)
+          item(
+            value: 'paste',
+            icon: Icons.content_paste,
+            label: '粘贴',
+          ),
+        item(
+          value: 'rename',
+          icon: Icons.drive_file_rename_outline,
+          label: '重命名',
+        ),
+        divider(),
+        item(
+          value: 'properties',
+          icon: Icons.info_outline,
+          label: '属性',
+        ),
+        item(
+          value: 'delete',
+          icon: Icons.delete_outline,
+          label: '删除',
+          iconColor: Colors.red[300],
+          labelColor: Colors.red[300],
+        ),
+      ];
+
+      // 估算高度用于贴边；实际以布局为准。
+      final menuHeight = (children.length * 36.0).clamp(80.0, size.height - 16);
+      final left =
+          globalPosition.dx.clamp(8.0, size.width - menuWidth - 8.0);
+      final top =
+          globalPosition.dy.clamp(8.0, size.height - menuHeight - 8.0);
+
+      _activeMenuRect = Rect.fromLTWH(left, top, menuWidth, menuHeight);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        final box =
+            _menuKey.currentContext?.findRenderObject() as RenderBox?;
+        if (box != null && box.hasSize && box.attached) {
+          _activeMenuRect = box.localToGlobal(Offset.zero) & box.size;
+        }
+      });
+
       // 只放面板，不铺全屏 Stack，避免截获下层命中。
       return Positioned(
         left: left,
@@ -197,77 +306,17 @@ Future<void> showFsContextMenu({
           borderRadius: BorderRadius.circular(8),
           clipBehavior: Clip.antiAlias,
           color: Theme.of(ctx).colorScheme.surfaceContainerHigh,
-          child: SizedBox(
-            width: menuWidth,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                item(
-                  value: 'open',
-                  icon: Icons.open_in_new,
-                  label: isDir ? '在当前目录查看' : '打开',
+          child: ConstrainedBox(
+            constraints: BoxConstraints(maxHeight: size.height - 16),
+            child: SingleChildScrollView(
+              child: SizedBox(
+                width: menuWidth,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: children,
                 ),
-                item(
-                  value: 'reveal',
-                  icon: Icons.folder_open,
-                  label: '在资源管理器显示',
-                ),
-                if (isVideo) ...[
-                  divider(),
-                  item(
-                    value: 'grabFirst',
-                    icon: Icons.first_page,
-                    label: '截取首帧',
-                    iconColor: Colors.tealAccent,
-                  ),
-                  item(
-                    value: 'grabLast',
-                    icon: Icons.last_page,
-                    label: '截取末帧',
-                    iconColor: Colors.tealAccent,
-                  ),
-                ],
-                if (isDir) ...[
-                  divider(),
-                  item(
-                    value: 'newDoc',
-                    icon: Icons.note_add_outlined,
-                    label: '新建文档',
-                  ),
-                  item(
-                    value: 'newFolder',
-                    icon: Icons.create_new_folder_outlined,
-                    label: '新建子文件夹',
-                  ),
-                  item(
-                    value: 'progress',
-                    icon: Icons.donut_large,
-                    label: '设置创作进度',
-                    iconColor: Colors.teal,
-                  ),
-                ],
-                divider(),
-                item(
-                  value: 'rename',
-                  icon: Icons.drive_file_rename_outline,
-                  label: '重命名',
-                ),
-                if (!isDir)
-                  item(
-                    value: 'duplicate',
-                    icon: Icons.copy,
-                    label: '复制',
-                  ),
-                divider(),
-                item(
-                  value: 'delete',
-                  icon: Icons.delete_outline,
-                  label: '删除',
-                  iconColor: Colors.red[300],
-                  labelColor: Colors.red[300],
-                ),
-              ],
+              ),
             ),
           ),
         ),
@@ -283,9 +332,14 @@ Future<void> showFsContextMenu({
   _detachPointerRoute();
   if (action == null) return;
   await _waitPostFrame();
-  if (!hostContext.mounted) return;
+  // 优先用调用方 context（有正确 Overlay 祖先）；菜单用的 overlayState.context
+  // 本身就是 Overlay，向上找不到 Overlay，Toast 会报错。
+  final actionContext =
+      callerContext.mounted ? callerContext : hostContext;
+  if (!actionContext.mounted) return;
   await _runAction(
-    context: hostContext,
+    context: actionContext,
+    overlay: overlayState,
     container: container,
     action: action,
     path: path,
@@ -325,6 +379,7 @@ void _dismissActiveMenu([String? action]) {
 
 Future<void> _runAction({
   required BuildContext context,
+  OverlayState? overlay,
   required ProviderContainer container,
   required String action,
   required String path,
@@ -333,12 +388,28 @@ Future<void> _runAction({
   required Future<void> Function() onOpen,
   required void Function() onChanged,
 }) async {
+  void toast(String msg) =>
+      showGlobalToast(context, msg, overlay: overlay);
+
   switch (action) {
     case 'open':
       await onOpen();
       break;
     case 'reveal':
       await revealInExplorer(path);
+      break;
+    case 'openTerminal':
+      {
+        final dir = isDir ? path : File(path).parent.path;
+        container.read(shellVisibleProvider.notifier).state = true;
+        container.read(shellOpenCwdRequestProvider.notifier).state = dir;
+        toast('已在终端打开');
+      }
+      break;
+    case 'importHere':
+      if (isDir) {
+        await importFilesToDir(context, dir: path, onDone: onChanged);
+      }
       break;
     case 'grabFirst':
       await _grabFrame(
@@ -347,6 +418,7 @@ Future<void> _runAction({
         tag: '首帧',
         lastFrame: false,
         onChanged: onChanged,
+        overlay: overlay,
       );
       break;
     case 'grabLast':
@@ -356,6 +428,7 @@ Future<void> _runAction({
         tag: '末帧',
         lastFrame: true,
         onChanged: onChanged,
+        overlay: overlay,
       );
       break;
     case 'newDoc':
@@ -380,6 +453,43 @@ Future<void> _runAction({
         displayName: displayName,
       );
       break;
+    case 'copyAbsPath':
+      await copyAbsolutePath(context, path);
+      break;
+    case 'copyRelPath':
+      await copyProjectRelativePath(context, path);
+      break;
+    case 'copyName':
+      await copyBaseName(context, path);
+      break;
+    case 'cut':
+      container.read(fsClipboardProvider.notifier).state = FsClipboardEntry(
+        path: path,
+        isDir: isDir,
+        isCut: true,
+      );
+      toast('已剪切：$displayName');
+      break;
+    case 'copy':
+      container.read(fsClipboardProvider.notifier).state = FsClipboardEntry(
+        path: path,
+        isDir: isDir,
+        isCut: false,
+      );
+      toast('已复制：$displayName');
+      break;
+    case 'paste':
+      {
+        final destDir = isDir ? path : File(path).parent.path;
+        await pasteClipboardEntry(
+          context,
+          container,
+          destDir: destDir,
+          onDone: onChanged,
+          overlay: overlay,
+        );
+      }
+      break;
     case 'rename':
       await renameEntityDialog(
         context,
@@ -388,11 +498,11 @@ Future<void> _runAction({
         onDone: onChanged,
       );
       break;
-    case 'duplicate':
-      await duplicateFileDialog(
+    case 'properties':
+      await showEntityPropertiesDialog(
         context,
         path: path,
-        onDone: onChanged,
+        isDir: isDir,
       );
       break;
     case 'delete':
@@ -428,6 +538,7 @@ Future<void> _grabFrame(
   required String tag,
   required bool lastFrame,
   required void Function() onChanged,
+  OverlayState? overlay,
 }) async {
   final result = await extractMediaFrame(
     path: path,
@@ -439,6 +550,7 @@ Future<void> _grabFrame(
   showGlobalToast(
     context,
     result != null ? '已保存：$result' : '截帧失败：未取得帧数据',
+    overlay: overlay,
   );
   if (result != null) onChanged();
 }

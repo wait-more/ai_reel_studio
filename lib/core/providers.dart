@@ -82,6 +82,24 @@ final editorViewStatesProvider =
 /// 右面板（Shell）是否可见
 final shellVisibleProvider = StateProvider<bool>((ref) => true);
 
+/// 请求在 Shell 新开标签并进入该目录；ShellPanel 消费后置 null。
+final shellOpenCwdRequestProvider = StateProvider<String?>((ref) => null);
+
+/// 应用内文件剪切板（复制/剪切 → 粘贴）。
+class FsClipboardEntry {
+  final String path;
+  final bool isDir;
+  /// true=剪切后粘贴为移动；false=复制后粘贴为拷贝。
+  final bool isCut;
+  const FsClipboardEntry({
+    required this.path,
+    required this.isDir,
+    required this.isCut,
+  });
+}
+
+final fsClipboardProvider = StateProvider<FsClipboardEntry?>((ref) => null);
+
 /// 项目树根节点
 final treeRootProvider = StateProvider<ScriptNode?>((ref) => null);
 
