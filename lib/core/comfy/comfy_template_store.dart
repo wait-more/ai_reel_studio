@@ -2,13 +2,16 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:path/path.dart' as p;
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../config.dart';
 import 'comfy_models.dart';
 
-/// `.aireel/comfy/templates/` + `bindings.json` 读写与旧 action 迁移。
+/// 模板库在项目 `.aireel/comfy/templates/`；URL↔模板绑定在本机（按项目根隔离）。
 class ComfyTemplateStore {
   ComfyTemplateStore._();
+
+  static const _kBindingsPrefix = 'comfy_bindings_v1:';
 
   static String? get comfyDir {
     final root = AppConfig.instance.projectRoot;
@@ -22,10 +25,19 @@ class ComfyTemplateStore {
     return p.join(root, 'templates');
   }
 
-  static String? get bindingsPath {
+  /// 旧版项目内绑定文件；仅作一次性迁移来源，不再回写。
+  static String? get legacyProjectBindingsPath {
     final root = comfyDir;
     if (root == null) return null;
     return p.join(root, 'bindings.json');
+  }
+
+  static String? _bindingsPrefsKey() {
+    final root = AppConfig.instance.projectRoot.trim();
+    if (root.isEmpty) return null;
+    final normalized =
+        root.replaceAll('/', Platform.pathSeparator).toLowerCase();
+    return '$_kBindingsPrefix$normalized';
   }
 
   static Directory? ensureTemplatesDir() {
@@ -140,7 +152,42 @@ class ComfyTemplateStore {
   }
 
   static Future<ComfyBindings> loadBindings() async {
-    final path = bindingsPath;
+    final key = _bindingsPrefsKey();
+    if (key == null) return const ComfyBindings();
+
+    final prefs = await SharedPreferences.getInstance();
+    // 本机已有记录（含空绑定）则不再读项目文件，避免多用户互相覆盖。
+    if (prefs.containsKey(key)) {
+      return _decodeBindings(prefs.getString(key));
+    }
+
+    final migrated = await _loadLegacyProjectBindings();
+    await prefs.setString(key, jsonEncode(migrated.toJson()));
+    return migrated;
+  }
+
+  static Future<void> saveBindings(ComfyBindings bindings) async {
+    final key = _bindingsPrefsKey();
+    if (key == null) {
+      throw StateError('未配置项目根');
+    }
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(key, jsonEncode(bindings.toJson()));
+  }
+
+  static ComfyBindings _decodeBindings(String? raw) {
+    if (raw == null || raw.isEmpty) return const ComfyBindings();
+    try {
+      final map = jsonDecode(raw);
+      if (map is! Map) return const ComfyBindings();
+      return ComfyBindings.fromJson(Map<String, dynamic>.from(map));
+    } catch (_) {
+      return const ComfyBindings();
+    }
+  }
+
+  static Future<ComfyBindings> _loadLegacyProjectBindings() async {
+    final path = legacyProjectBindingsPath;
     if (path == null) return const ComfyBindings();
     final file = File(path);
     if (!await file.exists()) return const ComfyBindings();
@@ -151,18 +198,6 @@ class ComfyTemplateStore {
     } catch (_) {
       return const ComfyBindings();
     }
-  }
-
-  static Future<void> saveBindings(ComfyBindings bindings) async {
-    final root = comfyDir;
-    final path = bindingsPath;
-    if (root == null || path == null) {
-      throw StateError('未配置项目根');
-    }
-    await Directory(root).create(recursive: true);
-    await File(path).writeAsString(
-      ComfyTemplate.prettyJson(bindings.toJson()),
-    );
   }
 
   static Future<String> directorySignature() async {
@@ -176,12 +211,6 @@ class ComfyTemplateStore {
       final name = p.basename(f.path).toLowerCase();
       final stat = await f.stat();
       parts.add('$name:${stat.modified.millisecondsSinceEpoch}:${stat.size}');
-    }
-
-    final bind = bindingsPath;
-    if (bind != null) {
-      final f = File(bind);
-      if (await f.exists()) await addFile(f);
     }
 
     final tpl = templatesDir;
