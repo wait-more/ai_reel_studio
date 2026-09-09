@@ -1,6 +1,9 @@
 import 'dart:io';
+import 'dart:math' as math;
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/file_actions.dart';
@@ -41,6 +44,18 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
   final TextEditingController _searchCtrl = TextEditingController();
   String _query = '';
   _AssetFilter _filter = _AssetFilter.all;
+
+  /// 当前多选路径。
+  final Set<String> _selected = {};
+  final Map<String, GlobalKey> _itemKeys = {};
+  final GlobalKey _gridStackKey = GlobalKey();
+
+  Offset? _marqueeOrigin;
+  Offset? _marqueeCurrent;
+  bool _marqueeActive = false;
+  bool _pointerOnItem = false;
+  bool _marqueeAdditive = false;
+  Set<String> _marqueeBase = {};
 
   String? get _currentDir =>
       (_historyIndex >= 0 && _historyIndex < _history.length)
@@ -139,6 +154,7 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
     _history.clear();
     _history.add(dir);
     _historyIndex = 0;
+    _selected.clear();
     _reload();
   }
 
@@ -163,7 +179,12 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
             .last
             .compareTo(b.path.split(Platform.pathSeparator).last);
       });
-      if (mounted) setState(() => _entries = entries);
+      if (mounted) {
+        final keep = entries.map((e) => e.path).toSet();
+        _selected.removeWhere((p) => !keep.contains(p));
+        _itemKeys.removeWhere((k, _) => !keep.contains(k));
+        setState(() => _entries = entries);
+      }
     } finally {
       if (mounted) setState(() => _loading = false);
     }
@@ -179,12 +200,13 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
   }
 
   
-/// 导航到 [path]：截断当前位置之后的分支，压入并更新全局以同步左树。
+  /// 导航到 [path]：截断当前位置之后的分支，压入并更新全局以同步左树。
   void _enterDir(String path) {
     setState(() {
       _history.removeRange(_historyIndex + 1, _history.length);
       _history.add(path);
       _historyIndex = _history.length - 1;
+      _selected.clear();
     });
     _syncGlobal(path);
     _reload();
@@ -205,16 +227,150 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
 
   void _back() {
     if (!_canBack) return;
-    setState(() => _historyIndex--);
+    setState(() {
+      _historyIndex--;
+      _selected.clear();
+    });
     _syncGlobal(_currentDir!);
     _reload();
   }
 
   void _forward() {
     if (!_canForward) return;
-    setState(() => _historyIndex++);
+    setState(() {
+      _historyIndex++;
+      _selected.clear();
+    });
     _syncGlobal(_currentDir!);
     _reload();
+  }
+
+  bool get _ctrlHeld =>
+      HardwareKeyboard.instance.isControlPressed ||
+      HardwareKeyboard.instance.isMetaPressed;
+
+  List<FsClipboardItem> _selectedItems() => [
+        for (final e in _entries)
+          if (_selected.contains(e.path))
+            FsClipboardItem(path: e.path, isDir: e is Directory),
+      ];
+
+  void _selectPath(String path, {required bool toggle}) {
+    setState(() {
+      if (toggle) {
+        if (!_selected.remove(path)) _selected.add(path);
+      } else {
+        _selected
+          ..clear()
+          ..add(path);
+      }
+    });
+  }
+
+  void _clearSelection() {
+    if (_selected.isEmpty) return;
+    setState(() => _selected.clear());
+  }
+
+  String? _hitTestItem(Offset global) {
+    for (final e in _visibleEntries) {
+      final box =
+          _itemKeys[e.path]?.currentContext?.findRenderObject() as RenderBox?;
+      if (box == null || !box.hasSize || !box.attached) continue;
+      final rect = box.localToGlobal(Offset.zero) & box.size;
+      if (rect.contains(global)) return e.path;
+    }
+    return null;
+  }
+
+  Rect? get _marqueeRect {
+    final a = _marqueeOrigin;
+    final b = _marqueeCurrent;
+    if (!_marqueeActive || a == null || b == null) return null;
+    return Rect.fromPoints(a, b);
+  }
+
+  void _applyMarqueeSelection() {
+    final rect = _marqueeRect;
+    final stackBox =
+        _gridStackKey.currentContext?.findRenderObject() as RenderBox?;
+    if (rect == null || stackBox == null) return;
+    final next = <String>{..._marqueeBase};
+    for (final e in _visibleEntries) {
+      final box =
+          _itemKeys[e.path]?.currentContext?.findRenderObject() as RenderBox?;
+      if (box == null || !box.hasSize || !box.attached) continue;
+      final topLeft = stackBox.globalToLocal(box.localToGlobal(Offset.zero));
+      if ((topLeft & box.size).overlaps(rect)) {
+        next.add(e.path);
+      }
+    }
+    setState(() {
+      _selected
+        ..clear()
+        ..addAll(next);
+    });
+  }
+
+  void _onGridPointerDown(PointerDownEvent e) {
+    if (e.buttons != kPrimaryMouseButton) return;
+    final box =
+        _gridStackKey.currentContext?.findRenderObject() as RenderBox?;
+    if (box == null) return;
+    final local = box.globalToLocal(e.position);
+    _marqueeOrigin = local;
+    _marqueeCurrent = local;
+    _marqueeActive = false;
+    _marqueeAdditive = _ctrlHeld;
+    _marqueeBase = _marqueeAdditive ? {..._selected} : {};
+    _pointerOnItem = _hitTestItem(e.position) != null;
+  }
+
+  void _onGridPointerMove(PointerMoveEvent e) {
+    if (_marqueeOrigin == null) return;
+    if ((e.buttons & kPrimaryMouseButton) == 0) return;
+    final box =
+        _gridStackKey.currentContext?.findRenderObject() as RenderBox?;
+    if (box == null) return;
+    final local = box.globalToLocal(e.position);
+    if (!_marqueeActive) {
+      if ((local - _marqueeOrigin!).distance <= 6) return;
+      // 从卡片上拖出交给文件拖拽，不启动框选。
+      if (_pointerOnItem) {
+        _marqueeOrigin = null;
+        return;
+      }
+      _marqueeActive = true;
+      if (!_marqueeAdditive) {
+        _selected.clear();
+        _marqueeBase = {};
+      }
+    }
+    _marqueeCurrent = local;
+    _applyMarqueeSelection();
+  }
+
+  void _onGridPointerUp(PointerUpEvent e) {
+    if (_marqueeActive) {
+      _marqueeActive = false;
+      _marqueeOrigin = null;
+      _marqueeCurrent = null;
+      if (mounted) setState(() {});
+      return;
+    }
+    final wasEmptyClick = !_pointerOnItem && _marqueeOrigin != null;
+    _marqueeOrigin = null;
+    _marqueeCurrent = null;
+    if (wasEmptyClick && !_marqueeAdditive) {
+      _clearSelection();
+    }
+  }
+
+  void _onGridPointerCancel(PointerCancelEvent e) {
+    _marqueeActive = false;
+    _marqueeOrigin = null;
+    _marqueeCurrent = null;
+    if (mounted) setState(() {});
   }
 
   void _up() {
@@ -631,27 +787,69 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
       );
     } else {
       final entries = _visibleEntries;
-      body = GridView.builder(
-        padding: const EdgeInsets.all(12),
-        gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
-          maxCrossAxisExtent: 160,
-          mainAxisSpacing: 10,
-          crossAxisSpacing: 10,
-          childAspectRatio: 0.9,
-        ),
-        itemCount: entries.length,
-        itemBuilder: (context, index) => _AssetCard(
-          entity: entries[index],
-          onEnterDir: _enterDir,
-          onOpenFile: _openFileEntry,
-          onChanged: _reloadAndSyncTree,
+      final primary = Theme.of(context).colorScheme.primary;
+      body = Listener(
+        behavior: HitTestBehavior.translucent,
+        onPointerDown: _onGridPointerDown,
+        onPointerMove: _onGridPointerMove,
+        onPointerUp: _onGridPointerUp,
+        onPointerCancel: _onGridPointerCancel,
+        child: Stack(
+          key: _gridStackKey,
+          children: [
+            GridView.builder(
+              padding: const EdgeInsets.all(12),
+              gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+                maxCrossAxisExtent: 160,
+                mainAxisSpacing: 10,
+                crossAxisSpacing: 10,
+                childAspectRatio: 0.9,
+              ),
+              itemCount: entries.length,
+              itemBuilder: (context, index) {
+                final entity = entries[index];
+                final itemKey =
+                    _itemKeys.putIfAbsent(entity.path, GlobalKey.new);
+                return KeyedSubtree(
+                  key: itemKey,
+                  child: _AssetCard(
+                    entity: entity,
+                    selected: _selected.contains(entity.path),
+                    selectedItems: _selectedItems(),
+                    onSelect: (toggle) =>
+                        _selectPath(entity.path, toggle: toggle),
+                    onEnterDir: _enterDir,
+                    onOpenFile: _openFileEntry,
+                    onChanged: () {
+                      _clearSelection();
+                      _reloadAndSyncTree();
+                    },
+                  ),
+                );
+              },
+            ),
+            if (_marqueeRect != null)
+              Positioned.fill(
+                child: IgnorePointer(
+                  child: CustomPaint(
+                    painter: _MarqueePainter(
+                      rect: _marqueeRect!,
+                      color: primary,
+                    ),
+                  ),
+                ),
+              ),
+          ],
         ),
       );
     }
     if (dir == null || dir.isEmpty) return body;
     return FsDirDropTarget(
       destDir: dir,
-      onChanged: _reloadAndSyncTree,
+      onChanged: () {
+        _clearSelection();
+        _reloadAndSyncTree();
+      },
       child: body,
     );
   }
@@ -699,13 +897,19 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
 // ignore: must_be_immutable
 class _AssetCard extends ConsumerWidget {
   final FileSystemEntity entity;
+  final bool selected;
+  final List<FsClipboardItem> selectedItems;
+  final void Function(bool toggle) onSelect;
   final ValueChanged<String> onEnterDir;
   final ValueChanged<String> onOpenFile;
-  final VoidCallback onChanged; // 文件/目录变更后刷新。
+  final VoidCallback onChanged;
   Offset _menuPos = Offset.zero;
 
   _AssetCard({
     required this.entity,
+    required this.selected,
+    required this.selectedItems,
+    required this.onSelect,
     required this.onEnterDir,
     required this.onOpenFile,
     required this.onChanged,
@@ -713,43 +917,63 @@ class _AssetCard extends ConsumerWidget {
 
   bool get _isDir => entity is Directory;
   String get _name => entity.path.split(Platform.pathSeparator).last;
+  bool get _multiSelected => selected && selectedItems.length > 1;
+
+  bool get _ctrlHeld =>
+      HardwareKeyboard.instance.isControlPressed ||
+      HardwareKeyboard.instance.isMetaPressed;
+
+  void _open() {
+    if (_isDir) {
+      onEnterDir(entity.path);
+    } else {
+      onOpenFile(entity.path);
+    }
+  }
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final scheme = Theme.of(context).colorScheme;
     return FsContextMenuTarget(
       path: entity.path,
       isDir: _isDir,
       displayName: _name,
-      onOpen: () async {
-        if (_isDir) {
-          onEnterDir(entity.path);
-        } else {
-          onOpenFile(entity.path);
-        }
-      },
+      onOpen: () async => _open(),
       onChanged: onChanged,
       child: FsDragDropShell(
         path: entity.path,
         isDir: _isDir,
         displayName: _name,
         dropIntoDir: _isDir ? entity.path : null,
+        dragItems: _multiSelected ? selectedItems : null,
         onChanged: onChanged,
         child: InkWell(
-          onTap: () {
-            if (_isDir) {
-              onEnterDir(entity.path);
-            } else {
-              onOpenFile(entity.path);
+          onTapDown: (_) {
+            if (!_ctrlHeld && !selected) {
+              onSelect(false);
             }
           },
+          onTap: () {
+            if (_ctrlHeld) {
+              onSelect(true);
+            } else {
+              onSelect(false);
+            }
+          },
+          onDoubleTap: _open,
           onSecondaryTapDown: (d) => _menuPos = d.globalPosition,
           onSecondaryTap: () => _showMenu(context, ref),
           borderRadius: BorderRadius.circular(8),
           child: Container(
             decoration: BoxDecoration(
-              color: Theme.of(context).colorScheme.surfaceContainerHigh,
+              color: selected
+                  ? scheme.primary.withValues(alpha: 0.16)
+                  : scheme.surfaceContainerHigh,
               borderRadius: BorderRadius.circular(8),
-              border: Border.all(color: Colors.white10),
+              border: Border.all(
+                color: selected ? scheme.primary : Colors.white10,
+                width: selected ? 1.5 : 1,
+              ),
             ),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -785,8 +1009,7 @@ class _AssetCard extends ConsumerWidget {
     );
   }
 
-  
-/// 目录进度状态徽章（未开始时隐藏）。
+  /// 目录进度状态徽章（未开始时隐藏）。
   Widget _statusBubble(WidgetRef ref) {
     final status = ref.watch(episodeStatusesProvider)[entity.path];
     if (status == null || status == EpisodeStatus.notStarted) {
@@ -826,22 +1049,19 @@ class _AssetCard extends ConsumerWidget {
     );
   }
 
-  
   /// 右键操作菜单（与左树共用 [showFsContextMenu]）。
   Future<void> _showMenu(BuildContext context, WidgetRef ref) async {
+    if (!selected) {
+      onSelect(false);
+    }
     await showFsContextMenu(
       context: context,
       globalPosition: _menuPos,
       path: entity.path,
       isDir: _isDir,
       displayName: _name,
-      onOpen: () async {
-        if (_isDir) {
-          onEnterDir(entity.path);
-        } else {
-          onOpenFile(entity.path);
-        }
-      },
+      multiItems: _multiSelected ? selectedItems : null,
+      onOpen: () async => _open(),
       onChanged: onChanged,
     );
   }
@@ -893,6 +1113,36 @@ class _AssetCard extends ConsumerWidget {
     if (lower.endsWith('.md')) return (Icons.description, Colors.blueGrey);
     return (Icons.insert_drive_file, Colors.grey);
   }
+}
+
+class _MarqueePainter extends CustomPainter {
+  _MarqueePainter({required this.rect, required this.color});
+
+  final Rect rect;
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final fill = Paint()
+      ..color = color.withValues(alpha: 0.18)
+      ..style = PaintingStyle.fill;
+    final stroke = Paint()
+      ..color = color.withValues(alpha: 0.85)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1;
+    final r = Rect.fromLTRB(
+      math.max(0, rect.left),
+      math.max(0, rect.top),
+      math.min(size.width, rect.right),
+      math.min(size.height, rect.bottom),
+    );
+    canvas.drawRect(r, fill);
+    canvas.drawRect(r, stroke);
+  }
+
+  @override
+  bool shouldRepaint(covariant _MarqueePainter oldDelegate) =>
+      oldDelegate.rect != rect || oldDelegate.color != color;
 }
 
 /// 用系统默认应用打开文件（Windows 下 rundll32/默认关联，避免触发选择器）。

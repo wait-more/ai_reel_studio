@@ -73,6 +73,8 @@ Future<void> showFsContextMenu({
   required String displayName,
   required Future<void> Function() onOpen,
   required void Function() onChanged,
+  /// 多选时传入全部选中项；长度 > 1 时菜单仅保留剪切/复制/删除等批量操作。
+  List<FsClipboardItem>? multiItems,
 }) async {
   final overlayState = Overlay.maybeOf(context, rootOverlay: true);
   if (overlayState == null || !context.mounted) return;
@@ -80,6 +82,9 @@ Future<void> showFsContextMenu({
   final hostContext = overlayState.context;
   final callerContext = context;
   final container = ProviderScope.containerOf(context, listen: false);
+  final batch = (multiItems != null && multiItems.length > 1)
+      ? multiItems
+      : null;
 
   _dismissActiveMenu();
 
@@ -171,110 +176,124 @@ Future<void> showFsContextMenu({
       Widget divider() => const Divider(height: 4, thickness: 1);
 
       final children = <Widget>[
-        item(
-          value: 'open',
-          icon: Icons.open_in_new,
-          label: isDir ? '在当前目录查看' : '打开',
-        ),
-        item(
-          value: 'reveal',
-          icon: Icons.folder_open,
-          label: '在资源管理器显示',
-        ),
-        if (isDir)
+        if (batch == null) ...[
           item(
-            value: 'openTerminal',
-            icon: Icons.terminal,
-            label: '在终端打开',
+            value: 'open',
+            icon: Icons.open_in_new,
+            label: isDir ? '在当前目录查看' : '打开',
           ),
-        if (isDir)
           item(
-            value: 'importHere',
-            icon: Icons.file_upload_outlined,
-            label: '在此导入物料',
+            value: 'reveal',
+            icon: Icons.folder_open,
+            label: '在资源管理器显示',
           ),
-        if (isVideo) ...[
+          if (isDir)
+            item(
+              value: 'openTerminal',
+              icon: Icons.terminal,
+              label: '在终端打开',
+            ),
+          if (isDir)
+            item(
+              value: 'importHere',
+              icon: Icons.file_upload_outlined,
+              label: '在此导入物料',
+            ),
+          if (isVideo) ...[
+            divider(),
+            item(
+              value: 'grabFirst',
+              icon: Icons.first_page,
+              label: '截取首帧',
+              iconColor: Colors.tealAccent,
+            ),
+            item(
+              value: 'grabLast',
+              icon: Icons.last_page,
+              label: '截取末帧',
+              iconColor: Colors.tealAccent,
+            ),
+          ],
+          if (isDir) ...[
+            divider(),
+            item(
+              value: 'newDoc',
+              icon: Icons.note_add_outlined,
+              label: '新建文档',
+            ),
+            item(
+              value: 'newFolder',
+              icon: Icons.create_new_folder_outlined,
+              label: '新建子文件夹',
+            ),
+            item(
+              value: 'progress',
+              icon: Icons.donut_large,
+              label: '设置创作进度',
+              iconColor: Colors.teal,
+            ),
+          ],
           divider(),
           item(
-            value: 'grabFirst',
-            icon: Icons.first_page,
-            label: '截取首帧',
-            iconColor: Colors.tealAccent,
+            value: 'copyAbsPath',
+            icon: Icons.link,
+            label: '复制绝对路径',
           ),
           item(
-            value: 'grabLast',
-            icon: Icons.last_page,
-            label: '截取末帧',
-            iconColor: Colors.tealAccent,
+            value: 'copyRelPath',
+            icon: Icons.account_tree_outlined,
+            label: '复制相对路径',
           ),
-        ],
-        if (isDir) ...[
+          item(
+            value: 'copyName',
+            icon: Icons.text_fields,
+            label: '复制名称',
+          ),
           divider(),
-          item(
-            value: 'newDoc',
-            icon: Icons.note_add_outlined,
-            label: '新建文档',
+        ] else
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 10, 12, 6),
+            child: Text(
+              '已选 ${batch.length} 项',
+              style: TextStyle(
+                fontSize: 12,
+                color: Theme.of(ctx).colorScheme.onSurfaceVariant,
+              ),
+            ),
           ),
-          item(
-            value: 'newFolder',
-            icon: Icons.create_new_folder_outlined,
-            label: '新建子文件夹',
-          ),
-          item(
-            value: 'progress',
-            icon: Icons.donut_large,
-            label: '设置创作进度',
-            iconColor: Colors.teal,
-          ),
-        ],
-        divider(),
-        item(
-          value: 'copyAbsPath',
-          icon: Icons.link,
-          label: '复制绝对路径',
-        ),
-        item(
-          value: 'copyRelPath',
-          icon: Icons.account_tree_outlined,
-          label: '复制相对路径',
-        ),
-        item(
-          value: 'copyName',
-          icon: Icons.text_fields,
-          label: '复制名称',
-        ),
-        divider(),
         item(
           value: 'cut',
           icon: Icons.content_cut,
-          label: '剪切',
+          label: batch == null ? '剪切' : '剪切 ${batch.length} 项',
         ),
         item(
           value: 'copy',
           icon: Icons.copy,
-          label: '复制',
+          label: batch == null ? '复制' : '复制 ${batch.length} 项',
         ),
-        if (canPaste)
+        if (batch == null && canPaste)
           item(
             value: 'paste',
             icon: Icons.content_paste,
             label: '粘贴',
           ),
-        item(
-          value: 'rename',
-          icon: Icons.drive_file_rename_outline,
-          label: '重命名',
-        ),
+        if (batch == null)
+          item(
+            value: 'rename',
+            icon: Icons.drive_file_rename_outline,
+            label: '重命名',
+          ),
         divider(),
-        item(
-          value: 'properties',
-          icon: Icons.info_outline,
-          label: '属性',
-        ),
+        if (batch == null)
+          item(
+            value: 'properties',
+            icon: Icons.info_outline,
+            label: '属性',
+          ),
         item(
           value: 'delete',
           icon: Icons.delete_outline,
-          label: '删除',
+          label: batch == null ? '删除' : '删除 ${batch.length} 项',
           iconColor: Colors.red[300],
           labelColor: Colors.red[300],
         ),
@@ -347,6 +366,7 @@ Future<void> showFsContextMenu({
     displayName: displayName,
     onOpen: onOpen,
     onChanged: onChanged,
+    multiItems: batch,
   );
 }
 
@@ -387,6 +407,7 @@ Future<void> _runAction({
   required String displayName,
   required Future<void> Function() onOpen,
   required void Function() onChanged,
+  List<FsClipboardItem>? multiItems,
 }) async {
   void toast(String msg) =>
       showGlobalToast(context, msg, overlay: overlay);
@@ -463,20 +484,26 @@ Future<void> _runAction({
       await copyBaseName(context, path);
       break;
     case 'cut':
-      container.read(fsClipboardProvider.notifier).state = FsClipboardEntry(
-        path: path,
-        isDir: isDir,
-        isCut: true,
-      );
-      toast('已剪切：$displayName');
+      {
+        final items = multiItems ??
+            [FsClipboardItem(path: path, isDir: isDir)];
+        container.read(fsClipboardProvider.notifier).state =
+            FsClipboardEntry(items: items, isCut: true);
+        toast(items.length == 1
+            ? '已剪切：$displayName'
+            : '已剪切 ${items.length} 项');
+      }
       break;
     case 'copy':
-      container.read(fsClipboardProvider.notifier).state = FsClipboardEntry(
-        path: path,
-        isDir: isDir,
-        isCut: false,
-      );
-      toast('已复制：$displayName');
+      {
+        final items = multiItems ??
+            [FsClipboardItem(path: path, isDir: isDir)];
+        container.read(fsClipboardProvider.notifier).state =
+            FsClipboardEntry(items: items, isCut: false);
+        toast(items.length == 1
+            ? '已复制：$displayName'
+            : '已复制 ${items.length} 项');
+      }
       break;
     case 'paste':
       {
@@ -506,18 +533,35 @@ Future<void> _runAction({
       );
       break;
     case 'delete':
-      final ok = await deleteEntityDialog(
-        context,
-        path: path,
-        isDir: isDir,
-        onDone: onChanged,
-      );
-      if (ok) {
-        closeOpenDocumentsAffectedBy(
-          container,
+      if (multiItems != null && multiItems.length > 1) {
+        final ok = await deleteEntitiesDialog(
+          context,
+          items: multiItems,
+          onDone: onChanged,
+        );
+        if (ok) {
+          for (final item in multiItems) {
+            closeOpenDocumentsAffectedBy(
+              container,
+              path: item.path,
+              isDir: item.isDir,
+            );
+          }
+        }
+      } else {
+        final ok = await deleteEntityDialog(
+          context,
           path: path,
           isDir: isDir,
+          onDone: onChanged,
         );
+        if (ok) {
+          closeOpenDocumentsAffectedBy(
+            container,
+            path: path,
+            isDir: isDir,
+          );
+        }
       }
       break;
   }

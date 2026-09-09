@@ -224,30 +224,103 @@ Future<String?> pasteClipboardEntry(
   OverlayState? overlay,
 }) async {
   final entry = container.read(fsClipboardProvider);
-  if (entry == null) return null;
-  final src = entry.path;
-  final isDir = entry.isDir;
-  final isCut = entry.isCut;
-  if (!(isDir ? await Directory(src).exists() : await File(src).exists())) {
-    container.read(fsClipboardProvider.notifier).state = null;
-    _showError(context, isCut ? '剪切项已不存在' : '复制项已不存在');
-    return null;
-  }
+  if (entry == null || entry.items.isEmpty) return null;
 
-  final result = await relocateEntity(
-    context,
-    container,
-    srcPath: src,
-    isDir: isDir,
-    destDir: destDir,
-    move: isCut,
-    onDone: onDone,
-    overlay: overlay,
-  );
-  if (result != null && isCut) {
-    container.read(fsClipboardProvider.notifier).state = null;
+  var ok = 0;
+  String? last;
+  for (final item in entry.items) {
+    final exists = item.isDir
+        ? await Directory(item.path).exists()
+        : await File(item.path).exists();
+    if (!exists) continue;
+    final result = await relocateEntity(
+      context,
+      container,
+      srcPath: item.path,
+      isDir: item.isDir,
+      destDir: destDir,
+      move: entry.isCut,
+      onDone: null,
+      overlay: overlay,
+      silent: entry.items.length > 1,
+    );
+    if (result != null) {
+      ok++;
+      last = result;
+    }
   }
-  return result;
+  if (ok > 0) {
+    if (entry.isCut) {
+      container.read(fsClipboardProvider.notifier).state = null;
+    }
+    onDone?.call();
+    if (context.mounted) {
+      final tip = entry.isCut
+          ? (ok == 1 ? '已移动' : '已移动 $ok 项')
+          : (ok == 1 ? '已粘贴' : '已粘贴 $ok 项');
+      showGlobalToast(context, tip, overlay: overlay);
+    }
+  } else {
+    container.read(fsClipboardProvider.notifier).state = null;
+    _showError(context, entry.isCut ? '剪切项已不存在' : '复制项已不存在');
+  }
+  return last;
+}
+
+/// 批量删除（一次确认）。
+Future<bool> deleteEntitiesDialog(
+  BuildContext context, {
+  required List<FsClipboardItem> items,
+  VoidCallback? onDone,
+}) async {
+  if (items.isEmpty) return false;
+  if (items.length == 1) {
+    return deleteEntityDialog(
+      context,
+      path: items.first.path,
+      isDir: items.first.isDir,
+      onDone: onDone,
+    );
+  }
+  final ok = await showDialog<bool>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      title: const Text('删除确认', style: TextStyle(fontSize: 15)),
+      content: Text(
+        '删除选中的 ${items.length} 项？此操作不可恢复。',
+        style: const TextStyle(fontSize: 13),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(ctx, false),
+          child: const Text('取消'),
+        ),
+        FilledButton(
+          style: FilledButton.styleFrom(backgroundColor: Colors.red[800]),
+          onPressed: () => Navigator.pop(ctx, true),
+          child: const Text('删除'),
+        ),
+      ],
+    ),
+  );
+  if (ok != true) return false;
+  var failed = 0;
+  for (final item in items) {
+    try {
+      if (item.isDir) {
+        await Directory(item.path).delete(recursive: true);
+      } else {
+        await File(item.path).delete();
+      }
+    } catch (_) {
+      failed++;
+    }
+  }
+  onDone?.call();
+  if (failed > 0 && context.mounted) {
+    _showError(context, '有 $failed 项删除失败');
+  }
+  return failed < items.length;
 }
 
 /// 将系统拖入的路径复制到 [destDir]（文件直接拷贝；文件夹递归拷贝）。

@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/config.dart';
 import '../../core/directory_parser.dart';
@@ -463,12 +464,19 @@ class _TreeNodeWidgetState extends ConsumerState<_TreeNodeWidget> {
     final node = widget.node;
     final isFile = node.type == ScriptNodeType.file;
     final dir = Directory(node.path).parent.path;
+    var multi = ref.read(treeSelectionProvider);
+    final inMulti = multi.any((i) => i.path == node.path);
+    if (!inMulti) {
+      multi = [FsClipboardItem(path: node.path, isDir: !isFile)];
+      ref.read(treeSelectionProvider.notifier).state = multi;
+    }
     await showFsContextMenu(
       context: context,
       globalPosition: _menuPos,
       path: node.path,
       isDir: !isFile,
       displayName: node.name,
+      multiItems: multi.length > 1 ? multi : null,
       onOpen: () async {
         if (isFile) {
           _openFile(node.path);
@@ -477,7 +485,10 @@ class _TreeNodeWidgetState extends ConsumerState<_TreeNodeWidget> {
           ref.read(contentModeProvider.notifier).state = 'assets';
         }
       },
-      onChanged: () => widget.onTreeChanged(isFile ? dir : node.path),
+      onChanged: () {
+        ref.read(treeSelectionProvider.notifier).state = [];
+        widget.onTreeChanged(isFile ? dir : node.path);
+      },
     );
   }
 
@@ -499,6 +510,50 @@ class _TreeNodeWidgetState extends ConsumerState<_TreeNodeWidget> {
   void _selectDirInAssets(String dirPath) {
     ref.read(selectedDirProvider.notifier).state = dirPath;
     ref.read(contentModeProvider.notifier).state = 'assets';
+  }
+
+  bool get _ctrlHeld =>
+      HardwareKeyboard.instance.isControlPressed ||
+      HardwareKeyboard.instance.isMetaPressed;
+
+  void _setSingleTreeSelection({required String path, required bool isDir}) {
+    ref.read(treeSelectionProvider.notifier).state = [
+      FsClipboardItem(path: path, isDir: isDir),
+    ];
+  }
+
+  void _toggleTreeSelection({required String path, required bool isDir}) {
+    final current = List<FsClipboardItem>.of(ref.read(treeSelectionProvider));
+    if (current.isEmpty) {
+      final file = ref.read(selectedFileProvider);
+      final dir = ref.read(selectedDirProvider);
+      if (file != null && file.isNotEmpty) {
+        current.add(FsClipboardItem(path: file, isDir: false));
+      } else if (dir != null && dir.isNotEmpty) {
+        current.add(FsClipboardItem(path: dir, isDir: true));
+      }
+    }
+    final idx = current.indexWhere((i) => i.path == path);
+    if (idx >= 0) {
+      current.removeAt(idx);
+    } else {
+      current.add(FsClipboardItem(path: path, isDir: isDir));
+    }
+    ref.read(treeSelectionProvider.notifier).state = current;
+  }
+
+  void _onNodeTap({required bool isFile}) {
+    final path = widget.node.path;
+    if (_ctrlHeld) {
+      _toggleTreeSelection(path: path, isDir: !isFile);
+      return;
+    }
+    _setSingleTreeSelection(path: path, isDir: !isFile);
+    if (isFile) {
+      _openFile(path);
+    } else {
+      _selectDirInAssets(path);
+    }
   }
 
   Future<void> _toggleExpand() async {
@@ -537,7 +592,13 @@ class _TreeNodeWidgetState extends ConsumerState<_TreeNodeWidget> {
     final fileSelected = ref.watch(selectedFileProvider) == node.path;
     final dirSelected =
         !isFile && ref.watch(selectedDirProvider) == node.path;
-    final selected = fileSelected || dirSelected;
+    final treeMulti = ref.watch(treeSelectionProvider);
+    final inTreeMulti = treeMulti.any((i) => i.path == node.path);
+    final selected = treeMulti.isNotEmpty
+        ? inTreeMulti
+        : (fileSelected || dirSelected);
+    final multiDrag = treeMulti.length > 1 && inTreeMulti ? treeMulti : null;
+    final scheme = Theme.of(context).colorScheme;
 
     return Column(
       mainAxisSize: MainAxisSize.min,
@@ -556,95 +617,103 @@ class _TreeNodeWidgetState extends ConsumerState<_TreeNodeWidget> {
                 ref.read(contentModeProvider.notifier).state = 'assets';
               }
             },
-            onChanged: () =>
-                widget.onTreeChanged(isFile ? Directory(node.path).parent.path : node.path),
+            onChanged: () {
+              ref.read(treeSelectionProvider.notifier).state = [];
+              widget.onTreeChanged(
+                isFile ? Directory(node.path).parent.path : node.path,
+              );
+            },
             child: FsDragDropShell(
               path: node.path,
               isDir: !isFile,
               displayName: node.name,
               dropIntoDir: isFile ? null : node.path,
-              onChanged: () => widget.onTreeChanged(
-                isFile ? Directory(node.path).parent.path : node.path,
-              ),
+              dragItems: multiDrag,
+              onChanged: () {
+                ref.read(treeSelectionProvider.notifier).state = [];
+                widget.onTreeChanged(
+                  isFile ? Directory(node.path).parent.path : node.path,
+                );
+              },
               child: DecoratedBox(
-              decoration: BoxDecoration(
-                color: selected
-                    ? Theme.of(context).colorScheme.primary.withOpacity(0.15)
-                    : null,
-                borderRadius: BorderRadius.circular(4),
-              ),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: InkWell(
-                      borderRadius: BorderRadius.circular(4),
-                      onTap: () {
-                        if (isFile) {
-                          _openFile(node.path);
-                        } else {
-                          // 单击名称：只切换中间栏，不折叠/展开
-                          _selectDirInAssets(node.path);
-                        }
-                      },
-                      onDoubleTap: isFile
-                          ? null
-                          : () {
-                              // 双击名称：展开/折叠（与箭头一致）
-                              _toggleExpand();
-                            },
-                      onSecondaryTapDown: (d) => _menuPos = d.globalPosition,
-                      onSecondaryTap: () => _showMenu(context),
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(vertical: 4),
-                        child: Row(
-                          children: [
-                            Icon(
-                              _iconFor(node),
-                              size: 16,
-                              color: _iconColorFor(context, node),
-                            ),
-                            const SizedBox(width: 6),
-                            Expanded(
-                              child: Text(
-                                node.name,
-                                overflow: TextOverflow.ellipsis,
-                                style: TextStyle(
-                                  fontSize: 13,
-                                  fontWeight: FontWeight.w400,
-                                  color: isExpanded
-                                      ? Theme.of(context).colorScheme.primary
-                                      : null,
+                decoration: BoxDecoration(
+                  color: selected
+                      ? scheme.primary.withValues(alpha: 0.15)
+                      : null,
+                  borderRadius: BorderRadius.circular(4),
+                  border: selected
+                      ? Border.all(
+                          color: scheme.primary.withValues(alpha: 0.55),
+                        )
+                      : null,
+                ),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: InkWell(
+                        borderRadius: BorderRadius.circular(4),
+                        onTap: () => _onNodeTap(isFile: isFile),
+                        onDoubleTap: isFile
+                            ? null
+                            : () {
+                                // 双击名称：展开/折叠（与箭头一致）
+                                _toggleExpand();
+                              },
+                        onSecondaryTapDown: (d) =>
+                            _menuPos = d.globalPosition,
+                        onSecondaryTap: () => _showMenu(context),
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 4),
+                          child: Row(
+                            children: [
+                              Icon(
+                                _iconFor(node),
+                                size: 16,
+                                color: _iconColorFor(context, node),
+                              ),
+                              const SizedBox(width: 6),
+                              Expanded(
+                                child: Text(
+                                  node.name,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w400,
+                                    color: isExpanded
+                                        ? scheme.primary
+                                        : null,
+                                  ),
                                 ),
                               ),
-                            ),
-                            _progressBubble(node),
-                          ],
+                              _progressBubble(node),
+                            ],
+                          ),
                         ),
                       ),
                     ),
-                  ),
-                  if (canExpand)
-                    InkWell(
-                      borderRadius: BorderRadius.circular(4),
-                      onTap: _toggleExpand,
-                      onSecondaryTapDown: (d) => _menuPos = d.globalPosition,
-                      onSecondaryTap: () => _showMenu(context),
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 4,
-                          vertical: 4,
-                        ),
-                        child: Icon(
-                          isExpanded
-                              ? Icons.keyboard_arrow_down
-                              : Icons.keyboard_arrow_right,
-                          size: 16,
+                    if (canExpand)
+                      InkWell(
+                        borderRadius: BorderRadius.circular(4),
+                        onTap: _toggleExpand,
+                        onSecondaryTapDown: (d) =>
+                            _menuPos = d.globalPosition,
+                        onSecondaryTap: () => _showMenu(context),
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 4,
+                            vertical: 4,
+                          ),
+                          child: Icon(
+                            isExpanded
+                                ? Icons.keyboard_arrow_down
+                                : Icons.keyboard_arrow_right,
+                            size: 16,
+                          ),
                         ),
                       ),
-                    ),
-                ],
+                  ],
+                ),
               ),
-            ),
             ),
           ),
         ),

@@ -85,20 +85,39 @@ final shellVisibleProvider = StateProvider<bool>((ref) => true);
 /// 请求在 Shell 新开标签并进入该目录；ShellPanel 消费后置 null。
 final shellOpenCwdRequestProvider = StateProvider<String?>((ref) => null);
 
-/// 应用内文件剪切板（复制/剪切 → 粘贴）。
-class FsClipboardEntry {
+/// 应用内文件剪切板单项。
+class FsClipboardItem {
   final String path;
   final bool isDir;
+  const FsClipboardItem({required this.path, required this.isDir});
+}
+
+/// 应用内文件剪切板（复制/剪切 → 粘贴），支持多选。
+class FsClipboardEntry {
+  final List<FsClipboardItem> items;
   /// true=剪切后粘贴为移动；false=复制后粘贴为拷贝。
   final bool isCut;
   const FsClipboardEntry({
-    required this.path,
-    required this.isDir,
+    required this.items,
     required this.isCut,
-  });
+  }) : assert(items.length > 0);
+
+  factory FsClipboardEntry.single({
+    required String path,
+    required bool isDir,
+    required bool isCut,
+  }) =>
+      FsClipboardEntry(
+        items: [FsClipboardItem(path: path, isDir: isDir)],
+        isCut: isCut,
+      );
 }
 
 final fsClipboardProvider = StateProvider<FsClipboardEntry?>((ref) => null);
+
+/// 左侧目录树多选（Ctrl+单击）；普通单击会重置为单项。
+final treeSelectionProvider =
+    StateProvider<List<FsClipboardItem>>((ref) => []);
 
 /// 项目树根节点
 final treeRootProvider = StateProvider<ScriptNode?>((ref) => null);
