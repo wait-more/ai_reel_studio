@@ -23,6 +23,7 @@ dependencies:
   media_kit_video: ^2.0.1
   path: ^1.9.0
   path_provider: ^2.1.5
+  desktop_drop: ^0.5.0
   screen_retriever: ^0.2.2
   shared_preferences: ^2.5.3
   watcher: ^1.2.1

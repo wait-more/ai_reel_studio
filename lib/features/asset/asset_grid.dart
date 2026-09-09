@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/file_actions.dart';
 import '../../core/fs_context_menu.dart';
+import '../../core/fs_drag.dart';
 import '../../core/media_types.dart';
 import '../../core/progress.dart';
 import '../../core/providers.dart';
@@ -602,11 +603,12 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
   }
 
   Widget _buildBody(BuildContext context) {
+    final dir = _currentDir;
+    Widget body;
     if (_loading && _entries.isEmpty) {
-      return const Center(child: CircularProgressIndicator());
-    }
-    if (_visibleEntries.isEmpty) {
-      return Center(
+      body = const Center(child: CircularProgressIndicator());
+    } else if (_visibleEntries.isEmpty) {
+      body = Center(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -616,26 +618,41 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
               _entries.isEmpty ? '此目录为空' : '无匹配内容',
               style: TextStyle(color: Colors.grey[500]),
             ),
+            if (_entries.isEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: Text(
+                  '可从资源管理器拖入文件，或在应用内拖拽整理',
+                  style: TextStyle(fontSize: 11, color: Colors.grey[600]),
+                ),
+              ),
           ],
         ),
       );
+    } else {
+      final entries = _visibleEntries;
+      body = GridView.builder(
+        padding: const EdgeInsets.all(12),
+        gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+          maxCrossAxisExtent: 160,
+          mainAxisSpacing: 10,
+          crossAxisSpacing: 10,
+          childAspectRatio: 0.9,
+        ),
+        itemCount: entries.length,
+        itemBuilder: (context, index) => _AssetCard(
+          entity: entries[index],
+          onEnterDir: _enterDir,
+          onOpenFile: _openFileEntry,
+          onChanged: _reloadAndSyncTree,
+        ),
+      );
     }
-    final entries = _visibleEntries;
-    return GridView.builder(
-      padding: const EdgeInsets.all(12),
-      gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
-        maxCrossAxisExtent: 160,
-        mainAxisSpacing: 10,
-        crossAxisSpacing: 10,
-        childAspectRatio: 0.9,
-      ),
-      itemCount: entries.length,
-      itemBuilder: (context, index) => _AssetCard(
-        entity: entries[index],
-        onEnterDir: _enterDir,
-        onOpenFile: _openFileEntry,
-        onChanged: _reloadAndSyncTree,
-      ),
+    if (dir == null || dir.isEmpty) return body;
+    return FsDirDropTarget(
+      destDir: dir,
+      onChanged: _reloadAndSyncTree,
+      child: body,
     );
   }
 
@@ -711,50 +728,57 @@ class _AssetCard extends ConsumerWidget {
         }
       },
       onChanged: onChanged,
-      child: InkWell(
-        onTap: () {
-          if (_isDir) {
-            onEnterDir(entity.path);
-          } else {
-            onOpenFile(entity.path);
-          }
-        },
-        onSecondaryTapDown: (d) => _menuPos = d.globalPosition,
-        onSecondaryTap: () => _showMenu(context, ref),
-        borderRadius: BorderRadius.circular(8),
-        child: Container(
-          decoration: BoxDecoration(
-            color: Theme.of(context).colorScheme.surfaceContainerHigh,
-            borderRadius: BorderRadius.circular(8),
-            border: Border.all(color: Colors.white10),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Expanded(child: _preview(context)),
-              Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
-                decoration: const BoxDecoration(
-                  color: Colors.black26,
-                  borderRadius:
-                      BorderRadius.vertical(bottom: Radius.circular(8)),
-                ),
-                child: Row(
-                  children: [
-                    if (_isDir) _statusBubble(ref),
-                    Expanded(
-                      child: Text(
-                        _name,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(fontSize: 11),
+      child: FsDragDropShell(
+        path: entity.path,
+        isDir: _isDir,
+        displayName: _name,
+        dropIntoDir: _isDir ? entity.path : null,
+        onChanged: onChanged,
+        child: InkWell(
+          onTap: () {
+            if (_isDir) {
+              onEnterDir(entity.path);
+            } else {
+              onOpenFile(entity.path);
+            }
+          },
+          onSecondaryTapDown: (d) => _menuPos = d.globalPosition,
+          onSecondaryTap: () => _showMenu(context, ref),
+          borderRadius: BorderRadius.circular(8),
+          child: Container(
+            decoration: BoxDecoration(
+              color: Theme.of(context).colorScheme.surfaceContainerHigh,
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: Colors.white10),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Expanded(child: _preview(context)),
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+                  decoration: const BoxDecoration(
+                    color: Colors.black26,
+                    borderRadius:
+                        BorderRadius.vertical(bottom: Radius.circular(8)),
+                  ),
+                  child: Row(
+                    children: [
+                      if (_isDir) _statusBubble(ref),
+                      Expanded(
+                        child: Text(
+                          _name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(fontSize: 11),
+                        ),
                       ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       ),

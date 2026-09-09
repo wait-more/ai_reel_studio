@@ -7,6 +7,7 @@ import '../../core/directory_parser.dart';
 import '../../core/directory_watcher.dart';
 import '../../core/file_actions.dart';
 import '../../core/fs_context_menu.dart';
+import '../../core/fs_drag.dart';
 import '../../core/media_types.dart';
 import '../../core/progress.dart';
 import '../../core/providers.dart';
@@ -557,7 +558,15 @@ class _TreeNodeWidgetState extends ConsumerState<_TreeNodeWidget> {
             },
             onChanged: () =>
                 widget.onTreeChanged(isFile ? Directory(node.path).parent.path : node.path),
-            child: DecoratedBox(
+            child: FsDragDropShell(
+              path: node.path,
+              isDir: !isFile,
+              displayName: node.name,
+              dropIntoDir: isFile ? null : node.path,
+              onChanged: () => widget.onTreeChanged(
+                isFile ? Directory(node.path).parent.path : node.path,
+              ),
+              child: DecoratedBox(
               decoration: BoxDecoration(
                 color: selected
                     ? Theme.of(context).colorScheme.primary.withOpacity(0.15)
@@ -635,6 +644,7 @@ class _TreeNodeWidgetState extends ConsumerState<_TreeNodeWidget> {
                     ),
                 ],
               ),
+            ),
             ),
           ),
         ),

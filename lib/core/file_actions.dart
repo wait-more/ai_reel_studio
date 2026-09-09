@@ -109,6 +109,194 @@ String _uniqueSiblingPath(String parentDir, String name, {required bool isDir}) 
   return target;
 }
 
+/// 是否可将 [srcPath] 放入 [destDir]。
+/// [asCopy]=false 时，同目录视为无效（移动无意义）。
+bool canRelocateTo({
+  required String srcPath,
+  required bool isDir,
+  required String destDir,
+  bool asCopy = false,
+}) {
+  if (destDir.trim().isEmpty) return false;
+  if (!Directory(destDir).existsSync()) return false;
+  final srcNorm = p.normalize(srcPath);
+  final destNorm = p.normalize(destDir);
+  if (isDir && (p.equals(srcNorm, destNorm) || p.isWithin(srcNorm, destNorm))) {
+    return false;
+  }
+  if (!asCopy && p.equals(p.dirname(srcPath), destDir)) return false;
+  return true;
+}
+
+/// 将文件/文件夹移动或复制到 [destDir]。
+/// [move]=true 为移动，false 为复制。成功返回目标路径。
+Future<String?> relocateEntity(
+  BuildContext context,
+  ProviderContainer container, {
+  required String srcPath,
+  required bool isDir,
+  required String destDir,
+  required bool move,
+  VoidCallback? onDone,
+  OverlayState? overlay,
+  bool silent = false,
+}) async {
+  if (!(isDir
+      ? await Directory(srcPath).exists()
+      : await File(srcPath).exists())) {
+    if (!silent) _showError(context, move ? '源已不存在' : '复制源已不存在');
+    return null;
+  }
+  if (!await Directory(destDir).exists()) {
+    if (!silent) _showError(context, '目标目录不存在');
+    return null;
+  }
+  if (isDir) {
+    final srcNorm = p.normalize(srcPath);
+    final destNorm = p.normalize(destDir);
+    if (p.equals(srcNorm, destNorm) || p.isWithin(srcNorm, destNorm)) {
+      if (!silent) _showError(context, '不能放入自身或其子目录');
+      return null;
+    }
+  }
+
+  final name = p.basename(srcPath);
+  var target = p.join(destDir, name);
+  if (p.equals(p.dirname(srcPath), destDir)) {
+    if (move) {
+      if (!silent && context.mounted) {
+        showGlobalToast(context, '已在目标目录', overlay: overlay);
+      }
+      return srcPath;
+    }
+    target = _uniqueSiblingPath(destDir, name, isDir: isDir);
+  } else if (await File(target).exists() || await Directory(target).exists()) {
+    target = _uniqueSiblingPath(destDir, name, isDir: isDir);
+  }
+
+  try {
+    if (move) {
+      try {
+        if (isDir) {
+          await Directory(srcPath).rename(target);
+        } else {
+          await File(srcPath).rename(target);
+        }
+      } catch (_) {
+        if (isDir) {
+          await _copyDirectoryRecursive(Directory(srcPath), Directory(target));
+          await Directory(srcPath).delete(recursive: true);
+        } else {
+          await File(srcPath).copy(target);
+          await File(srcPath).delete();
+        }
+      }
+      closeOpenDocumentsAffectedBy(container, path: srcPath, isDir: isDir);
+      onDone?.call();
+      if (!silent && context.mounted) {
+        showGlobalToast(context, '已移动', overlay: overlay);
+      }
+      return target;
+    }
+
+    if (isDir) {
+      await _copyDirectoryRecursive(Directory(srcPath), Directory(target));
+    } else {
+      await File(srcPath).copy(target);
+    }
+    onDone?.call();
+    if (!silent && context.mounted) {
+      showGlobalToast(context, '已复制到目标', overlay: overlay);
+    }
+    return target;
+  } catch (e) {
+    if (!silent) _showError(context, '${move ? "移动" : "复制"}失败：$e');
+    return null;
+  }
+}
+
+/// 粘贴剪切板：复制模式拷贝到 [destDir]；剪切模式移动到 [destDir]。
+Future<String?> pasteClipboardEntry(
+  BuildContext context,
+  ProviderContainer container, {
+  required String destDir,
+  VoidCallback? onDone,
+  OverlayState? overlay,
+}) async {
+  final entry = container.read(fsClipboardProvider);
+  if (entry == null) return null;
+  final src = entry.path;
+  final isDir = entry.isDir;
+  final isCut = entry.isCut;
+  if (!(isDir ? await Directory(src).exists() : await File(src).exists())) {
+    container.read(fsClipboardProvider.notifier).state = null;
+    _showError(context, isCut ? '剪切项已不存在' : '复制项已不存在');
+    return null;
+  }
+
+  final result = await relocateEntity(
+    context,
+    container,
+    srcPath: src,
+    isDir: isDir,
+    destDir: destDir,
+    move: isCut,
+    onDone: onDone,
+    overlay: overlay,
+  );
+  if (result != null && isCut) {
+    container.read(fsClipboardProvider.notifier).state = null;
+  }
+  return result;
+}
+
+/// 将系统拖入的路径复制到 [destDir]（文件直接拷贝；文件夹递归拷贝）。
+Future<int> importDroppedPaths(
+  BuildContext context, {
+  required String destDir,
+  required List<String> paths,
+  VoidCallback? onDone,
+  OverlayState? overlay,
+}) async {
+  if (paths.isEmpty) return 0;
+  if (!await Directory(destDir).exists()) {
+    _showError(context, '目标目录不存在');
+    return 0;
+  }
+  var ok = 0;
+  for (final src in paths) {
+    try {
+      final name = p.basename(src);
+      final isDir = await Directory(src).exists();
+      if (!isDir && !await File(src).exists()) continue;
+      if (isDir) {
+        final srcNorm = p.normalize(src);
+        final destNorm = p.normalize(destDir);
+        if (p.equals(srcNorm, destNorm) || p.isWithin(srcNorm, destNorm)) {
+          continue;
+        }
+      }
+      var target = p.join(destDir, name);
+      if (await File(target).exists() || await Directory(target).exists()) {
+        target = _uniqueSiblingPath(destDir, name, isDir: isDir);
+      }
+      if (isDir) {
+        await _copyDirectoryRecursive(Directory(src), Directory(target));
+      } else {
+        await File(src).copy(target);
+      }
+      ok++;
+    } catch (_) {}
+  }
+  if (ok > 0) {
+    onDone?.call();
+    if (context.mounted) {
+      showGlobalToast(context, '已导入 $ok 项', overlay: overlay);
+    }
+  }
+  return ok;
+}
+
 /// 重命名文件/目录。成功返回新路径。
 Future<String?> renameEntityDialog(
   BuildContext context, {
@@ -190,98 +378,6 @@ Future<String?> duplicateFolderDialog(
   }
   onDone?.call();
   return target;
-}
-
-/// 粘贴剪切板：复制模式拷贝到 [destDir]；剪切模式移动到 [destDir]。
-Future<String?> pasteClipboardEntry(
-  BuildContext context,
-  ProviderContainer container, {
-  required String destDir,
-  VoidCallback? onDone,
-  OverlayState? overlay,
-}) async {
-  final entry = container.read(fsClipboardProvider);
-  if (entry == null) return null;
-  final src = entry.path;
-  final isDir = entry.isDir;
-  final isCut = entry.isCut;
-  if (!(isDir ? await Directory(src).exists() : await File(src).exists())) {
-    container.read(fsClipboardProvider.notifier).state = null;
-    _showError(context, isCut ? '剪切项已不存在' : '复制项已不存在');
-    return null;
-  }
-  final destParent = Directory(destDir);
-  if (!await destParent.exists()) {
-    _showError(context, '目标目录不存在');
-    return null;
-  }
-  // 不允许把文件夹粘贴进自身或子目录。
-  if (isDir) {
-    final srcNorm = p.normalize(src);
-    final destNorm = p.normalize(destDir);
-    if (destNorm == srcNorm || p.isWithin(srcNorm, destNorm)) {
-      _showError(context, '不能粘贴到自身或其子目录');
-      return null;
-    }
-  }
-
-  final name = p.basename(src);
-  var target = p.join(destDir, name);
-  // 同目录粘贴：剪切无意义；复制则生成 _copy 避重名。
-  if (p.equals(p.dirname(src), destDir)) {
-    if (isCut) {
-      container.read(fsClipboardProvider.notifier).state = null;
-      if (context.mounted) {
-        showGlobalToast(context, '已在目标目录', overlay: overlay);
-      }
-      return src;
-    }
-    target = _uniqueSiblingPath(destDir, name, isDir: isDir);
-  } else if (await File(target).exists() || await Directory(target).exists()) {
-    target = _uniqueSiblingPath(destDir, name, isDir: isDir);
-  }
-
-  try {
-    if (isCut) {
-      try {
-        if (isDir) {
-          await Directory(src).rename(target);
-        } else {
-          await File(src).rename(target);
-        }
-      } catch (_) {
-        if (isDir) {
-          await _copyDirectoryRecursive(Directory(src), Directory(target));
-          await Directory(src).delete(recursive: true);
-        } else {
-          await File(src).copy(target);
-          await File(src).delete();
-        }
-      }
-      container.read(fsClipboardProvider.notifier).state = null;
-      closeOpenDocumentsAffectedBy(container, path: src, isDir: isDir);
-      onDone?.call();
-      if (context.mounted) {
-        showGlobalToast(context, '已移动到目标目录', overlay: overlay);
-      }
-      return target;
-    }
-
-    // 复制模式：源保留，剪切板保留以便连续粘贴。
-    if (isDir) {
-      await _copyDirectoryRecursive(Directory(src), Directory(target));
-    } else {
-      await File(src).copy(target);
-    }
-    onDone?.call();
-    if (context.mounted) {
-      showGlobalToast(context, '已粘贴', overlay: overlay);
-    }
-    return target;
-  } catch (e) {
-    _showError(context, '${isCut ? "移动" : "粘贴"}失败：$e');
-    return null;
-  }
 }
 
 /// 删除文件/目录（带确认）。成功返回 true。
