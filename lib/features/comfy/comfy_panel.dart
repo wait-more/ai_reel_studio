@@ -98,6 +98,7 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
   /// 分区展开：key = [ComfyNodeGroup.sortCategory] 整型字符串。
   final Map<String, bool> _categoryExpanded = {};
   final Map<String, TextEditingController> _textCtrls = {};
+  final Map<String, FocusNode> _textFocus = {};
   /// 用户自定义节点顺序（nodeId 列表）；空则按名称归类排序。
   List<String> _nodeOrder = [];
   /// 分类分区顺序（sortCategory 整型）；空则 0→4。
@@ -139,6 +140,9 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
     }
     for (final c in _textCtrls.values) {
       c.dispose();
+    }
+    for (final f in _textFocus.values) {
+      f.dispose();
     }
     super.dispose();
   }
@@ -255,6 +259,10 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
       c.dispose();
     }
     _textCtrls.clear();
+    for (final f in _textFocus.values) {
+      f.dispose();
+    }
+    _textFocus.clear();
     _values.clear();
     _enabled.clear();
     _expanded.clear();
@@ -294,6 +302,7 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
       final expanded = <String, bool>{};
       final values = <String, dynamic>{};
       final textCtrls = <String, TextEditingController>{};
+      final textFocus = <String, FocusNode>{};
       for (final node in template.nodes) {
         enabled[node.nodeId] =
             session.enabled[node.nodeId] ?? node.defaultEnabled;
@@ -311,6 +320,7 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
             textCtrls[field.id] = TextEditingController(
               text: '${values[field.id] ?? ''}',
             );
+            textFocus[field.id] = FocusNode();
           }
         }
       }
@@ -328,16 +338,25 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
         for (final c in textCtrls.values) {
           c.dispose();
         }
+        for (final f in textFocus.values) {
+          f.dispose();
+        }
         return;
       }
 
       for (final c in _textCtrls.values) {
         c.dispose();
       }
+      for (final f in _textFocus.values) {
+        f.dispose();
+      }
       setState(() {
         _textCtrls
           ..clear()
           ..addAll(textCtrls);
+        _textFocus
+          ..clear()
+          ..addAll(textFocus);
         _values
           ..clear()
           ..addAll(values);
@@ -1903,6 +1922,7 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
       child: InkWell(
         borderRadius: BorderRadius.circular(8),
         onTap: () {
+          final willExpand = !expanded;
           setState(() {
             // 同分区只展开一个，减少编辑区堆叠。
             for (final n in _nodeSections()
@@ -1912,6 +1932,13 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
             }
           });
           _schedulePersistSession();
+          if (willExpand) {
+            final canBypass = node.bypassWhenDisabled;
+            final on = canBypass
+                ? (_enabled[node.nodeId] ?? node.defaultEnabled)
+                : true;
+            if (on) _focusFirstTextFieldOf(node);
+          }
         },
         child: Padding(
           padding: const EdgeInsets.fromLTRB(8, 6, 6, 6),
@@ -2053,6 +2080,48 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
     );
   }
 
+  bool _isTextInputField(ComfyExposedField field) =>
+      field.widget == ComfyWidgetKind.multiline ||
+      field.widget == ComfyWidgetKind.text ||
+      field.widget == ComfyWidgetKind.int ||
+      field.widget == ComfyWidgetKind.float ||
+      field.widget == ComfyWidgetKind.choice;
+
+  void _focusFirstTextFieldOf(ComfyExposedNode node) {
+    String? fieldId;
+    FocusNode? target;
+    for (final field in node.fields) {
+      if (!_isTextInputField(field)) continue;
+      final fn = _textFocus[field.id];
+      if (fn != null) {
+        fieldId = field.id;
+        target = fn;
+        break;
+      }
+    }
+    if (target == null || fieldId == null) return;
+    final focus = target;
+    final id = fieldId;
+
+    void placeCaretAtEnd() {
+      final ctrl = _textCtrls[id];
+      if (ctrl == null) return;
+      final len = ctrl.text.length;
+      ctrl.selection = TextSelection.collapsed(offset: len);
+    }
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      focus.requestFocus();
+      placeCaretAtEnd();
+      // 桌面端获焦后常会再触发一次全选，补一帧把光标放回末尾。
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || !focus.hasFocus) return;
+        placeCaretAtEnd();
+      });
+    });
+  }
+
   bool _isWideField(ComfyExposedField field) =>
       field.widget.isMedia || field.widget == ComfyWidgetKind.multiline;
 
@@ -2148,6 +2217,7 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
           padding: const EdgeInsets.only(bottom: 8),
           child: TextField(
             controller: _textCtrls[field.id],
+            focusNode: _textFocus[field.id],
             maxLines: 4,
             onChanged: (_) => _schedulePersistSession(),
             decoration: InputDecoration(
@@ -2170,6 +2240,7 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
           padding: const EdgeInsets.only(bottom: 8),
           child: TextField(
             controller: _textCtrls[field.id],
+            focusNode: _textFocus[field.id],
             onChanged: (_) => _schedulePersistSession(),
             keyboardType: field.widget == ComfyWidgetKind.int ||
                     field.widget == ComfyWidgetKind.float
