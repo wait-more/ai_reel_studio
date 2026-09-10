@@ -753,6 +753,7 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
   }
 
   /// 将当前模板的节点参数与 bypass 使能复制到其它 Comfy 实例，便于并行同跑。
+  /// 注意：种子会在各自点击「生成」提交时重新随机，不会沿用同一 seed 出同片。
   Future<void> _twinTaskToOtherServer() async {
     final template = _selected;
     if (template == null) return;
@@ -1116,6 +1117,18 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
         runtimeValues,
         enabledByNode: enabledByNode,
       );
+      // 每次提交都换新种子，避免孪生/同参多 URL 得到完全相同的视频。
+      final seeds = ComfyDiscover.randomizeSeedInputs(prompt);
+      if (seeds.isNotEmpty) {
+        final preview = seeds.entries
+            .take(3)
+            .map((e) => '${e.key}=${e.value}')
+            .join(', ');
+        _mutateJob(job.id, (j) {
+          j.detail =
+              '提交工作流… 种子 ${seeds.length} 处已随机${preview.isEmpty ? '' : '（$preview）'}';
+        });
+      }
       final history = await client.runPrompt(
         prompt,
         cancelToken: cancel,

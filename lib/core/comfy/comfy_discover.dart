@@ -1,8 +1,22 @@
+import 'dart:math';
+
 import 'comfy_models.dart';
 
 /// 从 ComfyUI API Format workflow 扫描可编辑输入。
 class ComfyDiscover {
   ComfyDiscover._();
+
+  static final _seedRandom = Random();
+
+  /// 是否为种子类输入键（提交前应重新随机，避免多实例同参出同片）。
+  static bool isSeedInputKey(String key) {
+    final k = key.toLowerCase();
+    return k == 'seed' || k == 'noise_seed';
+  }
+
+  /// 生成 Comfy 常用范围内的新种子。
+  static int newSeed([Random? random]) =>
+      (random ?? _seedRandom).nextInt(0x7fffffff);
 
   /// 「人常改」的字段；向导「仅常见」筛选用。媒体加载器 / Primitive 一律算常见。
   static bool isCommonCandidate(ComfyInputCandidate c) {
@@ -353,6 +367,33 @@ class ComfyDiscover {
     }
 
     return copy;
+  }
+
+  /// 将工作流中所有数值型 `seed` / `noise_seed` 换成新随机值（跳过节点连线）。
+  ///
+  /// 应在 [applyExposedValues] 之后、提交 `/prompt` 之前调用：
+  /// 否则任务孪生或未暴露的烘焙种子会让多 URL 生成出完全相同的结果。
+  /// 返回被改写的 `nodeId.inputKey -> seed`。
+  static Map<String, int> randomizeSeedInputs(Map<String, dynamic> workflow) {
+    final used = <String, int>{};
+    for (final entry in workflow.entries) {
+      final nodeId = entry.key;
+      final node = entry.value;
+      if (node is! Map) continue;
+      final inputs = node['inputs'];
+      if (inputs is! Map) continue;
+      for (final key in List<Object?>.from(inputs.keys)) {
+        final inputKey = key?.toString() ?? '';
+        if (!isSeedInputKey(inputKey)) continue;
+        final current = inputs[key];
+        // Comfy 节点连线形如 [nodeId, slot]，不能当种子改。
+        if (current is List) continue;
+        final seed = newSeed();
+        inputs[key] = seed;
+        used['$nodeId.$inputKey'] = seed;
+      }
+    }
+    return used;
   }
 
   /// 删除节点，并清除其它节点里指向它的输入（可选参考口直接拿掉）。
