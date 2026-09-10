@@ -80,7 +80,62 @@ class _MainLayoutState extends ConsumerState<MainLayout> {
         ctx.findAncestorWidgetOfExactType<AlertDialog>() != null;
   }
 
-  /// 文件操作快捷键由主布局统一发出，避免焦点不在树/物料子树时 CallbackShortcuts 失效。
+  /// 文件操作快捷键：在 [Focus.onKeyEvent] 里处理。
+  /// 打字/弹窗时必须返回 [KeyEventResult.ignored]，否则会吞掉事件，
+  /// 导致文档编辑器的 Ctrl+C/V/A、Delete、Enter 等默认快捷键失效。
+  KeyEventResult _handleFsKeyEvent(FocusNode node, KeyEvent event) {
+    if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
+      return KeyEventResult.ignored;
+    }
+    if (_isTypingInTextField() || _isInModalDialog()) {
+      return KeyEventResult.ignored;
+    }
+
+    final key = event.logicalKey;
+    final ctrl = HardwareKeyboard.instance.isControlPressed ||
+        HardwareKeyboard.instance.isMetaPressed;
+
+    if (key == LogicalKeyboardKey.delete) {
+      _dispatchFsShortcut('delete');
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.f2) {
+      _dispatchFsShortcut('rename');
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.enter ||
+        key == LogicalKeyboardKey.numpadEnter) {
+      _dispatchFsShortcut('open');
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.escape) {
+      _dispatchFsShortcut('escape');
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.backspace) {
+      _dispatchFsShortcut('backspace');
+      return KeyEventResult.handled;
+    }
+    if (ctrl && key == LogicalKeyboardKey.keyC) {
+      _dispatchFsShortcut('copy');
+      return KeyEventResult.handled;
+    }
+    if (ctrl && key == LogicalKeyboardKey.keyX) {
+      _dispatchFsShortcut('cut');
+      return KeyEventResult.handled;
+    }
+    if (ctrl && key == LogicalKeyboardKey.keyV) {
+      _dispatchFsShortcut('paste');
+      return KeyEventResult.handled;
+    }
+    if (ctrl && key == LogicalKeyboardKey.keyA) {
+      _dispatchFsShortcut('selectAll');
+      return KeyEventResult.handled;
+    }
+    return KeyEventResult.ignored;
+  }
+
+  /// 文件操作快捷键由主布局统一发出，避免焦点不在树/物料子树时收不到键。
   void _dispatchFsShortcut(String action) {
     if (_isTypingInTextField()) return;
     // 确认框等弹窗打开时，把 Enter/快捷键留给弹窗按钮。
@@ -117,37 +172,17 @@ class _MainLayoutState extends ConsumerState<MainLayout> {
 
     return CallbackShortcuts(
       bindings: {
-        // Ctrl+P：全局搜索
+        // Ctrl+P：全局搜索（编辑器内也可用）
         const SingleActivator(LogicalKeyboardKey.keyP, control: true):
             (() {
           showGlobalSearch(context);
         }),
         // 当前文件/选区引用 → 智能体输入区（不回车）；组合键可在设置中改
         agentChord.toActivator(): _sendAgentReference,
-        // 文件操作：交由目录树 / 物料栏按最近活动面板消费
-        const SingleActivator(LogicalKeyboardKey.delete): () =>
-            _dispatchFsShortcut('delete'),
-        const SingleActivator(LogicalKeyboardKey.keyC, control: true): () =>
-            _dispatchFsShortcut('copy'),
-        const SingleActivator(LogicalKeyboardKey.keyX, control: true): () =>
-            _dispatchFsShortcut('cut'),
-        const SingleActivator(LogicalKeyboardKey.keyV, control: true): () =>
-            _dispatchFsShortcut('paste'),
-        const SingleActivator(LogicalKeyboardKey.f2): () =>
-            _dispatchFsShortcut('rename'),
-        const SingleActivator(LogicalKeyboardKey.enter): () =>
-            _dispatchFsShortcut('open'),
-        const SingleActivator(LogicalKeyboardKey.numpadEnter): () =>
-            _dispatchFsShortcut('open'),
-        const SingleActivator(LogicalKeyboardKey.escape): () =>
-            _dispatchFsShortcut('escape'),
-        const SingleActivator(LogicalKeyboardKey.keyA, control: true): () =>
-            _dispatchFsShortcut('selectAll'),
-        const SingleActivator(LogicalKeyboardKey.backspace): () =>
-            _dispatchFsShortcut('backspace'),
       },
       child: Focus(
         autofocus: true,
+        onKeyEvent: _handleFsKeyEvent,
         child: LayoutBuilder(
       builder: (context, constraints) {
         // 首次布局：中间栏 / Shell = 6 / 4

@@ -4,6 +4,7 @@ import 'dart:math' as math;
 import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -12,6 +13,7 @@ import '../../core/comfy_prompt_bridge.dart';
 import '../../core/providers.dart';
 import '../../core/toast.dart';
 import '../../core/workspace_memory.dart';
+import 'ime_geometry.dart';
 import 'line_number_gutter.dart';
 import 'line_selection_overlay.dart';
 import 'markdown_highlight_controller.dart';
@@ -248,6 +250,12 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
   /// 恢复选区时忽略 controller 回调，避免记忆被冲掉。
   bool _freezeSelection = false;
 
+  /// IME 几何多帧补报是否已挂起。
+  bool _imeSyncScheduled = false;
+  int _imeSyncFramesLeft = 0;
+  TextSelection? _lastImeSelection;
+  TextRange _lastImeComposing = TextRange.empty;
+
   static const _editorPadding = EdgeInsets.all(8);
   static const _lineHeightFactor = 1.6;
 
@@ -277,9 +285,53 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
         _controller.selection = pin;
         _freezeSelection = false;
       }
+      _scheduleImeGeometrySync(frames: 4, urgent: true);
     }
     // 失焦时改为叠加层绘制选区；获焦时去掉叠加层
     if (mounted) setState(() {});
+  }
+
+  void _pushImeGeometryNow() {
+    if (!_editorFocus.hasFocus) return;
+    // 组字中绝不覆盖，交给框架。
+    if (_controller.value.isComposingRangeValid) return;
+    final editable = findRenderEditable(
+      _editorFieldKey.currentContext?.findRenderObject(),
+    );
+    if (editable != null) {
+      syncImeGeometryToPlatform(editable, _controller.value);
+    }
+  }
+
+  void _scheduleImeGeometrySync({int frames = 1, bool urgent = false}) {
+    if (!_editorFocus.hasFocus) return;
+    if (urgent) {
+      _pushImeGeometryNow();
+      // 尽快出下一帧，避免「刚挪光标就组字」仍用上一处缓存矩形。
+      SchedulerBinding.instance.scheduleFrame();
+    }
+    _imeSyncFramesLeft = math.max(_imeSyncFramesLeft, frames);
+    if (_imeSyncScheduled) return;
+    _imeSyncScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback(_onImeSyncFrame);
+  }
+
+  void _onImeSyncFrame(Duration _) {
+    _imeSyncScheduled = false;
+    if (!mounted || !_editorFocus.hasFocus) {
+      _imeSyncFramesLeft = 0;
+      return;
+    }
+    // 组字过程中不要盖 EditableText 自己的上报，否则容易把候选推到错误行首。
+    if (!_controller.value.isComposingRangeValid) {
+      _pushImeGeometryNow();
+    }
+    _imeSyncFramesLeft -= 1;
+    if (_imeSyncFramesLeft > 0) {
+      _imeSyncScheduled = true;
+      WidgetsBinding.instance.addPostFrameCallback(_onImeSyncFrame);
+      SchedulerBinding.instance.scheduleFrame();
+    }
   }
 
   /// 当前应展示/恢复的非空选区。
@@ -320,6 +372,29 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
           _rememberedRange = null;
         }
       }
+    }
+    // 仅在「未组字」时主动同步：清掉旧光标处的 IME 缓存。
+    // 组字中交给 EditableText 自己上报，避免错误覆盖把候选钉在后面行首。
+    if (_editorFocus.hasFocus) {
+      final value = _controller.value;
+      final composing = value.isComposingRangeValid;
+      final sel = value.selection;
+      final wasComposing =
+          _lastImeComposing.isValid && !_lastImeComposing.isCollapsed;
+      final selMoved = _lastImeSelection == null ||
+          _lastImeSelection!.baseOffset != sel.baseOffset ||
+          _lastImeSelection!.extentOffset != sel.extentOffset;
+      final composingEnded = !composing && wasComposing;
+
+      _lastImeSelection = sel;
+      _lastImeComposing = value.composing;
+
+      if (!composing && (selMoved || composingEnded)) {
+        _scheduleImeGeometrySync(frames: 4, urgent: true);
+      }
+
+      // 组字中：不做任何 setState（含行号），保持 RenderEditable 布局稳定。
+      if (composing) return;
     }
     _refreshCaretLine();
     _scheduleOutlineRebuild();
@@ -1229,7 +1304,13 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
                                 controller: _controller,
                                 focusNode: _editorFocus,
                                 onChanged: (_) {
-                                  setState(() => _isDirty = true);
+                                  // 组字过程中不要 setState；已脏时也不要反复重建。
+                                  if (_controller.value.isComposingRangeValid) {
+                                    return;
+                                  }
+                                  if (!_isDirty) {
+                                    setState(() => _isDirty = true);
+                                  }
                                   ref
                                       .read(dirtyFilesProvider.notifier)
                                       .update((s) {

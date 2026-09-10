@@ -99,6 +99,8 @@ class _MdColors {
 /// 把整段 Markdown 源码着色为 [TextSpan]。
 ///
 /// **必须保持与 [src] 字符一一对应**（含所有标记符），否则光标会错位。
+/// 编辑态高亮只改颜色，不改 fontWeight / fontStyle / backgroundColor / fontFamily，
+/// 避免不同文档在光标处度量不一致，导致 Windows IME 首个拼音候选框位置漂移。
 TextSpan highlightMarkdown(
   String src, {
   TextStyle? base,
@@ -125,11 +127,7 @@ TextSpan highlightMarkdown(
       } else {
         spans.add(TextSpan(
           text: line,
-          style: TextStyle(
-            color: c.code,
-            fontFamily: 'Consolas',
-            backgroundColor: c.codeBg,
-          ),
+          style: TextStyle(color: c.code),
         ));
       }
       continue;
@@ -159,11 +157,7 @@ TextSpan _fenceOpeningLine(String line, RegExpMatch m, _MdColors c) {
     if (lang.isNotEmpty)
       TextSpan(
         text: lang,
-        style: TextStyle(
-          color: c.fenceLang,
-          fontWeight: FontWeight.w600,
-          fontFamily: 'Consolas',
-        ),
+        style: TextStyle(color: c.fenceLang),
       ),
   ]);
 }
@@ -181,18 +175,14 @@ TextSpan _fenceClosingLine(String line, _MdColors c) {
 }
 
 TextSpan _highlightLine(String line, TextStyle? base, _MdColors c) {
-  // ATX 标题：# 标记淡色，标题文字加粗着色（按级别微调）
+  // ATX 标题：# 标记淡色，标题文字着色（不加粗，避免改动字形宽度）
   final h = RegExp(r'^(#{1,6})(\s+)(.*)$').firstMatch(line);
   if (h != null) {
-    final level = h.group(1)!.length;
-    final titleStyle = TextStyle(
-      color: c.heading,
-      fontWeight: level <= 2 ? FontWeight.w700 : FontWeight.w600,
-    );
+    final titleStyle = TextStyle(color: c.heading);
     return TextSpan(children: [
       TextSpan(
         text: h.group(1),
-        style: TextStyle(color: c.headingPunct, fontWeight: FontWeight.w700),
+        style: TextStyle(color: c.headingPunct),
       ),
       TextSpan(text: h.group(2)),
       _inline(h.group(3)!, titleStyle, c),
@@ -205,11 +195,11 @@ TextSpan _highlightLine(String line, TextStyle? base, _MdColors c) {
     return TextSpan(children: [
       TextSpan(
         text: q.group(1),
-        style: TextStyle(color: c.punct, fontWeight: FontWeight.w600),
+        style: TextStyle(color: c.punct),
       ),
       _inline(
         q.group(2)!,
-        TextStyle(color: c.quote, fontStyle: FontStyle.italic),
+        TextStyle(color: c.quote),
         c,
       ),
     ]);
@@ -219,7 +209,7 @@ TextSpan _highlightLine(String line, TextStyle? base, _MdColors c) {
   if (RegExp(r'^\s*(?:-{3,}|\*{3,}|_{3,})\s*$').hasMatch(line)) {
     return TextSpan(
       text: line,
-      style: TextStyle(color: c.hr, fontWeight: FontWeight.w700),
+      style: TextStyle(color: c.hr),
     );
   }
 
@@ -238,25 +228,19 @@ TextSpan _highlightLine(String line, TextStyle? base, _MdColors c) {
       TextSpan(text: task.group(1)),
       TextSpan(
         text: task.group(2),
-        style: TextStyle(color: c.list, fontWeight: FontWeight.w700),
+        style: TextStyle(color: c.list),
       ),
       TextSpan(text: task.group(3)),
       TextSpan(text: '[', style: TextStyle(color: c.punct)),
       TextSpan(
         text: task.group(4),
-        style: TextStyle(
-          color: c.task,
-          fontWeight: FontWeight.w700,
-          decoration: checked ? TextDecoration.lineThrough : null,
-        ),
+        style: TextStyle(color: checked ? c.strike : c.task),
       ),
       TextSpan(text: ']', style: TextStyle(color: c.punct)),
       TextSpan(text: task.group(5)),
       _inline(
         task.group(6)!,
-        checked
-            ? TextStyle(color: c.strike, decoration: TextDecoration.lineThrough)
-            : base,
+        checked ? TextStyle(color: c.strike) : base,
         c,
       ),
     ]);
@@ -268,7 +252,7 @@ TextSpan _highlightLine(String line, TextStyle? base, _MdColors c) {
       TextSpan(text: li.group(1)),
       TextSpan(
         text: li.group(2),
-        style: TextStyle(color: c.list, fontWeight: FontWeight.w700),
+        style: TextStyle(color: c.list),
       ),
       TextSpan(text: li.group(3)),
       _inline(li.group(4)!, base, c),
@@ -283,7 +267,7 @@ TextSpan _tableLine(String line, TextStyle? base, _MdColors c) {
   if (RegExp(r'^\s*\|?[\s:|-]+\|[\s:|-]*$').hasMatch(line)) {
     return TextSpan(
       text: line,
-      style: TextStyle(color: c.table, fontFamily: 'Consolas'),
+      style: TextStyle(color: c.table),
     );
   }
 
@@ -368,11 +352,7 @@ List<InlineSpan> _styleInlineMatch(
       TextSpan(text: '[', style: TextStyle(color: c.punct)),
       TextSpan(
         text: t,
-        style: TextStyle(
-          color: c.linkText,
-          decoration: TextDecoration.underline,
-          decorationColor: c.linkText.withValues(alpha: 0.45),
-        ),
+        style: TextStyle(color: c.linkText),
       ),
       TextSpan(text: '](', style: TextStyle(color: c.punct)),
       TextSpan(text: url, style: TextStyle(color: c.linkUrl)),
@@ -395,11 +375,7 @@ List<InlineSpan> _styleInlineMatch(
       TextSpan(text: '`', style: TextStyle(color: c.punct)),
       TextSpan(
         text: m.group(7),
-        style: TextStyle(
-          color: c.code,
-          fontFamily: 'Consolas',
-          backgroundColor: c.codeBg,
-        ),
+        style: TextStyle(color: c.code),
       ),
       TextSpan(text: '`', style: TextStyle(color: c.punct)),
     ];
@@ -414,11 +390,7 @@ List<InlineSpan> _styleInlineMatch(
       TextSpan(text: mark, style: TextStyle(color: c.punct)),
       TextSpan(
         text: body,
-        style: TextStyle(
-          color: c.bold,
-          fontWeight: FontWeight.w700,
-          fontStyle: FontStyle.italic,
-        ),
+        style: TextStyle(color: c.bold),
       ),
       TextSpan(text: mark, style: TextStyle(color: c.punct)),
     ];
@@ -433,7 +405,7 @@ List<InlineSpan> _styleInlineMatch(
       TextSpan(text: mark, style: TextStyle(color: c.punct)),
       TextSpan(
         text: body,
-        style: TextStyle(color: c.bold, fontWeight: FontWeight.w700),
+        style: TextStyle(color: c.bold),
       ),
       TextSpan(text: mark, style: TextStyle(color: c.punct)),
     ];
@@ -445,10 +417,7 @@ List<InlineSpan> _styleInlineMatch(
       TextSpan(text: '~~', style: TextStyle(color: c.punct)),
       TextSpan(
         text: m.group(12),
-        style: TextStyle(
-          color: c.strike,
-          decoration: TextDecoration.lineThrough,
-        ),
+        style: TextStyle(color: c.strike),
       ),
       TextSpan(text: '~~', style: TextStyle(color: c.punct)),
     ];
@@ -463,7 +432,7 @@ List<InlineSpan> _styleInlineMatch(
       TextSpan(text: mark, style: TextStyle(color: c.punct)),
       TextSpan(
         text: body,
-        style: TextStyle(color: c.italic, fontStyle: FontStyle.italic),
+        style: TextStyle(color: c.italic),
       ),
       TextSpan(text: mark, style: TextStyle(color: c.punct)),
     ];
@@ -475,10 +444,7 @@ List<InlineSpan> _styleInlineMatch(
       TextSpan(text: '==', style: TextStyle(color: c.punct)),
       TextSpan(
         text: m.group(15),
-        style: TextStyle(
-          color: c.bold,
-          backgroundColor: const Color(0x33E6C07B),
-        ),
+        style: TextStyle(color: c.bold),
       ),
       TextSpan(text: '==', style: TextStyle(color: c.punct)),
     ];
@@ -489,7 +455,7 @@ List<InlineSpan> _styleInlineMatch(
     return [
       TextSpan(
         text: full,
-        style: TextStyle(color: c.html, fontFamily: 'Consolas'),
+        style: TextStyle(color: c.html),
       ),
     ];
   }
