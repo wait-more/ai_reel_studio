@@ -12,8 +12,8 @@ import '../../core/toast.dart';
 /// 功能：
 /// - 音视频同步播放、暂停
 /// - 细粒度进度控制（毫秒级拖动/±5s 步进）
-/// - 快捷键：Ctrl+Shift+Home 提取首帧、Ctrl+Shift+End 提取末帧、
-///   Ctrl+S 截取当前帧
+/// - 快捷键：Esc 关闭、Ctrl+Shift+Home 提取首帧、Ctrl+Shift+End 提取末帧、
+///   Ctrl+S 截取当前帧、空格播放/暂停、←/→ ±5s
 /// - 截帧保存为 PNG 到媒体同目录，并通知 [onChanged] 刷新网格/树
 Future<void> showMediaPreviewDialog(
   BuildContext context, {
@@ -32,17 +32,44 @@ Future<void> showMediaPreviewDialog(
   );
 }
 
-/// 打开图片查看对话框（可缩放）。
+/// 打开图片查看对话框（可缩放；Esc 关闭）。
 void showImageViewerDialog(BuildContext context, String path) {
   showDialog(
     context: context,
-    builder: (_) => Dialog(
-      backgroundColor: Colors.black,
-      insetPadding: const EdgeInsets.all(24),
-      child: InteractiveViewer(
-        minScale: 0.5,
-        maxScale: 4,
-        child: Image.file(File(path), fit: BoxFit.contain),
+    barrierDismissible: true,
+    builder: (dialogCtx) => Focus(
+      autofocus: true,
+      onKeyEvent: (node, event) {
+        if (event is KeyDownEvent &&
+            event.logicalKey == LogicalKeyboardKey.escape) {
+          Navigator.pop(dialogCtx);
+          return KeyEventResult.handled;
+        }
+        return KeyEventResult.ignored;
+      },
+      child: Dialog(
+        backgroundColor: Colors.black,
+        insetPadding: const EdgeInsets.all(24),
+        child: Stack(
+          children: [
+            Center(
+              child: InteractiveViewer(
+                minScale: 0.5,
+                maxScale: 4,
+                child: Image.file(File(path), fit: BoxFit.contain),
+              ),
+            ),
+            Positioned(
+              top: 8,
+              right: 8,
+              child: IconButton(
+                tooltip: '关闭 (Esc)',
+                icon: const Icon(Icons.close, color: Colors.white70),
+                onPressed: () => Navigator.pop(dialogCtx),
+              ),
+            ),
+          ],
+        ),
       ),
     ),
   );
@@ -590,6 +617,10 @@ class _MediaPreviewDialogState extends State<MediaPreviewDialog> {
     final ctrl = HardwareKeyboard.instance.isControlPressed;
     final shift = HardwareKeyboard.instance.isShiftPressed;
 
+    if (event.logicalKey == LogicalKeyboardKey.escape) {
+      Navigator.pop(context);
+      return KeyEventResult.handled;
+    }
     if (ctrl && shift && event.logicalKey == LogicalKeyboardKey.home) {
       _firstFrame();
       return KeyEventResult.handled;
