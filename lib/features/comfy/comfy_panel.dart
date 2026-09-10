@@ -16,6 +16,7 @@ import '../../core/config.dart';
 import '../../core/path_ellipsis_text.dart';
 import '../../core/providers.dart';
 import '../../core/toast.dart';
+import '../media/media_hover_preview.dart';
 import 'comfy_template_library.dart';
 
 class _ComfyBundle {
@@ -1959,6 +1960,34 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
     );
   }
 
+  void _openOutputDirInAssets(String dir) {
+    final raw = dir.trim();
+    if (raw.isEmpty) {
+      showGlobalToast(context, '输出目录为空');
+      return;
+    }
+    final normalized = p.normalize(raw);
+    final d = Directory(normalized);
+    if (!d.existsSync()) {
+      showGlobalToast(context, '目录不存在：$normalized');
+      return;
+    }
+    ref.read(selectedDirProvider.notifier).state = normalized;
+    ref.read(contentModeProvider.notifier).state = 'assets';
+  }
+
+  void _revealJobOutputsInAssets(_ComfyJob job) {
+    if (job.outputs.isNotEmpty) {
+      ref.read(assetsRevealFilesProvider.notifier).state =
+          List<String>.from(job.outputs);
+    } else {
+      ref.read(assetsRevealFilesProvider.notifier).state = null;
+    }
+    _openOutputDirInAssets(job.outputDir);
+    // 同目录时 selectedDir 可能不变，主动刷一下以看到新文件。
+    ref.read(treeRefreshTickProvider.notifier).state++;
+  }
+
   Widget _buildJobCard(_ComfyJob job, ColorScheme cs) {
     final phaseLabel = switch (job.phase) {
       _ComfyJobPhase.preparing => '准备中',
@@ -1979,6 +2008,7 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
     };
     final progress = job.runStatus?.progressFraction;
     final time = TimeOfDay.fromDateTime(job.createdAt);
+    final muted = TextStyle(fontSize: 11, color: cs.onSurfaceVariant);
 
     return Container(
       padding: const EdgeInsets.all(10),
@@ -2021,7 +2051,7 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
               ),
               Text(
                 '${time.hour.toString().padLeft(2, '0')}:${time.minute.toString().padLeft(2, '0')}',
-                style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant),
+                style: muted,
               ),
               if (job.isActive)
                 TextButton(
@@ -2062,15 +2092,42 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
           Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(
-                '输出：',
-                style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant),
+              Padding(
+                padding: const EdgeInsets.only(top: 2),
+                child: Text('输出：', style: muted),
               ),
               Expanded(
-                child: PathEllipsisText(
-                  job.outputDir,
-                  maxLines: 2,
-                  style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant),
+                child: InkWell(
+                  onTap: () => _revealJobOutputsInAssets(job),
+                  borderRadius: BorderRadius.circular(4),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 2,
+                      vertical: 2,
+                    ),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Expanded(
+                          child: PathEllipsisText(
+                            job.outputDir,
+                            maxLines: 2,
+                            style: muted.copyWith(
+                              color: cs.primary,
+                              decoration: TextDecoration.underline,
+                              decorationColor:
+                                  cs.primary.withValues(alpha: 0.45),
+                            ),
+                          ),
+                        ),
+                        Icon(
+                          Icons.folder_open,
+                          size: 14,
+                          color: cs.primary.withValues(alpha: 0.85),
+                        ),
+                      ],
+                    ),
+                  ),
                 ),
               ),
             ],
@@ -2079,7 +2136,7 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
             const SizedBox(height: 2),
             PathEllipsisText(
               '文件名：${job.outputFileName}',
-              style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant),
+              style: muted,
             ),
           ],
           if (job.runStatus != null) ...[
@@ -2094,7 +2151,7 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
                 if (job.promptId != null)
                   '任务 ${job.promptId!.length > 10 ? '${job.promptId!.substring(0, 10)}…' : job.promptId}',
               ].join('  ·  '),
-              style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant),
+              style: muted,
             ),
           ],
           if (job.error != null) ...[
@@ -2105,11 +2162,14 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
             ),
           ],
           if (job.outputs.isNotEmpty) ...[
+            const SizedBox(height: 6),
+            Text('输出文件', style: muted.copyWith(fontWeight: FontWeight.w600)),
             const SizedBox(height: 4),
-            PathEllipsisText(
-              '输出文件：${job.outputs.map(p.basename).join('、')}',
-              maxLines: 2,
-              style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant),
+            ...job.outputs.map(
+              (path) => Padding(
+                padding: const EdgeInsets.only(bottom: 4),
+                child: MediaOutputFileRow(path: path, style: muted),
+              ),
             ),
           ],
         ],

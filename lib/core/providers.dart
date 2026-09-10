@@ -14,6 +14,9 @@ final selectedFileProvider = StateProvider<String?>((ref) => null);
 /// 当前选中的目录路径（用作物料网格视图）
 final selectedDirProvider = StateProvider<String?>((ref) => null);
 
+/// Comfy「在素材中打开」后，物料网格应高亮的文件路径（短命，选中后清空）。
+final assetsRevealFilesProvider = StateProvider<List<String>?>((ref) => null);
+
 /// 已打开的 Tab 文件路径列表
 final openTabsProvider = StateProvider<List<String>>((ref) => []);
 

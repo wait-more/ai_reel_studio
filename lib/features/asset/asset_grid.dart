@@ -6,6 +6,7 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:path/path.dart' as p;
 
 import '../../core/asset_panel_prefs.dart';
 import '../../core/config.dart';
@@ -363,6 +364,13 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
       if (next != _currentDir) {
         _initTo(next);
       }
+      _applyRevealSelection();
+    });
+    ref.listen(assetsRevealFilesProvider, (prev, next) {
+      if (next == null || next.isEmpty) return;
+      unawaited(_reload().then((_) {
+        if (mounted) _applyRevealSelection();
+      }));
     });
     // 左侧树发生结构变更（新增/删除/重命名等）时，同步重载当前目录。
     ref.listen(treeRefreshTickProvider, (prev, next) {
@@ -416,7 +424,42 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
     _history.add(dir);
     _historyIndex = 0;
     _selected.clear();
-    _reload();
+    _reload().then((_) {
+      if (mounted) _applyRevealSelection();
+    });
+  }
+
+  /// Comfy 跳转带来的待高亮文件。
+  void _applyRevealSelection() {
+    final reveal = ref.read(assetsRevealFilesProvider);
+    if (reveal == null || reveal.isEmpty) return;
+    final dir = _currentDir;
+    if (dir == null) return;
+
+    String norm(String s) =>
+        p.normalize(s).replaceAll('/', Platform.pathSeparator).toLowerCase();
+    final dirN = norm(dir);
+    final wanted = <String>{};
+    for (final f in reveal) {
+      final n = norm(f);
+      final parent = norm(p.dirname(f));
+      if (parent == dirN) wanted.add(n);
+    }
+    if (wanted.isEmpty) return;
+
+    final matched = <String>[];
+    for (final e in _entries) {
+      if (e is! File) continue;
+      if (wanted.contains(norm(e.path))) matched.add(e.path);
+    }
+    if (matched.isEmpty) return;
+
+    setState(() {
+      _selected
+        ..clear()
+        ..addAll(matched);
+    });
+    ref.read(assetsRevealFilesProvider.notifier).state = null;
   }
 
   Future<void> _reload() async {
