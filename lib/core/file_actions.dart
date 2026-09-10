@@ -30,7 +30,7 @@ Future<void> revealInExplorer(String path) async {
   }
 }
 
-/// 弹文本输入框，返回输入值（取消返回 null）。
+/// 弹文本输入框，返回输入值（取消返回 null）。支持回车确认。
 Future<String?> promptTextDialog(
   BuildContext context, {
   required String title,
@@ -47,6 +47,8 @@ Future<String?> promptTextDialog(
         autofocus: true,
         style: const TextStyle(fontSize: 13),
         decoration: InputDecoration(labelText: label, isDense: true),
+        textInputAction: TextInputAction.done,
+        onSubmitted: (_) => Navigator.pop(ctx, true),
       ),
       actions: [
         TextButton(
@@ -370,7 +372,31 @@ Future<int> importDroppedPaths(
   return ok;
 }
 
+/// 按系统资源管理器习惯拆分重命名：主名可编辑，后缀单独保留。
+({String stem, String ext}) _renameNameParts(
+  String fileName, {
+  required bool isDir,
+}) {
+  final base = p.basename(fileName);
+  if (isDir) return (stem: base, ext: '');
+  // `.gitignore` 这类隐藏文件：整段作为名称，不拆后缀。
+  if (base.startsWith('.') && !base.substring(1).contains('.')) {
+    return (stem: base, ext: '');
+  }
+  final ext = p.extension(base);
+  if (ext.isEmpty || ext == '.') {
+    final stem = ext == '.' ? base.substring(0, base.length - 1) : base;
+    return (stem: stem.isEmpty ? base : stem, ext: '');
+  }
+  final stem = base.substring(0, base.length - ext.length);
+  if (stem.isEmpty) return (stem: base, ext: '');
+  return (stem: stem, ext: ext);
+}
+
 /// 重命名文件/目录。成功返回新路径。
+///
+/// 文件：主名与后缀分开，编辑主名时不会误删后缀改掉格式（类似资源管理器）。
+/// 回车确认。
 Future<String?> renameEntityDialog(
   BuildContext context, {
   required String path,
@@ -379,11 +405,15 @@ Future<String?> renameEntityDialog(
 }) async {
   final entity = isDir ? Directory(path) : File(path);
   final oldName = p.basename(path);
-  final newName = await promptTextDialog(
-    context,
-    title: '重命名${isDir ? "文件夹" : "文件"}',
-    label: '',
-    initial: oldName,
+  final parts = _renameNameParts(oldName, isDir: isDir);
+
+  final newName = await showDialog<String>(
+    context: context,
+    builder: (ctx) => _RenameEntityDialog(
+      title: '重命名${isDir ? "文件夹" : "文件"}',
+      initialStem: parts.stem,
+      extension: parts.ext,
+    ),
   );
   if (newName == null || newName.trim().isEmpty || newName == oldName) {
     return null;
@@ -397,6 +427,107 @@ Future<String?> renameEntityDialog(
   }
   onDone?.call();
   return target;
+}
+
+class _RenameEntityDialog extends StatefulWidget {
+  const _RenameEntityDialog({
+    required this.title,
+    required this.initialStem,
+    required this.extension,
+  });
+
+  final String title;
+  final String initialStem;
+  /// 含前导点，如 `.mp4`；无后缀时为空。
+  final String extension;
+
+  @override
+  State<_RenameEntityDialog> createState() => _RenameEntityDialogState();
+}
+
+class _RenameEntityDialogState extends State<_RenameEntityDialog> {
+  late final TextEditingController _ctrl;
+  final _focus = FocusNode();
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = TextEditingController(text: widget.initialStem);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _focus.requestFocus();
+      _ctrl.selection = TextSelection(
+        baseOffset: 0,
+        extentOffset: _ctrl.text.length,
+      );
+    });
+  }
+
+  @override
+  void dispose() {
+    _focus.dispose();
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    final stem = _ctrl.text.trim();
+    if (stem.isEmpty) return;
+    // 后缀固定拼接，避免编辑主名时误改格式。
+    Navigator.of(context).pop('$stem${widget.extension}');
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final hasExt = widget.extension.isNotEmpty;
+    return AlertDialog(
+      title: Text(widget.title, style: const TextStyle(fontSize: 15)),
+      content: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          Expanded(
+            child: TextField(
+              controller: _ctrl,
+              focusNode: _focus,
+              autofocus: true,
+              style: const TextStyle(fontSize: 13),
+              decoration: InputDecoration(
+                labelText: hasExt ? '名称' : null,
+                isDense: true,
+                hintText: hasExt ? null : '名称',
+              ),
+              textInputAction: TextInputAction.done,
+              onSubmitted: (_) => _submit(),
+            ),
+          ),
+          if (hasExt) ...[
+            const SizedBox(width: 6),
+            Padding(
+              padding: const EdgeInsets.only(top: 12),
+              child: Text(
+                widget.extension,
+                style: TextStyle(
+                  fontSize: 13,
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ),
+          ],
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('取消'),
+        ),
+        FilledButton(
+          onPressed: _submit,
+          child: const Text('确定'),
+        ),
+      ],
+    );
+  }
 }
 
 /// 复制文件（自动避重名）。成功返回新路径。
