@@ -1,8 +1,14 @@
+import 'dart:async';
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:path/path.dart' as p;
+import 'package:window_manager/window_manager.dart';
 import '../../core/agent_bridge.dart';
 import '../../core/providers.dart';
+import '../../core/toast.dart';
 import '../../core/workspace_memory.dart';
 import '../settings/settings_page.dart';
 import '../tree/project_tree.dart';
@@ -19,11 +25,180 @@ class MainLayout extends ConsumerStatefulWidget {
   ConsumerState<MainLayout> createState() => _MainLayoutState();
 }
 
-class _MainLayoutState extends ConsumerState<MainLayout> {
+class _MainLayoutState extends ConsumerState<MainLayout> with WindowListener {
   double _treeWidth = 280;
   double? _shellWidth; // null = 未初始化，首次布局时默认中间栏/Shell = 6/4
   WorkspaceSnapshot? _lastWorkspaceSnap;
   int _fsShortcutNonce = 0;
+  bool _closePromptOpen = false;
+
+  @override
+  void initState() {
+    super.initState();
+    windowManager.addListener(this);
+    unawaited(windowManager.setPreventClose(true));
+  }
+
+  @override
+  void dispose() {
+    windowManager.removeListener(this);
+    final snap = _lastWorkspaceSnap;
+    if (snap != null) {
+      // 关闭前立刻落盘，避免去抖窗口内退出丢失最后一次状态
+      WorkspaceMemory.instance.saveNow(snap);
+    }
+    super.dispose();
+  }
+
+  @override
+  void onWindowClose() {
+    unawaited(_handleWindowClose());
+  }
+
+  Future<void> _allowWindowClose() async {
+    final snap = _lastWorkspaceSnap;
+    if (snap != null) {
+      try {
+        await WorkspaceMemory.instance.saveNow(snap);
+      } catch (_) {}
+    }
+    await windowManager.setPreventClose(false);
+    await windowManager.close();
+  }
+
+  Future<void> _handleWindowClose() async {
+    // setPreventClose(false) 后再 close 会再次触发本回调，直接放行。
+    final preventClose = await windowManager.isPreventClose();
+    if (!preventClose) return;
+    if (!mounted || _closePromptOpen) return;
+
+    final dirty = ref.read(dirtyFilesProvider);
+    if (dirty.isEmpty) {
+      await _allowWindowClose();
+      return;
+    }
+
+    _closePromptOpen = true;
+    try {
+      final paths = dirty.toList()..sort();
+      final names = paths.map(p.basename).toList();
+
+      final action = await showDialog<String>(
+        context: context,
+        barrierDismissible: false,
+        builder: (ctx) {
+          final scheme = Theme.of(ctx).colorScheme;
+          final show = names.length <= 4 ? names : names.take(3).toList();
+          return AlertDialog(
+            titlePadding: const EdgeInsets.fromLTRB(24, 20, 24, 0),
+            contentPadding: const EdgeInsets.fromLTRB(24, 12, 24, 4),
+            actionsPadding: const EdgeInsets.fromLTRB(12, 4, 12, 12),
+            title: Text(
+              names.length == 1 ? '文档未保存' : '${names.length} 个文档未保存',
+              style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+            ),
+            content: SizedBox(
+              width: 300,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  for (final name in show)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 6),
+                      child: Text(
+                        name,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 13,
+                          height: 1.3,
+                          color: scheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ),
+                  if (names.length > 4)
+                    Text(
+                      '另有 ${names.length - 3} 个…',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: scheme.outline,
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx, 'cancel'),
+                child: const Text('取消'),
+              ),
+              TextButton(
+                onPressed: () => Navigator.pop(ctx, 'discard'),
+                child: const Text('不保存'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(ctx, 'save'),
+                child: Text(names.length == 1 ? '保存' : '全部保存'),
+              ),
+            ],
+          );
+        },
+      );
+
+      if (!mounted) return;
+      if (action == 'save') {
+        await _saveAllDirty();
+        if (!mounted) return;
+        if (ref.read(dirtyFilesProvider).isEmpty) {
+          showGlobalToast(context, '已保存。请再次关闭程序');
+        } else {
+          showGlobalToast(context, '部分文档保存失败');
+        }
+      } else if (action == 'discard') {
+        // 先通知编辑器从磁盘恢复，再清草稿/脏标记，避免误把内存稿当已保存。
+        ref.read(discardUnsavedEditsTickProvider.notifier).state++;
+        ref.read(dirtyFilesProvider.notifier).state = {};
+        ref.read(draftContentsProvider.notifier).state = {};
+        showGlobalToast(context, '已放弃修改。请再次关闭程序');
+      }
+    } finally {
+      _closePromptOpen = false;
+    }
+  }
+
+  Future<void> _saveAllDirty() async {
+    final dirty = ref.read(dirtyFilesProvider).toList();
+    final saves = ref.read(saveActionsProvider);
+    for (final path in dirty) {
+      final save = saves[path];
+      if (save != null) {
+        try {
+          await save();
+        } catch (_) {}
+        continue;
+      }
+      final draft = ref.read(draftContentsProvider)[path];
+      if (draft == null) {
+        ref.read(dirtyFilesProvider.notifier).update((s) {
+          if (!s.contains(path)) return s;
+          return {...s}..remove(path);
+        });
+        continue;
+      }
+      try {
+        await File(path).writeAsString(draft);
+        ref.read(dirtyFilesProvider.notifier).update((s) {
+          if (!s.contains(path)) return s;
+          return {...s}..remove(path);
+        });
+        ref.read(draftContentsProvider.notifier).update((m) {
+          if (!m.containsKey(path)) return m;
+          return {...m}..remove(path);
+        });
+      } catch (_) {}
+    }
+  }
 
   void _persistWorkspace() {
     final snap = WorkspaceSnapshot(
@@ -36,16 +211,6 @@ class _MainLayoutState extends ConsumerState<MainLayout> {
     );
     _lastWorkspaceSnap = snap;
     WorkspaceMemory.instance.scheduleSave(snap);
-  }
-
-  @override
-  void dispose() {
-    final snap = _lastWorkspaceSnap;
-    if (snap != null) {
-      // 关闭前立刻落盘，避免去抖窗口内退出丢失最后一次状态
-      WorkspaceMemory.instance.saveNow(snap);
-    }
-    super.dispose();
   }
 
   void _sendAgentReference() {

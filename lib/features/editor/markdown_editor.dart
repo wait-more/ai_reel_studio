@@ -131,6 +131,10 @@ class MarkdownEditor extends ConsumerWidget {
       if (!s.contains(path)) return s;
       return {...s}..remove(path);
     });
+    ref.read(draftContentsProvider.notifier).update((m) {
+      if (!m.containsKey(path)) return m;
+      return {...m}..remove(path);
+    });
     if (selected == path) {
       ref.read(selectedFileProvider.notifier).state =
           newTabs.isNotEmpty ? newTabs.last : null;
@@ -145,35 +149,70 @@ class MarkdownEditor extends ConsumerWidget {
     }
 
     // 有未保存修改：弹确认对话框
+    final fileName = path.split(Platform.pathSeparator).last;
     final action = await showDialog<String>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('未保存的更改'),
-        content: Text('是否保存对“${path.split(Platform.pathSeparator).last}”的修改？'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, 'cancel'),
-            child: const Text('取消'),
+      builder: (ctx) {
+        final scheme = Theme.of(ctx).colorScheme;
+        return AlertDialog(
+          titlePadding: const EdgeInsets.fromLTRB(24, 20, 24, 0),
+          contentPadding: const EdgeInsets.fromLTRB(24, 12, 24, 4),
+          actionsPadding: const EdgeInsets.fromLTRB(12, 4, 12, 12),
+          title: const Text(
+            '文档未保存',
+            style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
           ),
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, 'discard'),
-            child: const Text('不保存'),
+          content: SizedBox(
+            width: 280,
+            child: Text(
+              fileName,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: 13,
+                height: 1.3,
+                color: scheme.onSurfaceVariant,
+              ),
+            ),
           ),
-          FilledButton(
-            onPressed: () => Navigator.pop(ctx, 'save'),
-            child: const Text('保存'),
-          ),
-        ],
-      ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, 'cancel'),
+              child: const Text('取消'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, 'discard'),
+              child: const Text('不保存'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(ctx, 'save'),
+              child: const Text('保存'),
+            ),
+          ],
+        );
+      },
     );
 
     if (action == null || action == 'cancel') return;
     if (action == 'save') {
       final save = ref.read(saveActionsProvider)[path];
-      if (save != null) await save();
+      if (save != null) {
+        await save();
+      } else {
+        final draft = ref.read(draftContentsProvider)[path];
+        if (draft != null) {
+          try {
+            await File(path).writeAsString(draft);
+          } catch (_) {}
+        }
+      }
       ref.read(dirtyFilesProvider.notifier).update((s) {
         if (!s.contains(path)) return s;
         return {...s}..remove(path);
+      });
+      ref.read(draftContentsProvider.notifier).update((m) {
+        if (!m.containsKey(path)) return m;
+        return {...m}..remove(path);
       });
     }
     _forceCloseTab(context, path, ref);
@@ -860,8 +899,11 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
 
     final file = File(widget.path);
     try {
-      final content = await file.readAsString();
+      final diskContent = await file.readAsString();
       if (!mounted) return;
+      final draft = ref.read(draftContentsProvider)[widget.path];
+      final content = draft ?? diskContent;
+      final dirty = draft != null;
       setState(() {
         _content = content;
         _controller.text = content;
@@ -869,8 +911,15 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
         _outline = isMarkdownDoc ? parseMarkdownOutline(content) : const [];
         _activeOutline = activeOutlineIndex(_outline, 0);
         _activeLine = 0;
+        _isDirty = dirty;
         _loading = false;
       });
+      if (dirty) {
+        ref.read(dirtyFilesProvider.notifier).update((s) {
+          if (s.contains(widget.path)) return s;
+          return {...s, widget.path};
+        });
+      }
       await _captureDiskFingerprint();
       _registerAgentRef();
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -964,6 +1013,12 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
         next.remove(widget.path);
         return next;
       });
+      ref.read(draftContentsProvider.notifier).update((m) {
+        if (!m.containsKey(widget.path)) return m;
+        final next = Map.of(m);
+        next.remove(widget.path);
+        return next;
+      });
       await _captureDiskFingerprint();
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('已保存'), duration: Duration(seconds: 1)),
@@ -988,6 +1043,16 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
         _flushPersistView();
       }
     } catch (_) {}
+    // 切走 Tab 时保留未保存正文，供退出或再次打开时使用
+    if (!_isDir && !_loading && _isDirty) {
+      final path = widget.path;
+      final text = _controller.text;
+      ref.read(draftContentsProvider.notifier).update((m) {
+        final next = Map.of(m);
+        next[path] = text;
+        return next;
+      });
+    }
     _controller.removeListener(_onControllerChanged);
     _editorFocus.removeListener(_onEditorFocusChanged);
     // 延后到下一帧移除保存注册，避免在 dispose 期间修改 provider
@@ -1000,8 +1065,41 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
     super.dispose();
   }
 
+  Future<void> _discardUnsavedEdits() async {
+    if (_isDir || _loading) return;
+    try {
+      final content = await File(widget.path).readAsString();
+      if (!mounted) return;
+      final caret = _controller.selection.extentOffset.clamp(0, content.length);
+      _freezeSelection = true;
+      setState(() {
+        _content = content;
+        _controller.value = TextEditingValue(
+          text: content,
+          selection: TextSelection.collapsed(offset: caret),
+        );
+        _lineCount = countLines(content);
+        _outline = isMarkdownDoc ? parseMarkdownOutline(content) : const [];
+        _activeLine = lineIndexOfOffset(content, caret);
+        _activeOutline = activeOutlineIndex(_outline, _activeLine);
+        _isDirty = false;
+        _rememberedRange = null;
+      });
+      _freezeSelection = false;
+      await _captureDiskFingerprint();
+      _diskConflictNotified = false;
+    } catch (_) {
+      if (mounted) setState(() => _isDirty = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
+    ref.listen<int>(discardUnsavedEditsTickProvider, (prev, next) {
+      if (prev == next) return;
+      unawaited(_discardUnsavedEdits());
+    });
+
     if (_loading) {
       return const Center(child: CircularProgressIndicator());
     }

@@ -65,6 +65,14 @@ void closeOpenDocumentsAffectedBy(
     };
   }
 
+  final drafts = container.read(draftContentsProvider);
+  if (drafts.keys.any(affected)) {
+    container.read(draftContentsProvider.notifier).state = {
+      for (final e in drafts.entries)
+        if (!affected(e.key)) e.key: e.value,
+    };
+  }
+
   final selected = container.read(selectedFileProvider);
   if (selected != null && affected(selected)) {
     container.read(selectedFileProvider.notifier).state =
@@ -188,6 +196,13 @@ final dirtyFilesProvider = StateProvider<Set<String>>((ref) => {});
 typedef SaveAction = Future<void> Function();
 final saveActionsProvider =
     StateProvider<Map<String, SaveAction>>((ref) => {});
+
+/// 切走 Tab 时暂存的未保存正文（path -> text），供退出时全部保存。
+final draftContentsProvider =
+    StateProvider<Map<String, String>>((ref) => {});
+
+/// 递增后各编辑器清除本地未保存标记（退出前选择「不保存」）。
+final discardUnsavedEditsTickProvider = StateProvider<int>((ref) => 0);
 
 /// 剧本/季/集 → 创作进度状态。setter 同步写回 SharedPreferences
 /// （key: episode_status:<path>）。
