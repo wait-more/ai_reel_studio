@@ -27,6 +27,7 @@ class TerminalSession extends ChangeNotifier {
   StreamSubscription<Uint8List>? _ptyOutputSub;
   bool _disposed = false;
   bool _wired = false;
+  bool _usePowerShell = true;
 
   /// 会话是否已启动（PTY 已 spawn）。
   bool get isRunning => _pty != null;
@@ -34,31 +35,122 @@ class TerminalSession extends ChangeNotifier {
   String? _workingDirectory;
   String? get workingDirectory => _workingDirectory;
 
-  /// 启动底层 shell（Windows 默认 PowerShell）。
+  /// 启动底层 shell（Windows：优先 PowerShell，失败则回退 cmd）。
   void start({String? executable, String? workingDirectory}) {
     if (_pty != null || _disposed) return;
     _workingDirectory = workingDirectory ?? _workingDirectory;
     final targetDir = _workingDirectory;
-    final isWindows = Platform.isWindows;
 
-    // Windows 默认用 PowerShell：它原生支持 UNC 作为当前位置，
-    // Set-Location 可直接切入共享目录且不创建网络盘符映射（无残留）。
-    final exe = executable ??
-        (Platform.isWindows
-            ? 'powershell.exe'
-            : (Platform.environment['SHELL'] ?? '/bin/bash'));
-
-    final env = Map<String, String>.from(Platform.environment);
-
-    // 布局前用 config 默认尺寸；视图就绪后 onResize 会更新 PTY。
     final cols = controller.config.cols;
     final rows = controller.config.rows;
+    final env = Map<String, String>.from(Platform.environment);
 
-    // Windows 的进程启动工作目录不支持 UNC 路径（会回退到系统盘）。
-    // 对 UNC，先以系统目录启动，再在 shell 就绪后通过 Set-Location 切入。
-    final isUnc = isWindows && (targetDir?.startsWith('\\\\') ?? false);
-    final ptyCwd = isUnc ? null : targetDir;
+    if (Platform.isWindows) {
+      _startWindows(
+        preferredExecutable: executable,
+        targetDir: targetDir,
+        cols: cols,
+        rows: rows,
+        env: env,
+      );
+    } else {
+      final exe = executable ??
+          (Platform.environment['SHELL'] ?? '/bin/bash');
+      _spawnPty(
+        exe: exe,
+        ptyCwd: _unixPtyCwd(targetDir),
+        cols: cols,
+        rows: rows,
+        env: env,
+      );
+      if (_pty != null) {
+        _scheduleEnterDirectory(targetDir);
+      }
+    }
+  }
 
+  void _startWindows({
+    required String? preferredExecutable,
+    required String? targetDir,
+    required int cols,
+    required int rows,
+    required Map<String, String> env,
+  }) {
+    // kyroon_pty on Windows used to widen UTF-8 byte-by-byte; non-ASCII
+    // cwd then broke CreateProcess. Prefer a safe cwd and always cd after.
+    final ptyCwd = _windowsSafePtyCwd(targetDir);
+
+    final attempts = <({String exe, bool powerShell})>[];
+    if (preferredExecutable != null && preferredExecutable.isNotEmpty) {
+      final ps = preferredExecutable.toLowerCase().contains('powershell') ||
+          preferredExecutable.toLowerCase().endsWith('pwsh.exe');
+      attempts.add((exe: preferredExecutable, powerShell: ps));
+    } else {
+      final ps = _windowsPowerShellPath();
+      final cmd = _windowsCmdPath();
+      if (ps != null) attempts.add((exe: ps, powerShell: true));
+      attempts.add((exe: cmd, powerShell: false));
+    }
+
+    Object? lastError;
+    for (final attempt in attempts) {
+      try {
+        _usePowerShell = attempt.powerShell;
+        _pty = Pty.start(
+          attempt.exe,
+          columns: cols,
+          rows: rows,
+          environment: env,
+          workingDirectory: ptyCwd,
+        );
+        lastError = null;
+        break;
+      } catch (e) {
+        lastError = e;
+        _pty = null;
+        // 若带 cwd 失败，再试一次不带 cwd（仍用同一 shell）
+        if (ptyCwd != null) {
+          try {
+            _pty = Pty.start(
+              attempt.exe,
+              columns: cols,
+              rows: rows,
+              environment: env,
+              workingDirectory: null,
+            );
+            lastError = null;
+            break;
+          } catch (e2) {
+            lastError = e2;
+            _pty = null;
+          }
+        }
+      }
+    }
+
+    if (_pty == null) {
+      writeText(
+        '无法启动终端。\r\n'
+        '原因: $lastError\r\n'
+        '请确认系统已安装 PowerShell 或命令提示符，'
+        '且项目目录可访问。\r\n',
+      );
+      return;
+    }
+
+    _wireController();
+    _attachPtyStreams();
+    _scheduleEnterDirectory(targetDir);
+    notifyListeners();
+  }
+
+  void _spawnPty({
+    required String exe,
+    required String? ptyCwd,
+    required int cols,
+    required int rows,
+    required Map<String, String> env,
+  }) {
     try {
       _pty = Pty.start(
         exe,
@@ -71,22 +163,16 @@ class TerminalSession extends ChangeNotifier {
       writeText('无法启动终端: $e\r\n');
       return;
     }
-
     _wireController();
+    _attachPtyStreams();
+    notifyListeners();
+  }
 
-    // 等 shell 就绪后，把工作目录切到目标目录。
-    if (targetDir != null && targetDir.isNotEmpty) {
-      Future<void>.delayed(const Duration(milliseconds: 400), () {
-        if (_pty == null || _disposed) return;
-        final cmd = Platform.isWindows
-            ? 'Set-Location "$targetDir"'
-            : 'cd "$targetDir"';
-        sendCommand(cmd);
-      });
-    }
+  void _attachPtyStreams() {
+    final pty = _pty;
+    if (pty == null) return;
 
-    // PTY 输出 → VT 引擎（原始字节，避免二次解码破坏序列）
-    _ptyOutputSub = _pty!.output.listen(
+    _ptyOutputSub = pty.output.listen(
       controller.write,
       onDone: () {
         if (!_disposed) writeText('\r\n[进程已退出]\r\n');
@@ -96,11 +182,86 @@ class TerminalSession extends ChangeNotifier {
       },
     );
 
-    _pty!.exitCode.then((code) {
+    pty.exitCode.then((code) {
       if (!_disposed) writeText('\r\n[进程已退出: $code]\r\n');
     });
+  }
 
-    notifyListeners();
+  void _scheduleEnterDirectory(String? targetDir) {
+    if (targetDir == null || targetDir.isEmpty) return;
+    Future<void>.delayed(const Duration(milliseconds: 400), () {
+      if (_pty == null || _disposed) return;
+      if (Platform.isWindows) {
+        if (_usePowerShell) {
+          final literal = "'${targetDir.replaceAll("'", "''")}'";
+          sendCommand('Set-Location -LiteralPath $literal');
+        } else {
+          final escaped = targetDir.replaceAll('"', '""');
+          if (targetDir.startsWith(r'\\')) {
+            sendCommand('pushd "$escaped"');
+          } else {
+            sendCommand('cd /d "$escaped"');
+          }
+        }
+      } else {
+        final escaped = targetDir.replaceAll('"', r'\"');
+        sendCommand('cd "$escaped"');
+      }
+    });
+  }
+
+  /// Only pass CreateProcess a cwd that survives the PTY layer.
+  static String? _windowsSafePtyCwd(String? targetDir) {
+    if (targetDir == null || targetDir.isEmpty) return null;
+    if (targetDir.startsWith(r'\\')) return null;
+    if (targetDir.codeUnits.any((c) => c > 127)) return null;
+    try {
+      final dir = Directory(targetDir);
+      if (!dir.existsSync()) return null;
+      return dir.absolute.path;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static String? _unixPtyCwd(String? targetDir) {
+    if (targetDir == null || targetDir.isEmpty) return null;
+    try {
+      final dir = Directory(targetDir);
+      if (!dir.existsSync()) return null;
+      return dir.absolute.path;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static String? _windowsPowerShellPath() {
+    final root = Platform.environment['SystemRoot'] ??
+        Platform.environment['windir'] ??
+        r'C:\Windows';
+    final candidates = [
+      '$root\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+      '$root\\SysWOW64\\WindowsPowerShell\\v1.0\\powershell.exe',
+    ];
+    for (final path in candidates) {
+      try {
+        if (File(path).existsSync()) return path;
+      } catch (_) {}
+    }
+    return null;
+  }
+
+  static String _windowsCmdPath() {
+    final root = Platform.environment['SystemRoot'] ??
+        Platform.environment['windir'] ??
+        r'C:\Windows';
+    final system32 = '$root\\System32\\cmd.exe';
+    try {
+      if (File(system32).existsSync()) return system32;
+    } catch (_) {}
+    final comspec = Platform.environment['COMSPEC'];
+    if (comspec != null && comspec.isNotEmpty) return comspec;
+    return 'cmd.exe';
   }
 
   void _wireController() {

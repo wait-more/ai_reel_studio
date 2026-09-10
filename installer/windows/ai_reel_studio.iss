@@ -17,6 +17,7 @@
 #endif
 
 [Setup]
+; {{…} → 字面量 {…}（与已发布安装包 AppId 保持一致，勿改）
 AppId={{A1B2C3D4-E5F6-4789-ABCD-AIREELSTUDIO01}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
@@ -24,6 +25,10 @@ AppPublisher={#MyAppPublisher}
 DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
+; 已安装时默认沿用上次目录，并隐藏目录页（未装过仍显示）
+UsePreviousAppDir=yes
+UsePreviousPrivileges=yes
+DisableDirPage=auto
 OutputDir={#MyOutputDir}
 OutputBaseFilename=AIReelStudio-{#MyAppVersion}-Setup
 SetupIconFile=..\..\windows\runner\resources\app_icon.ico
@@ -32,8 +37,9 @@ SolidCompression=yes
 WizardStyle=modern
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
-PrivilegesRequired=lowest
-PrivilegesRequiredOverridesAllowed=dialog
+; 与现网安装一致：写入 HKLM，升级才能识别 Program Files 下的旧版
+PrivilegesRequired=admin
+UninstallDisplayIcon={app}\{#MyAppExeName}
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -44,12 +50,12 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 [Files]
 ; 排除调试符号与本地痕迹（不限定必须是 Release）
 Source: "{#MyReleaseDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "*.pdb,.aireel*,*.log,*.tmp"
-; 单独安装图标，供快捷方式显式引用（避免 shell 对 exe 路径的旧图标缓存）
-Source: "..\..\windows\runner\resources\app_icon.ico"; DestDir: "{app}"; DestName: "app_icon.ico"; Flags: ignoreversion
 
 [Icons]
-Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\app_icon.ico"
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\app_icon.ico"; Tasks: desktopicon
+; 使用 exe 内嵌图标，避免单独 IconFilename 在部分环境触发 ShellExecuteEx(87)
+; PrivilegesRequired=lowest 时用 {autoprograms}/{autodesktop} 更稳妥
+Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
