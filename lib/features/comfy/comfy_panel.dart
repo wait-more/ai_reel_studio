@@ -2267,6 +2267,19 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
     return ComfyNodeGroup.labelWithPins(node.label, consumers);
   }
 
+  /// 节点上可本地预览的媒体绝对路径（已存在的文件）。
+  List<String> _nodePreviewableMediaPaths(ComfyExposedNode node) {
+    final out = <String>[];
+    for (final field in node.fields) {
+      if (!field.widget.isMedia) continue;
+      final path = _values[field.id]?.toString().trim() ?? '';
+      if (MediaHoverPreviewIcon.canPreview(path)) {
+        out.add(path);
+      }
+    }
+    return out;
+  }
+
   Widget _buildNodeTile(
     ComfyExposedNode node, {
     required int category,
@@ -2280,74 +2293,92 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
     final expanded = _expanded[node.nodeId] ?? false;
     final displayLabel = _nodeDisplayLabel(node);
     final preview = _nodeValuePreview(node);
+    final mediaPaths = _nodePreviewableMediaPaths(node);
 
+    void toggleExpand() {
+      final willExpand = !expanded;
+      setState(() {
+        // 同分区只展开一个，减少编辑区堆叠。
+        for (final n in _nodeSections()
+            .firstWhere((s) => s.category == category)
+            .nodes) {
+          _expanded[n.nodeId] = n.nodeId == node.nodeId ? !expanded : false;
+        }
+      });
+      _schedulePersistSession();
+      if (willExpand) {
+        final canBypass = node.bypassWhenDisabled;
+        final on = canBypass
+            ? (_enabled[node.nodeId] ?? node.defaultEnabled)
+            : true;
+        if (on) _focusFirstTextFieldOf(node);
+      }
+    }
+
+    // 左侧 InkWell 展开；右侧预览图标在 Expanded 外固定宽度，
+    // 标题/副标题 ellipsis 按剩余宽度计算，不与图标抢宽。
     final tile = Material(
       color: expanded
           ? cs.primaryContainer.withValues(alpha: 0.45)
           : cs.surfaceContainerHighest,
       borderRadius: BorderRadius.circular(8),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(8),
-        onTap: () {
-          final willExpand = !expanded;
-          setState(() {
-            // 同分区只展开一个，减少编辑区堆叠。
-            for (final n in _nodeSections()
-                .firstWhere((s) => s.category == category)
-                .nodes) {
-              _expanded[n.nodeId] = n.nodeId == node.nodeId ? !expanded : false;
-            }
-          });
-          _schedulePersistSession();
-          if (willExpand) {
-            final canBypass = node.bypassWhenDisabled;
-            final on = canBypass
-                ? (_enabled[node.nodeId] ?? node.defaultEnabled)
-                : true;
-            if (on) _focusFirstTextFieldOf(node);
-          }
-        },
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(8, 6, 6, 6),
-          child: Row(
-            children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      displayLabel,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        fontWeight: FontWeight.w600,
-                        fontSize: 12,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(8, 6, 6, 6),
+        child: Row(
+          children: [
+            Expanded(
+              child: InkWell(
+                borderRadius: BorderRadius.circular(6),
+                onTap: toggleExpand,
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 2),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        displayLabel,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontWeight: FontWeight.w600,
+                          fontSize: 12,
+                        ),
                       ),
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      preview.isEmpty ? '未填写' : preview,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        fontSize: 10,
-                        color: cs.onSurfaceVariant,
+                      const SizedBox(height: 2),
+                      Text(
+                        preview.isEmpty ? '未填写' : preview,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 10,
+                          color: cs.onSurfaceVariant,
+                        ),
                       ),
-                    ),
-                  ],
-                ),
-              ),
-              if (canBypass)
-                SizedBox(
-                  height: 28,
-                  child: Switch(
-                    value: on,
-                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                    onChanged: (v) => _setNodeEnabled(node.nodeId, v),
+                    ],
                   ),
                 ),
-            ],
-          ),
+              ),
+            ),
+            for (final path in mediaPaths.take(3))
+              MediaHoverPreviewIcon(path: path),
+            if (mediaPaths.length > 3)
+              Padding(
+                padding: const EdgeInsets.only(right: 2),
+                child: Text(
+                  '+',
+                  style: TextStyle(fontSize: 10, color: cs.onSurfaceVariant),
+                ),
+              ),
+            if (canBypass)
+              SizedBox(
+                height: 28,
+                child: Switch(
+                  value: on,
+                  materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  onChanged: (v) => _setNodeEnabled(node.nodeId, v),
+                ),
+              ),
+          ],
         ),
       ),
     );
@@ -2550,6 +2581,7 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
       case ComfyWidgetKind.audio:
       case ComfyWidgetKind.video:
         final path = _values[field.id]?.toString() ?? '';
+        final canPreview = MediaHoverPreviewIcon.canPreview(path);
         return Padding(
           padding: const EdgeInsets.only(bottom: 8),
           child: Column(
@@ -2558,6 +2590,7 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
               Text(field.label, style: const TextStyle(fontSize: 12)),
               Row(
                 children: [
+                  // 路径在 Expanded 内按剩余宽度折叠；预览图标固定宽在外侧。
                   Expanded(
                     child: path.isEmpty
                         ? Text(
@@ -2581,6 +2614,7 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
                             ),
                           ),
                   ),
+                  if (canPreview) MediaHoverPreviewIcon(path: path),
                   TextButton(
                     style: TextButton.styleFrom(
                       visualDensity: VisualDensity.compact,

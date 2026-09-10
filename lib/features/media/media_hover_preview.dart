@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
@@ -12,10 +13,13 @@ import 'media_preview.dart';
 
 /// 全局同时只保留一个悬停预览 Overlay。
 OverlayEntry? _activeHoverPreview;
+VoidCallback? _activeHoverDismiss;
 
 void dismissActiveMediaHoverPreview() {
-  _activeHoverPreview?.remove();
+  final dismiss = _activeHoverDismiss;
+  _activeHoverDismiss = null;
   _activeHoverPreview = null;
+  dismiss?.call();
 }
 
 /// 包在文件行上：悬停延迟弹出预览小窗（图直接预览；视频点播放才挂 Player）。
@@ -58,26 +62,27 @@ class _MediaHoverPreviewAnchorState extends State<MediaHoverPreviewAnchor> {
     if (_activeHoverPreview == _entry) {
       _activeHoverPreview = null;
     }
+    if (_activeHoverDismiss == _dismiss) {
+      _activeHoverDismiss = null;
+    }
     _entry!.remove();
     _entry = null;
     _playing = false;
-    if (!disposeOnly && mounted) {
-      // no setState needed; overlay gone
-    }
   }
 
   void _scheduleOpen() {
     _closeTimer?.cancel();
     if (_entry != null) return;
     _openTimer?.cancel();
-    _openTimer = Timer(const Duration(milliseconds: 180), _showOverlay);
+    _openTimer = Timer(const Duration(milliseconds: 200), _showOverlay);
   }
 
   void _scheduleCloseIfIdle() {
     _openTimer?.cancel();
     if (_playing) return; // 播放中不因移出自动关
     _closeTimer?.cancel();
-    _closeTimer = Timer(const Duration(milliseconds: 280), () {
+    _closeTimer = Timer(const Duration(milliseconds: 320), () {
+      if (!mounted) return;
       if (_overAnchor || _overPopup || _playing) return;
       _removeOverlay();
     });
@@ -86,25 +91,29 @@ class _MediaHoverPreviewAnchorState extends State<MediaHoverPreviewAnchor> {
   void _dismiss() {
     _openTimer?.cancel();
     _closeTimer?.cancel();
-    _overAnchor = false;
     _overPopup = false;
+    // 不强制清 _overAnchor：指针可能仍在图标上（无全屏挡板时）。
     _removeOverlay();
   }
 
   void _showOverlay() {
     if (!mounted || _entry != null) return;
+    if (!_overAnchor) return;
     final box = _anchorKey.currentContext?.findRenderObject() as RenderBox?;
     if (box == null || !box.hasSize) return;
     final overlayState = Overlay.maybeOf(context, rootOverlay: true);
     if (overlayState == null) return;
 
-    dismissActiveMediaHoverPreview();
+    // 关掉其它锚点的预览（会走对方完整 _dismiss，避免 _entry 悬空）。
+    if (_activeHoverDismiss != null && _activeHoverDismiss != _dismiss) {
+      dismissActiveMediaHoverPreview();
+    }
 
     final origin = box.localToGlobal(Offset.zero);
     final size = box.size;
     final screen = MediaQuery.sizeOf(context);
-    const popupW = 320.0;
-    const popupH = 240.0;
+    const popupW = 400.0;
+    const popupH = 225.0;
     var left = origin.dx;
     var top = origin.dy + size.height + 4;
     if (left + popupW > screen.width - 8) {
@@ -159,6 +168,7 @@ class _MediaHoverPreviewAnchorState extends State<MediaHoverPreviewAnchor> {
     );
     _entry = entry;
     _activeHoverPreview = entry;
+    _activeHoverDismiss = _dismiss;
     overlayState.insert(entry);
   }
 
@@ -208,26 +218,47 @@ class _HoverPreviewLayer extends StatefulWidget {
 
 class _HoverPreviewLayerState extends State<_HoverPreviewLayer> {
   final FocusNode _focus = FocusNode();
+  final GlobalKey _popupKey = GlobalKey();
   Player? _player;
   VideoController? _video;
-  bool _playing = false;
+  bool _ready = false;
   bool _starting = false;
 
   MediaKind get _kind => classifyMedia(widget.path);
 
+  bool get _isAv =>
+      _kind == MediaKind.video || _kind == MediaKind.audio;
+
   @override
   void initState() {
     super.initState();
+    GestureBinding.instance.pointerRouter.addGlobalRoute(_onGlobalPointer);
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) _focus.requestFocus();
+      if (!mounted) return;
+      _focus.requestFocus();
+      if (_isAv) unawaited(_startPlayer());
     });
   }
 
   @override
   void dispose() {
+    GestureBinding.instance.pointerRouter.removeGlobalRoute(_onGlobalPointer);
     _focus.dispose();
-    _disposePlayer();
+    unawaited(_disposePlayer());
     super.dispose();
+  }
+
+  void _onGlobalPointer(PointerEvent event) {
+    if (event is! PointerDownEvent) return;
+    final box = _popupKey.currentContext?.findRenderObject() as RenderBox?;
+    if (box == null || !box.hasSize) return;
+    final local = box.globalToLocal(event.position);
+    if (local.dx < 0 ||
+        local.dy < 0 ||
+        local.dx > box.size.width ||
+        local.dy > box.size.height) {
+      widget.onDismiss();
+    }
   }
 
   Future<void> _disposePlayer() async {
@@ -241,8 +272,8 @@ class _HoverPreviewLayerState extends State<_HoverPreviewLayer> {
     }
   }
 
-  Future<void> _startPlay() async {
-    if (_kind != MediaKind.video || _starting || _playing) return;
+  Future<void> _startPlayer() async {
+    if (!_isAv || _starting || _ready) return;
     if (!File(widget.path).existsSync()) return;
     setState(() => _starting = true);
     final player = Player();
@@ -256,15 +287,14 @@ class _HoverPreviewLayerState extends State<_HoverPreviewLayer> {
       setState(() {
         _player = player;
         _video = video;
-        _playing = true;
+        _ready = true;
         _starting = false;
       });
+      // 音视频打开后视为「在播」，移出不自动关。
       widget.onPlayingChanged(true);
     } catch (_) {
       await player.dispose();
-      if (mounted) {
-        setState(() => _starting = false);
-      }
+      if (mounted) setState(() => _starting = false);
     }
   }
 
@@ -277,46 +307,111 @@ class _HoverPreviewLayerState extends State<_HoverPreviewLayer> {
     return KeyEventResult.ignored;
   }
 
-  Widget _poster() {
-    if (_kind == MediaKind.image) {
-      return Image.file(
-        File(widget.path),
-        fit: BoxFit.contain,
-        errorBuilder: (_, __, ___) => const Icon(Icons.broken_image, size: 48),
-      );
-    }
-    if (_kind == MediaKind.video) {
-      return const Center(
-        child: Icon(Icons.videocam_outlined, size: 56, color: Colors.white54),
-      );
-    }
-    if (_kind == MediaKind.audio) {
-      return const Center(
-        child: Icon(Icons.audiotrack, size: 56, color: Colors.white54),
-      );
-    }
-    return const Center(
-      child: Icon(Icons.insert_drive_file, size: 48, color: Colors.white54),
+  Widget _floatingBtn({
+    required IconData icon,
+    required String tip,
+    required VoidCallback onPressed,
+  }) {
+    return Material(
+      color: Colors.black54,
+      shape: const CircleBorder(),
+      clipBehavior: Clip.antiAlias,
+      child: IconButton(
+        tooltip: tip,
+        icon: Icon(icon, size: 18, color: Colors.white),
+        visualDensity: VisualDensity.compact,
+        padding: const EdgeInsets.all(8),
+        constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+        onPressed: onPressed,
+      ),
+    );
+  }
+
+  Widget _imageBody() {
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        ColoredBox(
+          color: Colors.black,
+          child: Image.file(
+            File(widget.path),
+            fit: BoxFit.contain,
+            errorBuilder: (_, __, ___) =>
+                const Center(child: Icon(Icons.broken_image, size: 48)),
+          ),
+        ),
+        Positioned(
+          top: 6,
+          right: 6,
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              _floatingBtn(
+                icon: Icons.zoom_out_map,
+                tip: '放大',
+                onPressed: widget.onFullscreen,
+              ),
+              const SizedBox(width: 6),
+              _floatingBtn(
+                icon: Icons.close,
+                tip: '关闭 (Esc)',
+                onPressed: widget.onDismiss,
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _avBody() {
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        if (_ready && _video != null)
+          Video(
+            controller: _video!,
+            // 自带播放 / 音量 / 进度 / 全屏，不再外包一层窗口控件。
+            controls: AdaptiveVideoControls,
+          )
+        else
+          ColoredBox(
+            color: Colors.black,
+            child: Center(
+              child: _starting
+                  ? const SizedBox(
+                      width: 28,
+                      height: 28,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : Icon(
+                      _kind == MediaKind.audio
+                          ? Icons.audiotrack
+                          : Icons.videocam_outlined,
+                      size: 48,
+                      color: Colors.white54,
+                    ),
+            ),
+          ),
+        Positioned(
+          top: 6,
+          right: 6,
+          child: _floatingBtn(
+            icon: Icons.close,
+            tip: '关闭 (Esc)',
+            onPressed: widget.onDismiss,
+          ),
+        ),
+      ],
     );
   }
 
   @override
   Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-    final name = p.basename(widget.path);
-
     return Material(
       type: MaterialType.transparency,
       child: Stack(
         children: [
-          // 点外部关闭
-          Positioned.fill(
-            child: GestureDetector(
-              behavior: HitTestBehavior.opaque,
-              onTap: widget.onDismiss,
-              child: const SizedBox.expand(),
-            ),
-          ),
           Positioned(
             left: widget.left,
             top: widget.top,
@@ -329,104 +424,12 @@ class _HoverPreviewLayerState extends State<_HoverPreviewLayer> {
                 onEnter: (_) => widget.onOverPopup(true),
                 onExit: (_) => widget.onOverPopup(false),
                 child: Material(
-                  elevation: 8,
-                  borderRadius: BorderRadius.circular(10),
-                  color: Colors.black87,
+                  key: _popupKey,
+                  elevation: 10,
+                  color: Colors.black,
+                  borderRadius: BorderRadius.circular(8),
                   clipBehavior: Clip.antiAlias,
-                  child: Column(
-                    children: [
-                      SizedBox(
-                        height: 36,
-                        child: Row(
-                          children: [
-                            const SizedBox(width: 10),
-                            Expanded(
-                              child: Text(
-                                name,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(
-                                  color: Colors.white70,
-                                  fontSize: 12,
-                                ),
-                              ),
-                            ),
-                            IconButton(
-                              tooltip: '关闭 (Esc)',
-                              icon: const Icon(Icons.close, size: 18),
-                              color: Colors.white70,
-                              visualDensity: VisualDensity.compact,
-                              onPressed: widget.onDismiss,
-                            ),
-                          ],
-                        ),
-                      ),
-                      Expanded(
-                        child: ColoredBox(
-                          color: Colors.black,
-                          child: _playing && _video != null
-                              ? Video(controller: _video!)
-                              : _poster(),
-                        ),
-                      ),
-                      SizedBox(
-                        height: 40,
-                        child: Row(
-                          children: [
-                            const SizedBox(width: 8),
-                            if (_kind == MediaKind.video) ...[
-                              TextButton.icon(
-                                onPressed: _starting ? null : _startPlay,
-                                icon: Icon(
-                                  _playing
-                                      ? Icons.play_circle_outline
-                                      : Icons.play_arrow,
-                                  size: 18,
-                                ),
-                                label: Text(_playing
-                                    ? '播放中'
-                                    : (_starting ? '加载…' : '播放')),
-                                style: TextButton.styleFrom(
-                                  foregroundColor: cs.primary,
-                                  visualDensity: VisualDensity.compact,
-                                ),
-                              ),
-                              TextButton.icon(
-                                onPressed: widget.onFullscreen,
-                                icon: const Icon(Icons.fullscreen, size: 18),
-                                label: const Text('全屏'),
-                                style: TextButton.styleFrom(
-                                  foregroundColor: Colors.white70,
-                                  visualDensity: VisualDensity.compact,
-                                ),
-                              ),
-                            ] else if (_kind == MediaKind.image) ...[
-                              TextButton.icon(
-                                onPressed: widget.onFullscreen,
-                                icon: const Icon(Icons.zoom_out_map, size: 18),
-                                label: const Text('放大'),
-                                style: TextButton.styleFrom(
-                                  foregroundColor: Colors.white70,
-                                  visualDensity: VisualDensity.compact,
-                                ),
-                              ),
-                            ] else if (_kind == MediaKind.audio) ...[
-                              TextButton.icon(
-                                onPressed: widget.onFullscreen,
-                                icon: const Icon(Icons.play_arrow, size: 18),
-                                label: const Text('播放'),
-                                style: TextButton.styleFrom(
-                                  foregroundColor: cs.primary,
-                                  visualDensity: VisualDensity.compact,
-                                ),
-                              ),
-                            ],
-                            const Spacer(),
-                          ],
-                        ),
-                      ),
-                    ],
-                  ),
+                  child: _kind == MediaKind.image ? _imageBody() : _avBody(),
                 ),
               ),
             ),
@@ -479,5 +482,58 @@ class MediaOutputFileRow extends StatelessWidget {
       return MediaHoverPreviewAnchor(path: path, child: row);
     }
     return row;
+  }
+}
+
+/// 固定宽度的媒体预览锚点图标（约 28px），便于 [PathEllipsisText] 所在
+/// [Expanded] 正确拿到剩余宽度；点击被吞掉，不触发展开等父手势。
+class MediaHoverPreviewIcon extends StatelessWidget {
+  final String path;
+  final double extent;
+  final String? tooltip;
+
+  const MediaHoverPreviewIcon({
+    super.key,
+    required this.path,
+    this.extent = 28,
+    this.tooltip,
+  });
+
+  static bool canPreview(String? path) {
+    final s = path?.trim() ?? '';
+    if (s.isEmpty) return false;
+    if (!File(s).existsSync()) return false;
+    final kind = classifyMedia(s);
+    return kind == MediaKind.image ||
+        kind == MediaKind.video ||
+        kind == MediaKind.audio;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!canPreview(path)) return const SizedBox.shrink();
+    final kind = classifyMedia(path);
+    final icon = switch (kind) {
+      MediaKind.image => Icons.image_outlined,
+      MediaKind.video => Icons.videocam_outlined,
+      MediaKind.audio => Icons.audiotrack,
+      _ => Icons.insert_drive_file_outlined,
+    };
+    final cs = Theme.of(context).colorScheme;
+
+    return SizedBox(
+      width: extent,
+      height: extent,
+      child: MediaHoverPreviewAnchor(
+        path: path,
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: () {},
+          child: Center(
+            child: Icon(icon, size: 16, color: cs.primary),
+          ),
+        ),
+      ),
+    );
   }
 }
