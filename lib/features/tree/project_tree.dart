@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -23,6 +24,7 @@ class ProjectTree extends ConsumerStatefulWidget {
 
 class _ProjectTreeState extends ConsumerState<ProjectTree> {
   final _searchController = TextEditingController();
+  final FocusNode _panelFocus = FocusNode(debugLabel: 'projectTree');
   String _searchText = '';
 
   @override
@@ -236,7 +238,159 @@ class _ProjectTreeState extends ConsumerState<ProjectTree> {
   void dispose() {
     DirectoryWatcher.instance.stop();
     _searchController.dispose();
+    _panelFocus.dispose();
     super.dispose();
+  }
+
+  void _ensurePanelFocus() {
+    ref.read(fsShortcutPaneProvider.notifier).state = FsShortcutPane.tree;
+    if (!_panelFocus.hasFocus) _panelFocus.requestFocus();
+  }
+
+  void _whenNotTyping(VoidCallback action) {
+    if (_isTypingInTextField()) return;
+    action();
+  }
+
+  bool _isTypingInTextField() {
+    final focus = FocusManager.instance.primaryFocus;
+    final ctx = focus?.context;
+    if (ctx == null) return false;
+    if (ctx.widget is EditableText ||
+        ctx.widget is TextField ||
+        ctx.widget is TextFormField) {
+      return true;
+    }
+    var typing = false;
+    ctx.visitAncestorElements((element) {
+      final w = element.widget;
+      if (w is EditableText || w is TextField || w is TextFormField) {
+        typing = true;
+        return false;
+      }
+      return true;
+    });
+    return typing;
+  }
+
+  void _setTreeSelection(List<FsClipboardItem> items) {
+    ref.read(treeSelectionProvider.notifier).state = items;
+    ref.read(fsShortcutPaneProvider.notifier).state = FsShortcutPane.tree;
+  }
+
+  void _clearTreeMultiSelection() {
+    final mode = ref.read(contentModeProvider);
+    if (mode == 'editor') {
+      final file = ref.read(selectedFileProvider);
+      if (file != null && file.isNotEmpty) {
+        _setTreeSelection([FsClipboardItem(path: file, isDir: false)]);
+        return;
+      }
+    }
+    final dir = ref.read(selectedDirProvider);
+    if (dir != null && dir.isNotEmpty) {
+      _setTreeSelection([FsClipboardItem(path: dir, isDir: true)]);
+      return;
+    }
+    _setTreeSelection([]);
+  }
+
+  String? _pasteDestDir() {
+    final items = ref.read(treeSelectionProvider);
+    if (items.length == 1) {
+      final it = items.first;
+      return it.isDir ? it.path : File(it.path).parent.path;
+    }
+    return ref.read(selectedDirProvider) ??
+        (AppConfig.instance.projectRoot.isEmpty
+            ? null
+            : AppConfig.instance.projectRoot);
+  }
+
+  Future<void> _openTreeItem(FsClipboardItem item) async {
+    if (item.isDir) {
+      ref.read(selectedDirProvider.notifier).state = item.path;
+      ref.read(contentModeProvider.notifier).state = 'assets';
+      _setTreeSelection([item]);
+      return;
+    }
+    switch (classifyMedia(item.path)) {
+      case MediaKind.image:
+        showImageViewerDialog(context, item.path);
+        return;
+      case MediaKind.video:
+        showMediaPreviewDialog(context, path: item.path, isVideo: true);
+        return;
+      case MediaKind.audio:
+        showMediaPreviewDialog(context, path: item.path, isVideo: false);
+        return;
+      case MediaKind.markdown:
+      case MediaKind.other:
+        ref.read(selectedFileProvider.notifier).state = item.path;
+        final tabs = ref.read(openTabsProvider);
+        if (!tabs.contains(item.path)) {
+          ref.read(openTabsProvider.notifier).state = [...tabs, item.path];
+        }
+        ref.read(contentModeProvider.notifier).state = 'editor';
+        _setTreeSelection([item]);
+    }
+  }
+
+  Future<void> _fsShortcut(String action) async {
+    if (!mounted) return;
+    if (action == 'escape') {
+      _clearTreeMultiSelection();
+      return;
+    }
+    if (action == 'selectAll' || action == 'backspace') {
+      // 目录树暂不支持全选 / Backspace 上一级。
+      return;
+    }
+    final container = ProviderScope.containerOf(context, listen: false);
+
+    if (action == 'paste') {
+      final dest = _pasteDestDir();
+      if (dest == null || dest.isEmpty) return;
+      if (ref.read(fsClipboardProvider) == null) return;
+      final name = dest.split(Platform.pathSeparator).last;
+      await runFsAction(
+        context: context,
+        container: container,
+        action: 'paste',
+        path: dest,
+        isDir: true,
+        displayName: name.isEmpty ? dest : name,
+        onOpen: () async {},
+        onChanged: () {
+          _setTreeSelection([]);
+          _handleTreeChanged(dest);
+        },
+      );
+      return;
+    }
+
+    final items = ref.read(treeSelectionProvider);
+    if (items.isEmpty) return;
+    if ((action == 'rename' || action == 'open') && items.length != 1) return;
+
+    final target = items.first;
+    final name = target.path.split(Platform.pathSeparator).last;
+    await runFsAction(
+      context: context,
+      container: container,
+      action: action,
+      path: target.path,
+      isDir: target.isDir,
+      displayName: name,
+      multiItems: items.length > 1 ? items : null,
+      onOpen: () async => _openTreeItem(target),
+      onChanged: () {
+        _setTreeSelection([]);
+        _handleTreeChanged(
+          target.isDir ? target.path : File(target.path).parent.path,
+        );
+      },
+    );
   }
 
   @override
@@ -255,71 +409,88 @@ class _ProjectTreeState extends ConsumerState<ProjectTree> {
       _refreshTree(anchor);
     });
 
-    return Container(
-      color: Theme.of(context).colorScheme.surfaceContainerLow,
-      child: Column(
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(8, 8, 4, 0),
-            child: Row(
-              children: [
-                Expanded(
-                  child: TextField(
-                    controller: _searchController,
-                    onChanged: (v) => setState(() => _searchText = v),
-                    style: const TextStyle(fontSize: 13),
-                    decoration: InputDecoration(
-                      hintText: '搜索剧本 / 文件...',
-                      isDense: true,
-                      prefixIcon: const Icon(Icons.search, size: 18),
-                      suffixIcon: _searchText.isNotEmpty
-                          ? IconButton(
-                              icon: const Icon(Icons.clear, size: 16),
-                              onPressed: () {
-                                _searchController.clear();
-                                setState(() => _searchText = '');
-                              },
-                            )
-                          : null,
-                      border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(8),
-                        borderSide: BorderSide.none,
+    // 主布局下发的文件快捷键（不依赖本面板是否持有焦点）。
+    ref.listen(fsShortcutRequestProvider, (prev, next) {
+      if (next == null || next.pane != FsShortcutPane.tree) return;
+      if (prev?.nonce == next.nonce) return;
+      _whenNotTyping(() => unawaited(_fsShortcut(next.action)));
+    });
+
+    return Focus(
+      focusNode: _panelFocus,
+      child: Container(
+        color: Theme.of(context).colorScheme.surfaceContainerLow,
+        child: Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(8, 8, 4, 0),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: _searchController,
+                      onChanged: (v) => setState(() => _searchText = v),
+                      style: const TextStyle(fontSize: 13),
+                      decoration: InputDecoration(
+                        hintText: '搜索剧本 / 文件...',
+                        isDense: true,
+                        prefixIcon: const Icon(Icons.search, size: 18),
+                        suffixIcon: _searchText.isNotEmpty
+                            ? IconButton(
+                                icon: const Icon(Icons.clear, size: 16),
+                                onPressed: () {
+                                  _searchController.clear();
+                                  setState(() => _searchText = '');
+                                },
+                              )
+                            : null,
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(8),
+                          borderSide: BorderSide.none,
+                        ),
+                        filled: true,
+                        contentPadding:
+                            const EdgeInsets.symmetric(vertical: 8),
                       ),
-                      filled: true,
-                      contentPadding: const EdgeInsets.symmetric(vertical: 8),
                     ),
                   ),
-                ),
-                IconButton(
-                  icon: const Icon(Icons.add, size: 20),
-                  tooltip: '新建顶层剧本',
-                  onPressed: _createScript,
-                ),
-                IconButton(
-                  icon: const Icon(Icons.refresh, size: 18),
-                  tooltip: '手动刷新目录',
-                  onPressed: () => _handleTreeChanged(''),
-                ),
-              ],
+                  IconButton(
+                    icon: const Icon(Icons.add, size: 20),
+                    tooltip: '新建顶层剧本',
+                    onPressed: _createScript,
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.refresh, size: 18),
+                    tooltip: '手动刷新目录',
+                    onPressed: () => _handleTreeChanged(''),
+                  ),
+                ],
+              ),
             ),
-          ),
-          Expanded(
-            child: root == null
-                ? const Center(
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        SizedBox(
-                            width: 24, height: 24,
-                            child: CircularProgressIndicator(strokeWidth: 2)),
-                        SizedBox(height: 12),
-                        Text('正在加载项目目录...'),
-                      ],
+            Expanded(
+              child: root == null
+                  ? const Center(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          SizedBox(
+                              width: 24,
+                              height: 24,
+                              child: CircularProgressIndicator(
+                                  strokeWidth: 2)),
+                          SizedBox(height: 12),
+                          Text('正在加载项目目录...'),
+                        ],
+                      ),
+                    )
+                  : GestureDetector(
+                      behavior: HitTestBehavior.translucent,
+                      onTapDown: (_) => _ensurePanelFocus(),
+                      child: _buildTree(context, root),
                     ),
-                  )
-                : _buildTree(context, root),
-          ),
-        ],
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -341,6 +512,7 @@ class _ProjectTreeState extends ConsumerState<ProjectTree> {
           node: visibleRoots[index],
           level: 0,
           onTreeChanged: _handleTreeChanged,
+          onInteract: _ensurePanelFocus,
         );
       },
     );
@@ -375,11 +547,13 @@ class _TreeNodeWidget extends ConsumerStatefulWidget {
   
 /// 树结构变更（重命名/删除/复制/新建子目录）后，由父级重建并定位。
   final ValueChanged<String> onTreeChanged;
+  final VoidCallback onInteract;
 
   const _TreeNodeWidget({
     required this.node,
     required this.level,
     required this.onTreeChanged,
+    required this.onInteract,
   });
 
   @override
@@ -510,6 +684,8 @@ class _TreeNodeWidgetState extends ConsumerState<_TreeNodeWidget> {
   void _selectDirInAssets(String dirPath) {
     ref.read(selectedDirProvider.notifier).state = dirPath;
     ref.read(contentModeProvider.notifier).state = 'assets';
+    // 与单击目录一致：同步树选中，避免仍高亮旧文件。
+    _setSingleTreeSelection(path: dirPath, isDir: true);
   }
 
   bool get _ctrlHeld =>
@@ -520,17 +696,24 @@ class _TreeNodeWidgetState extends ConsumerState<_TreeNodeWidget> {
     ref.read(treeSelectionProvider.notifier).state = [
       FsClipboardItem(path: path, isDir: isDir),
     ];
+    ref.read(fsShortcutPaneProvider.notifier).state = FsShortcutPane.tree;
   }
 
   void _toggleTreeSelection({required String path, required bool isDir}) {
     final current = List<FsClipboardItem>.of(ref.read(treeSelectionProvider));
+    // 从「当前高亮项」起步，而不是同时塞入 file+dir 两个导航状态。
     if (current.isEmpty) {
-      final file = ref.read(selectedFileProvider);
-      final dir = ref.read(selectedDirProvider);
-      if (file != null && file.isNotEmpty) {
-        current.add(FsClipboardItem(path: file, isDir: false));
-      } else if (dir != null && dir.isNotEmpty) {
-        current.add(FsClipboardItem(path: dir, isDir: true));
+      final mode = ref.read(contentModeProvider);
+      if (mode == 'editor') {
+        final file = ref.read(selectedFileProvider);
+        if (file != null && file.isNotEmpty && file != path) {
+          current.add(FsClipboardItem(path: file, isDir: false));
+        }
+      } else {
+        final dir = ref.read(selectedDirProvider);
+        if (dir != null && dir.isNotEmpty && dir != path) {
+          current.add(FsClipboardItem(path: dir, isDir: true));
+        }
       }
     }
     final idx = current.indexWhere((i) => i.path == path);
@@ -540,14 +723,17 @@ class _TreeNodeWidgetState extends ConsumerState<_TreeNodeWidget> {
       current.add(FsClipboardItem(path: path, isDir: isDir));
     }
     ref.read(treeSelectionProvider.notifier).state = current;
+    ref.read(fsShortcutPaneProvider.notifier).state = FsShortcutPane.tree;
   }
 
   void _onNodeTap({required bool isFile}) {
+    widget.onInteract();
     final path = widget.node.path;
     if (_ctrlHeld) {
       _toggleTreeSelection(path: path, isDir: !isFile);
       return;
     }
+    // 普通单击：始终重置为单项选中（清掉之前的多选/残留）。
     _setSingleTreeSelection(path: path, isDir: !isFile);
     if (isFile) {
       _openFile(path);
@@ -557,6 +743,7 @@ class _TreeNodeWidgetState extends ConsumerState<_TreeNodeWidget> {
   }
 
   Future<void> _toggleExpand() async {
+    widget.onInteract();
     final node = widget.node;
     if (node.type == ScriptNodeType.file) return;
     final canExpand = !node.isLoaded || node.children.isNotEmpty;
@@ -594,9 +781,21 @@ class _TreeNodeWidgetState extends ConsumerState<_TreeNodeWidget> {
         !isFile && ref.watch(selectedDirProvider) == node.path;
     final treeMulti = ref.watch(treeSelectionProvider);
     final inTreeMulti = treeMulti.any((i) => i.path == node.path);
-    final selected = treeMulti.isNotEmpty
-        ? inTreeMulti
-        : (fileSelected || dirSelected);
+    // 有树选中列表时只认它；否则按当前中间栏模式只高亮一个导航目标，
+    // 避免 selectedFile + selectedDir 同时亮起（未按 Ctrl 却像多选）。
+    final bool selected;
+    if (treeMulti.isNotEmpty) {
+      selected = inTreeMulti;
+    } else {
+      final mode = ref.watch(contentModeProvider);
+      if (mode == 'editor') {
+        selected = isFile && fileSelected;
+      } else if (mode == 'assets') {
+        selected = !isFile && dirSelected;
+      } else {
+        selected = fileSelected || dirSelected;
+      }
+    }
     final multiDrag = treeMulti.length > 1 && inTreeMulti ? treeMulti : null;
     final scheme = Theme.of(context).colorScheme;
 
@@ -738,6 +937,7 @@ class _TreeNodeWidgetState extends ConsumerState<_TreeNodeWidget> {
                   node: c,
                   level: level + 1,
                   onTreeChanged: widget.onTreeChanged,
+                  onInteract: widget.onInteract,
                 )),
         ],
       ],

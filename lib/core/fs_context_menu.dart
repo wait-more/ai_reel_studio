@@ -40,7 +40,6 @@ void Function(String?)? _activeComplete;
 bool Function(KeyEvent)? _activeKeyHandler;
 void Function(PointerEvent)? _activePointerRoute;
 Rect? _activeMenuRect;
-final GlobalKey _menuKey = GlobalKey();
 
 void _detachPointerRoute() {
   final route = _activePointerRoute;
@@ -55,6 +54,20 @@ void _detachKeyHandler() {
   _activeKeyHandler = null;
   if (handler != null) {
     HardwareKeyboard.instance.removeHandler(handler);
+  }
+}
+
+void _removeMenuEntry(OverlayEntry? entry) {
+  if (entry == null) return;
+  if (_activeMenuEntry == entry) {
+    _activeMenuEntry = null;
+    _activeComplete = null;
+    _activeMenuRect = null;
+  }
+  // 必须同步移除：若延后到 microtask，紧接着 showDialog 时
+  // 复用 GlobalKey / Inherited 依赖未清空会触发 dependents.isEmpty 断言。
+  if (entry.mounted) {
+    entry.remove();
   }
 }
 
@@ -75,6 +88,8 @@ Future<void> showFsContextMenu({
   required void Function() onChanged,
   /// 多选时传入全部选中项；长度 > 1 时菜单仅保留剪切/复制/删除等批量操作。
   List<FsClipboardItem>? multiItems,
+  /// 物料栏空白处右键：针对当前目录，仅保留粘贴/新建/导入等，不含删除重命名。
+  bool background = false,
 }) async {
   final overlayState = Overlay.maybeOf(context, rootOverlay: true);
   if (overlayState == null || !context.mounted) return;
@@ -82,29 +97,24 @@ Future<void> showFsContextMenu({
   final hostContext = overlayState.context;
   final callerContext = context;
   final container = ProviderScope.containerOf(context, listen: false);
-  final batch = (multiItems != null && multiItems.length > 1)
+  final batch = (!background && multiItems != null && multiItems.length > 1)
       ? multiItems
       : null;
 
   _dismissActiveMenu();
 
-  final isVideo = !isDir && classifyMedia(path) == MediaKind.video;
+  final isVideo = !background && !isDir && classifyMedia(path) == MediaKind.video;
   final completer = Completer<String?>();
   late OverlayEntry entry;
+  // 每次菜单使用独立 Key，避免与尚未卸掉的旧 Overlay 抢同一个 GlobalKey。
+  final menuKey = GlobalKey();
 
   void close([String? action]) {
     if (completer.isCompleted) return;
-    completer.complete(action);
     _detachKeyHandler();
     _detachPointerRoute();
-    _activeMenuRect = null;
-    if (_activeMenuEntry == entry) {
-      _activeMenuEntry = null;
-      _activeComplete = null;
-    }
-    scheduleMicrotask(() {
-      if (entry.mounted) entry.remove();
-    });
+    _removeMenuEntry(entry);
+    completer.complete(action);
   }
 
   bool onKey(KeyEvent event) {
@@ -135,6 +145,11 @@ Future<void> showFsContextMenu({
   _activePointerRoute = onGlobalPointer;
   HardwareKeyboard.instance.addHandler(onKey);
   GestureBinding.instance.pointerRouter.addGlobalRoute(onGlobalPointer);
+
+  // 预先取色，减少 Overlay 重建时对外部 Inherited 的瞬时依赖窗口。
+  final scheme = Theme.of(context).colorScheme;
+  final menuColor = scheme.surfaceContainerHigh;
+  final mutedColor = scheme.onSurfaceVariant;
 
   entry = OverlayEntry(
     builder: (ctx) {
@@ -176,7 +191,45 @@ Future<void> showFsContextMenu({
       Widget divider() => const Divider(height: 4, thickness: 1);
 
       final children = <Widget>[
-        if (batch == null) ...[
+        if (background) ...[
+          if (canPaste)
+            item(
+              value: 'paste',
+              icon: Icons.content_paste,
+              label: '粘贴',
+            ),
+          item(
+            value: 'newDoc',
+            icon: Icons.note_add_outlined,
+            label: '新建文档',
+          ),
+          item(
+            value: 'newFolder',
+            icon: Icons.create_new_folder_outlined,
+            label: '新建文件夹',
+          ),
+          item(
+            value: 'importHere',
+            icon: Icons.file_upload_outlined,
+            label: '导入物料',
+          ),
+          divider(),
+          item(
+            value: 'openTerminal',
+            icon: Icons.terminal,
+            label: '在终端打开',
+          ),
+          item(
+            value: 'reveal',
+            icon: Icons.folder_open,
+            label: '在资源管理器显示',
+          ),
+          item(
+            value: 'copyAbsPath',
+            icon: Icons.link,
+            label: '复制当前目录路径',
+          ),
+        ] else if (batch == null) ...[
           item(
             value: 'open',
             icon: Icons.open_in_new,
@@ -250,53 +303,69 @@ Future<void> showFsContextMenu({
             label: '复制名称',
           ),
           divider(),
-        ] else
+          item(
+            value: 'cut',
+            icon: Icons.content_cut,
+            label: '剪切',
+          ),
+          item(
+            value: 'copy',
+            icon: Icons.copy,
+            label: '复制',
+          ),
+          if (canPaste)
+            item(
+              value: 'paste',
+              icon: Icons.content_paste,
+              label: '粘贴',
+            ),
+          item(
+            value: 'rename',
+            icon: Icons.drive_file_rename_outline,
+            label: '重命名',
+          ),
+          divider(),
+          item(
+            value: 'properties',
+            icon: Icons.info_outline,
+            label: '属性',
+          ),
+          item(
+            value: 'delete',
+            icon: Icons.delete_outline,
+            label: '删除',
+            iconColor: Colors.red[300],
+            labelColor: Colors.red[300],
+          ),
+        ] else ...[
           Padding(
             padding: const EdgeInsets.fromLTRB(12, 10, 12, 6),
             child: Text(
               '已选 ${batch.length} 项',
               style: TextStyle(
                 fontSize: 12,
-                color: Theme.of(ctx).colorScheme.onSurfaceVariant,
+                color: mutedColor,
               ),
             ),
           ),
-        item(
-          value: 'cut',
-          icon: Icons.content_cut,
-          label: batch == null ? '剪切' : '剪切 ${batch.length} 项',
-        ),
-        item(
-          value: 'copy',
-          icon: Icons.copy,
-          label: batch == null ? '复制' : '复制 ${batch.length} 项',
-        ),
-        if (batch == null && canPaste)
           item(
-            value: 'paste',
-            icon: Icons.content_paste,
-            label: '粘贴',
+            value: 'cut',
+            icon: Icons.content_cut,
+            label: '剪切 ${batch.length} 项',
           ),
-        if (batch == null)
           item(
-            value: 'rename',
-            icon: Icons.drive_file_rename_outline,
-            label: '重命名',
+            value: 'copy',
+            icon: Icons.copy,
+            label: '复制 ${batch.length} 项',
           ),
-        divider(),
-        if (batch == null)
           item(
-            value: 'properties',
-            icon: Icons.info_outline,
-            label: '属性',
+            value: 'delete',
+            icon: Icons.delete_outline,
+            label: '删除 ${batch.length} 项',
+            iconColor: Colors.red[300],
+            labelColor: Colors.red[300],
           ),
-        item(
-          value: 'delete',
-          icon: Icons.delete_outline,
-          label: batch == null ? '删除' : '删除 ${batch.length} 项',
-          iconColor: Colors.red[300],
-          labelColor: Colors.red[300],
-        ),
+        ],
       ];
 
       // 估算高度用于贴边；实际以布局为准。
@@ -308,8 +377,9 @@ Future<void> showFsContextMenu({
 
       _activeMenuRect = Rect.fromLTWH(left, top, menuWidth, menuHeight);
       WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (_activeMenuEntry != entry || !entry.mounted) return;
         final box =
-            _menuKey.currentContext?.findRenderObject() as RenderBox?;
+            menuKey.currentContext?.findRenderObject() as RenderBox?;
         if (box != null && box.hasSize && box.attached) {
           _activeMenuRect = box.localToGlobal(Offset.zero) & box.size;
         }
@@ -320,11 +390,11 @@ Future<void> showFsContextMenu({
         left: left,
         top: top,
         child: Material(
-          key: _menuKey,
+          key: menuKey,
           elevation: 8,
           borderRadius: BorderRadius.circular(8),
           clipBehavior: Clip.antiAlias,
-          color: Theme.of(ctx).colorScheme.surfaceContainerHigh,
+          color: menuColor,
           child: ConstrainedBox(
             constraints: BoxConstraints(maxHeight: size.height - 16),
             child: SingleChildScrollView(
@@ -356,7 +426,7 @@ Future<void> showFsContextMenu({
   final actionContext =
       callerContext.mounted ? callerContext : hostContext;
   if (!actionContext.mounted) return;
-  await _runAction(
+  await runFsAction(
     context: actionContext,
     overlay: overlayState,
     container: container,
@@ -381,23 +451,18 @@ Future<void> _waitPostFrame() {
 void _dismissActiveMenu([String? action]) {
   final complete = _activeComplete;
   final entry = _activeMenuEntry;
-  _activeComplete = null;
-  _activeMenuEntry = null;
-  _activeMenuRect = null;
   if (complete != null) {
+    // close() 内部会同步卸掉 OverlayEntry 并 complete。
     complete(action);
     return;
   }
   _detachKeyHandler();
   _detachPointerRoute();
-  if (entry != null && entry.mounted) {
-    scheduleMicrotask(() {
-      if (entry.mounted) entry.remove();
-    });
-  }
+  _removeMenuEntry(entry);
 }
 
-Future<void> _runAction({
+/// 执行文件系统菜单动作（右键菜单与键盘快捷键共用）。
+Future<void> runFsAction({
   required BuildContext context,
   OverlayState? overlay,
   required ProviderContainer container,

@@ -38,33 +38,39 @@ Future<String?> promptTextDialog(
   String initial = '',
 }) async {
   final ctrl = TextEditingController(text: initial);
-  final ok = await showDialog<bool>(
-    context: context,
-    builder: (ctx) => AlertDialog(
-      title: Text(title, style: const TextStyle(fontSize: 15)),
-      content: TextField(
-        controller: ctrl,
-        autofocus: true,
-        style: const TextStyle(fontSize: 13),
-        decoration: InputDecoration(labelText: label, isDense: true),
-        textInputAction: TextInputAction.done,
-        onSubmitted: (_) => Navigator.pop(ctx, true),
+  try {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(title, style: const TextStyle(fontSize: 15)),
+        content: TextField(
+          controller: ctrl,
+          autofocus: true,
+          style: const TextStyle(fontSize: 13),
+          decoration: InputDecoration(labelText: label, isDense: true),
+          textInputAction: TextInputAction.done,
+          onSubmitted: (_) => Navigator.pop(ctx, true),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('确定'),
+          ),
+        ],
       ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(ctx, false),
-          child: const Text('取消'),
-        ),
-        FilledButton(
-          onPressed: () => Navigator.pop(ctx, true),
-          child: const Text('确定'),
-        ),
-      ],
-    ),
-  );
-  final text = ctrl.text;
-  ctrl.dispose();
-  return ok == true ? text : null;
+    );
+    return ok == true ? ctrl.text : null;
+  } finally {
+    // 必须等 Dialog 路由元素完全 deactivate 后再 dispose，
+    // 否则 Esc 关闭时会触发 InheritedElement dependents.isEmpty 断言。
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      ctrl.dispose();
+    });
+  }
 }
 
 Future<void> copyTextToClipboard(
@@ -298,6 +304,7 @@ Future<bool> deleteEntitiesDialog(
           child: const Text('取消'),
         ),
         FilledButton(
+          autofocus: true,
           style: FilledButton.styleFrom(backgroundColor: Colors.red[800]),
           onPressed: () => Navigator.pop(ctx, true),
           child: const Text('删除'),
@@ -372,8 +379,8 @@ Future<int> importDroppedPaths(
   return ok;
 }
 
-/// 按系统资源管理器习惯拆分重命名：主名可编辑，后缀单独保留。
-({String stem, String ext}) _renameNameParts(
+/// 按系统资源管理器习惯拆分：主名 + 后缀（含点）；隐藏文件整段为主名。
+({String stem, String ext}) _explorerNameParts(
   String fileName, {
   required bool isDir,
 }) {
@@ -395,8 +402,8 @@ Future<int> importDroppedPaths(
 
 /// 重命名文件/目录。成功返回新路径。
 ///
-/// 文件：主名与后缀分开，编辑主名时不会误删后缀改掉格式（类似资源管理器）。
-/// 回车确认。
+/// 文件：与资源管理器一致——单框显示「主名+后缀」，打开时只选中主名，
+/// 后缀仍可编辑（并非锁死）。回车确认。
 Future<String?> renameEntityDialog(
   BuildContext context, {
   required String path,
@@ -405,14 +412,14 @@ Future<String?> renameEntityDialog(
 }) async {
   final entity = isDir ? Directory(path) : File(path);
   final oldName = p.basename(path);
-  final parts = _renameNameParts(oldName, isDir: isDir);
+  final parts = _explorerNameParts(oldName, isDir: isDir);
 
   final newName = await showDialog<String>(
     context: context,
-    builder: (ctx) => _RenameEntityDialog(
+    builder: (ctx) => _ExplorerStyleNameDialog(
       title: '重命名${isDir ? "文件夹" : "文件"}',
       initialStem: parts.stem,
-      extension: parts.ext,
+      initialExt: parts.ext,
     ),
   );
   if (newName == null || newName.trim().isEmpty || newName == oldName) {
@@ -429,36 +436,43 @@ Future<String?> renameEntityDialog(
   return target;
 }
 
-class _RenameEntityDialog extends StatefulWidget {
-  const _RenameEntityDialog({
+/// 资源管理器风格文件名输入：一个输入框，初始只选中主名。
+class _ExplorerStyleNameDialog extends StatefulWidget {
+  const _ExplorerStyleNameDialog({
     required this.title,
     required this.initialStem,
-    required this.extension,
+    required this.initialExt,
+    this.hintText,
   });
 
   final String title;
   final String initialStem;
-  /// 含前导点，如 `.mp4`；无后缀时为空。
-  final String extension;
+  /// 含前导点，如 `.md`；无后缀时为空。
+  final String initialExt;
+  final String? hintText;
 
   @override
-  State<_RenameEntityDialog> createState() => _RenameEntityDialogState();
+  State<_ExplorerStyleNameDialog> createState() =>
+      _ExplorerStyleNameDialogState();
 }
 
-class _RenameEntityDialogState extends State<_RenameEntityDialog> {
+class _ExplorerStyleNameDialogState extends State<_ExplorerStyleNameDialog> {
   late final TextEditingController _ctrl;
   final _focus = FocusNode();
 
   @override
   void initState() {
     super.initState();
-    _ctrl = TextEditingController(text: widget.initialStem);
+    final full = '${widget.initialStem}${widget.initialExt}';
+    _ctrl = TextEditingController(text: full);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       _focus.requestFocus();
+      // 与资源管理器一致：只选中主名，后缀保留在框内可改。
+      final stemLen = widget.initialStem.length;
       _ctrl.selection = TextSelection(
         baseOffset: 0,
-        extentOffset: _ctrl.text.length,
+        extentOffset: stemLen.clamp(0, _ctrl.text.length),
       );
     });
   }
@@ -466,55 +480,39 @@ class _RenameEntityDialogState extends State<_RenameEntityDialog> {
   @override
   void dispose() {
     _focus.dispose();
-    _ctrl.dispose();
+    // 等 Dialog 完全卸掉再释放，避免 Esc 触发 dependents 断言。
+    final ctrl = _ctrl;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      ctrl.dispose();
+    });
     super.dispose();
   }
 
   void _submit() {
-    final stem = _ctrl.text.trim();
-    if (stem.isEmpty) return;
-    // 后缀固定拼接，避免编辑主名时误改格式。
-    Navigator.of(context).pop('$stem${widget.extension}');
+    final name = _ctrl.text.trim();
+    if (name.isEmpty) return;
+    if (name.contains('/') || name.contains('\\') || name.contains('..')) {
+      return;
+    }
+    Navigator.of(context).pop(name);
   }
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final hasExt = widget.extension.isNotEmpty;
     return AlertDialog(
       title: Text(widget.title, style: const TextStyle(fontSize: 15)),
-      content: Row(
-        crossAxisAlignment: CrossAxisAlignment.center,
-        children: [
-          Expanded(
-            child: TextField(
-              controller: _ctrl,
-              focusNode: _focus,
-              autofocus: true,
-              style: const TextStyle(fontSize: 13),
-              decoration: InputDecoration(
-                labelText: hasExt ? '名称' : null,
-                isDense: true,
-                hintText: hasExt ? null : '名称',
-              ),
-              textInputAction: TextInputAction.done,
-              onSubmitted: (_) => _submit(),
-            ),
-          ),
-          if (hasExt) ...[
-            const SizedBox(width: 6),
-            Padding(
-              padding: const EdgeInsets.only(top: 12),
-              child: Text(
-                widget.extension,
-                style: TextStyle(
-                  fontSize: 13,
-                  color: theme.colorScheme.onSurfaceVariant,
-                ),
-              ),
-            ),
-          ],
-        ],
+      content: TextField(
+        controller: _ctrl,
+        focusNode: _focus,
+        autofocus: true,
+        style: const TextStyle(fontSize: 13),
+        decoration: InputDecoration(
+          labelText: '名称',
+          hintText: widget.hintText,
+          isDense: true,
+        ),
+        textInputAction: TextInputAction.done,
+        onSubmitted: (_) => _submit(),
       ),
       actions: [
         TextButton(
@@ -608,6 +606,7 @@ Future<bool> deleteEntityDialog(
           child: const Text('取消'),
         ),
         FilledButton(
+          autofocus: true,
           style: FilledButton.styleFrom(backgroundColor: Colors.red[800]),
           onPressed: () => Navigator.pop(ctx, true),
           child: const Text('删除'),
@@ -653,32 +652,35 @@ Future<String?> newFolderDialog(
   return target;
 }
 
-/// 在 [parentDir] 下新建空文档。未写扩展名时默认 `.md`。成功返回新路径。
+/// 在 [parentDir] 下新建空文档。默认后缀 `.md`，可改。成功返回新路径。
 Future<String?> newDocumentDialog(
   BuildContext context, {
   required String parentDir,
   VoidCallback? onDone,
 }) async {
-  final name = await promptTextDialog(
-    context,
-    title: '新建文档',
-    label: '文件名（可省略 .md）：',
+  final fileName = await showDialog<String>(
+    context: context,
+    builder: (ctx) => const _ExplorerStyleNameDialog(
+      title: '新建文档',
+      initialStem: '新建文档',
+      initialExt: '.md',
+      hintText: '可修改主名与后缀',
+    ),
   );
-  if (name == null || name.trim().isEmpty) return null;
-  var fileName = name.trim();
-  // 禁止路径分隔符，避免越出目标目录。
-  if (fileName.contains('/') ||
-      fileName.contains('\\') ||
-      fileName.contains('..')) {
+  if (fileName == null || fileName.trim().isEmpty) return null;
+  var name = fileName.trim();
+  if (name.contains('/') || name.contains('\\') || name.contains('..')) {
     _showError(context, '文件名不能包含路径');
     return null;
   }
-  if (!fileName.contains('.')) {
-    fileName = '$fileName.md';
+  // 未写后缀时默认 .md（与资源管理器「新建」后可改后缀一致）。
+  final parts = _explorerNameParts(name, isDir: false);
+  if (parts.ext.isEmpty) {
+    name = '$name.md';
   }
-  final target = p.join(parentDir, fileName);
+  final target = p.join(parentDir, name);
   if (await File(target).exists()) {
-    _showError(context, '已存在同名文件：$fileName');
+    _showError(context, '已存在同名文件：$name');
     return null;
   }
   try {

@@ -144,6 +144,7 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
       AppConfig.instance.assetListColWidths['size'] ?? 88;
   final ScrollController _listHScroll = ScrollController();
   Timer? _colWidthSaveTimer;
+  final FocusNode _panelFocus = FocusNode(debugLabel: 'assetPanel');
 
   /// 当前多选路径。
   final Set<String> _selected = {};
@@ -156,6 +157,7 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
   bool _pointerOnItem = false;
   bool _marqueeAdditive = false;
   Set<String> _marqueeBase = {};
+  Offset _backgroundMenuPos = Offset.zero;
 
   String? get _currentDir =>
       (_historyIndex >= 0 && _historyIndex < _history.length)
@@ -302,6 +304,7 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
     _colWidthSaveTimer?.cancel();
     _listHScroll.dispose();
     _searchCtrl.dispose();
+    _panelFocus.dispose();
     super.dispose();
   }
 
@@ -365,19 +368,47 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
     ref.listen(treeRefreshTickProvider, (prev, next) {
       if (next != prev && _initialized) _reload();
     });
+    // 主布局下发的文件快捷键（不依赖本面板是否持有焦点）。
+    ref.listen(fsShortcutRequestProvider, (prev, next) {
+      if (next == null || next.pane != FsShortcutPane.assets) return;
+      if (prev?.nonce == next.nonce) return;
+      _whenNotTyping(() {
+        switch (next.action) {
+          case 'escape':
+            _clearSelection();
+            break;
+          case 'selectAll':
+            _selectAllVisible();
+            break;
+          case 'backspace':
+            _up();
+            break;
+          default:
+            unawaited(_fsShortcut(next.action));
+        }
+      });
+    });
 
     final dir = _currentDir;
     if (dir == null) {
       return const Center(child: Text('选择左侧目录以查看物料'));
     }
 
-    return Column(
-      children: [
-        _buildToolbar(context, dir),
-        const Divider(height: 1, color: Colors.white12),
-        Expanded(child: _buildBody(context)),
-      ],
+    return Focus(
+      focusNode: _panelFocus,
+      child: Column(
+        children: [
+          _buildToolbar(context, dir),
+          const Divider(height: 1, color: Colors.white12),
+          Expanded(child: _buildBody(context)),
+        ],
+      ),
     );
+  }
+
+  void _whenNotTyping(VoidCallback action) {
+    if (_isTypingInTextField()) return;
+    action();
   }
 
   void _initTo(String dir) {
@@ -503,7 +534,103 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
             FsClipboardItem(path: e.path, isDir: e is Directory),
       ];
 
+  void _ensurePanelFocus() {
+    ref.read(fsShortcutPaneProvider.notifier).state = FsShortcutPane.assets;
+    if (!_panelFocus.hasFocus) {
+      _panelFocus.requestFocus();
+    }
+  }
+
+  void _selectAllVisible() {
+    _ensurePanelFocus();
+    setState(() {
+      _selected
+        ..clear()
+        ..addAll(_visibleEntries.map((e) => e.path));
+    });
+  }
+
+  /// 键盘快捷键 → 与右键菜单同一套 [runFsAction]。
+  Future<void> _fsShortcut(String action) async {
+    if (!mounted) return;
+
+    final dir = _currentDir;
+    if (dir == null) return;
+    final container = ProviderScope.containerOf(context, listen: false);
+
+    if (action == 'paste') {
+      final clip = ref.read(fsClipboardProvider);
+      if (clip == null) return;
+      final destName = dir.split(Platform.pathSeparator).last;
+      await runFsAction(
+        context: context,
+        container: container,
+        action: 'paste',
+        path: dir,
+        isDir: true,
+        displayName: destName.isEmpty ? dir : destName,
+        onOpen: () async {},
+        onChanged: () {
+          _clearSelection();
+          _reloadAndSyncTree();
+        },
+      );
+      return;
+    }
+
+    final items = _selectedItems();
+    if (items.isEmpty) return;
+    if ((action == 'rename' || action == 'open') && items.length != 1) {
+      return;
+    }
+
+    final target = items.first;
+    final name = target.path.split(Platform.pathSeparator).last;
+    await runFsAction(
+      context: context,
+      container: container,
+      action: action,
+      path: target.path,
+      isDir: target.isDir,
+      displayName: name,
+      multiItems: items.length > 1 ? items : null,
+      onOpen: () async {
+        if (target.isDir) {
+          _enterDir(target.path);
+        } else {
+          _openFileEntry(target.path);
+        }
+      },
+      onChanged: () {
+        _clearSelection();
+        _reloadAndSyncTree();
+      },
+    );
+  }
+
+  bool _isTypingInTextField() {
+    final focus = FocusManager.instance.primaryFocus;
+    final ctx = focus?.context;
+    if (ctx == null) return false;
+    if (ctx.widget is EditableText ||
+        ctx.widget is TextField ||
+        ctx.widget is TextFormField) {
+      return true;
+    }
+    var typing = false;
+    ctx.visitAncestorElements((element) {
+      final w = element.widget;
+      if (w is EditableText || w is TextField || w is TextFormField) {
+        typing = true;
+        return false;
+      }
+      return true;
+    });
+    return typing;
+  }
+
   void _selectPath(String path, {required bool toggle}) {
+    _ensurePanelFocus();
     setState(() {
       if (toggle) {
         if (!_selected.remove(path)) _selected.add(path);
@@ -518,6 +645,40 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
   void _clearSelection() {
     if (_selected.isEmpty) return;
     setState(() => _selected.clear());
+  }
+
+  Future<void> _showBackgroundMenu(BuildContext context) async {
+    final dir = _currentDir;
+    if (dir == null || dir.isEmpty) return;
+    _ensurePanelFocus();
+    _clearSelection();
+    final name = dir.split(Platform.pathSeparator).last;
+    await showFsContextMenu(
+      context: context,
+      globalPosition: _backgroundMenuPos,
+      path: dir,
+      isDir: true,
+      displayName: name.isEmpty ? dir : name,
+      background: true,
+      onOpen: () async {},
+      onChanged: () {
+        _clearSelection();
+        _reloadAndSyncTree();
+      },
+    );
+  }
+
+  /// 空白处右键；点在条目上时交给条目自己的菜单。
+  Widget _wrapBackgroundMenu(BuildContext context, Widget child) {
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onSecondaryTapDown: (d) => _backgroundMenuPos = d.globalPosition,
+      onSecondaryTap: () {
+        if (_hitTestItem(_backgroundMenuPos) != null) return;
+        unawaited(_showBackgroundMenu(context));
+      },
+      child: child,
+    );
   }
 
   String? _hitTestItem(Offset global) {
@@ -562,6 +723,7 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
 
   void _onGridPointerDown(PointerDownEvent e) {
     if (e.buttons != kPrimaryMouseButton) return;
+    _ensurePanelFocus();
     final box =
         _gridStackKey.currentContext?.findRenderObject() as RenderBox?;
     if (box == null) return;
@@ -1028,27 +1190,36 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
     final dir = _currentDir;
     Widget body;
     if (_loading && _entries.isEmpty) {
-      body = const Center(child: CircularProgressIndicator());
+      body = _wrapBackgroundMenu(
+        context,
+        const Center(child: CircularProgressIndicator()),
+      );
     } else if (_visibleEntries.isEmpty) {
-      body = Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Icon(Icons.folder_open, size: 48, color: Colors.grey),
-            const SizedBox(height: 8),
-            Text(
-              _entries.isEmpty ? '此目录为空' : '无匹配内容',
-              style: TextStyle(color: Colors.grey[500]),
-            ),
-            if (_entries.isEmpty)
-              Padding(
-                padding: const EdgeInsets.only(top: 6),
-                child: Text(
-                  '可从资源管理器拖入文件，或在应用内拖拽整理',
-                  style: TextStyle(fontSize: 11, color: Colors.grey[600]),
+      body = _wrapBackgroundMenu(
+        context,
+        SizedBox.expand(
+          child: Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.folder_open, size: 48, color: Colors.grey),
+                const SizedBox(height: 8),
+                Text(
+                  _entries.isEmpty ? '此目录为空' : '无匹配内容',
+                  style: TextStyle(color: Colors.grey[500]),
                 ),
-              ),
-          ],
+                if (_entries.isEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 6),
+                    child: Text(
+                      '可从资源管理器拖入文件，或在应用内拖拽整理',
+                      style:
+                          TextStyle(fontSize: 11, color: Colors.grey[600]),
+                    ),
+                  ),
+              ],
+            ),
+          ),
         ),
       );
     } else {
@@ -1074,28 +1245,36 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
               itemBuilder: (context, index) =>
                   _buildAssetItem(entries[index], list: false),
             );
-      final selectable = Listener(
+      final selectable = GestureDetector(
         behavior: HitTestBehavior.translucent,
-        onPointerDown: _onGridPointerDown,
-        onPointerMove: _onGridPointerMove,
-        onPointerUp: _onGridPointerUp,
-        onPointerCancel: _onGridPointerCancel,
-        child: Stack(
-          key: _gridStackKey,
-          children: [
-            content,
-            if (_marqueeRect != null)
-              Positioned.fill(
-                child: IgnorePointer(
-                  child: CustomPaint(
-                    painter: _MarqueePainter(
-                      rect: _marqueeRect!,
-                      color: primary,
+        onSecondaryTapDown: (d) => _backgroundMenuPos = d.globalPosition,
+        onSecondaryTap: () {
+          if (_hitTestItem(_backgroundMenuPos) != null) return;
+          unawaited(_showBackgroundMenu(context));
+        },
+        child: Listener(
+          behavior: HitTestBehavior.translucent,
+          onPointerDown: _onGridPointerDown,
+          onPointerMove: _onGridPointerMove,
+          onPointerUp: _onGridPointerUp,
+          onPointerCancel: _onGridPointerCancel,
+          child: Stack(
+            key: _gridStackKey,
+            children: [
+              content,
+              if (_marqueeRect != null)
+                Positioned.fill(
+                  child: IgnorePointer(
+                    child: CustomPaint(
+                      painter: _MarqueePainter(
+                        rect: _marqueeRect!,
+                        color: primary,
+                      ),
                     ),
                   ),
                 ),
-              ),
-          ],
+            ],
+          ),
         ),
       );
       body = _viewMode == _AssetViewMode.list

@@ -119,6 +119,28 @@ final fsClipboardProvider = StateProvider<FsClipboardEntry?>((ref) => null);
 final treeSelectionProvider =
     StateProvider<List<FsClipboardItem>>((ref) => []);
 
+/// 最近一次与文件系统快捷键相关的操作面板（树 / 物料）。
+enum FsShortcutPane { none, tree, assets }
+
+final fsShortcutPaneProvider =
+    StateProvider<FsShortcutPane>((ref) => FsShortcutPane.none);
+
+/// 主布局发出的文件快捷键请求；树 / 物料栏按 [pane] 消费。
+class FsShortcutRequest {
+  final String action;
+  final FsShortcutPane pane;
+  final int nonce;
+
+  const FsShortcutRequest({
+    required this.action,
+    required this.pane,
+    required this.nonce,
+  });
+}
+
+final fsShortcutRequestProvider =
+    StateProvider<FsShortcutRequest?>((ref) => null);
+
 /// 项目树根节点
 final treeRootProvider = StateProvider<ScriptNode?>((ref) => null);
 

@@ -23,6 +23,7 @@ class _MainLayoutState extends ConsumerState<MainLayout> {
   double _treeWidth = 280;
   double? _shellWidth; // null = 未初始化，首次布局时默认中间栏/Shell = 6/4
   WorkspaceSnapshot? _lastWorkspaceSnap;
+  int _fsShortcutNonce = 0;
 
   void _persistWorkspace() {
     final snap = WorkspaceSnapshot(
@@ -51,6 +52,56 @@ class _MainLayoutState extends ConsumerState<MainLayout> {
     sendAgentReferenceToShell(context, ref);
   }
 
+  bool _isTypingInTextField() {
+    final focus = FocusManager.instance.primaryFocus;
+    final ctx = focus?.context;
+    if (ctx == null) return false;
+    if (ctx.widget is EditableText ||
+        ctx.widget is TextField ||
+        ctx.widget is TextFormField) {
+      return true;
+    }
+    var typing = false;
+    ctx.visitAncestorElements((element) {
+      final w = element.widget;
+      if (w is EditableText || w is TextField || w is TextFormField) {
+        typing = true;
+        return false;
+      }
+      return true;
+    });
+    return typing;
+  }
+
+  bool _isInModalDialog() {
+    final ctx = FocusManager.instance.primaryFocus?.context;
+    if (ctx == null) return false;
+    return ctx.findAncestorWidgetOfExactType<Dialog>() != null ||
+        ctx.findAncestorWidgetOfExactType<AlertDialog>() != null;
+  }
+
+  /// 文件操作快捷键由主布局统一发出，避免焦点不在树/物料子树时 CallbackShortcuts 失效。
+  void _dispatchFsShortcut(String action) {
+    if (_isTypingInTextField()) return;
+    // 确认框等弹窗打开时，把 Enter/快捷键留给弹窗按钮。
+    if (_isInModalDialog()) return;
+    var pane = ref.read(fsShortcutPaneProvider);
+    if (pane == FsShortcutPane.none) {
+      if (ref.read(treeSelectionProvider).isNotEmpty) {
+        pane = FsShortcutPane.tree;
+      } else if (ref.read(contentModeProvider) == 'assets') {
+        pane = FsShortcutPane.assets;
+      } else {
+        return;
+      }
+    }
+    ref.read(fsShortcutRequestProvider.notifier).state = FsShortcutRequest(
+      action: action,
+      pane: pane,
+      nonce: ++_fsShortcutNonce,
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final shellVisible = ref.watch(shellVisibleProvider);
@@ -73,6 +124,27 @@ class _MainLayoutState extends ConsumerState<MainLayout> {
         }),
         // 当前文件/选区引用 → 智能体输入区（不回车）；组合键可在设置中改
         agentChord.toActivator(): _sendAgentReference,
+        // 文件操作：交由目录树 / 物料栏按最近活动面板消费
+        const SingleActivator(LogicalKeyboardKey.delete): () =>
+            _dispatchFsShortcut('delete'),
+        const SingleActivator(LogicalKeyboardKey.keyC, control: true): () =>
+            _dispatchFsShortcut('copy'),
+        const SingleActivator(LogicalKeyboardKey.keyX, control: true): () =>
+            _dispatchFsShortcut('cut'),
+        const SingleActivator(LogicalKeyboardKey.keyV, control: true): () =>
+            _dispatchFsShortcut('paste'),
+        const SingleActivator(LogicalKeyboardKey.f2): () =>
+            _dispatchFsShortcut('rename'),
+        const SingleActivator(LogicalKeyboardKey.enter): () =>
+            _dispatchFsShortcut('open'),
+        const SingleActivator(LogicalKeyboardKey.numpadEnter): () =>
+            _dispatchFsShortcut('open'),
+        const SingleActivator(LogicalKeyboardKey.escape): () =>
+            _dispatchFsShortcut('escape'),
+        const SingleActivator(LogicalKeyboardKey.keyA, control: true): () =>
+            _dispatchFsShortcut('selectAll'),
+        const SingleActivator(LogicalKeyboardKey.backspace): () =>
+            _dispatchFsShortcut('backspace'),
       },
       child: Focus(
         autofocus: true,
