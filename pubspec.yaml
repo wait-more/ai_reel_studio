@@ -21,6 +21,8 @@ dependencies:
   media_kit: ^1.2.6
   media_kit_libs_windows_video: ^1.0.11
   media_kit_video: ^2.0.1
+  # 2.2.x 才能与 flterm(hooks 2) 共存；用本地 opencv.full 预编译（见 fetch/patch 脚本）
+  opencv_dart: 2.2.2
   path: ^1.9.0
   path_provider: ^2.1.5
   desktop_drop: ^0.5.0
@@ -36,6 +38,15 @@ dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^5.0.0
+
+# dartcv4：只编抽帧需要的模块；OpenCV SDK 由 scripts/fetch_opencv_full.ps1 镜像预置。
+hooks:
+  user_defines:
+    dartcv4:
+      include_modules:
+        - imgcodecs
+        - imgproc
+        - videoio
 
 flutter:
   uses-material-design: true

@@ -85,6 +85,11 @@
 
 ```bash
 flutter pub get
+# 首次：镜像拉取 opencv.full（约 160MB，已有则跳过），并写入 tools/opencv-full/env.ps1
+powershell -ExecutionPolicy Bypass -File scripts/fetch_opencv_full.ps1
+. .\tools\opencv-full\env.ps1
+# 让 dartcv4 用本地预编译包（不要源码编译）
+powershell -ExecutionPolicy Bypass -File scripts/patch_dartcv_local_opencv.ps1
 flutter run -d windows
 ```
 
@@ -94,13 +99,15 @@ flutter run -d windows
 powershell -ExecutionPolicy Bypass -File scripts/pack_windows.ps1
 ```
 
-需本机已装 Flutter；安装器还依赖 [Inno Setup](https://jrsoftware.org/isinfo.php)。产物默认输出到 `dist/`。
+`pack_windows.ps1` 会自动拉取 OpenCV、打补丁再编译。需本机已装 Flutter；安装器还依赖 [Inno Setup](https://jrsoftware.org/isinfo.php)。产物默认输出到 `dist/`。
+
+抽帧使用 `opencv_dart`（`CAP_PROP_POS_FRAMES` 直接取末帧）；原生 OpenCV SDK 不进 git，缓存在 `tools/opencv-full/`。
 
 ---
 
 ## 技术栈（简）
 
-Flutter / Dart · Riverpod · 嵌入终端（kyroon_pty + flterm）· media_kit · window_manager · SharedPreferences
+Flutter / Dart · Riverpod · 嵌入终端（kyroon_pty + flterm）· media_kit · opencv_dart · window_manager · SharedPreferences
 
 平台优先级：**Windows（主）** → Linux / Android（工程壳，非正式分发）→ 当前无 macOS 工程。
 

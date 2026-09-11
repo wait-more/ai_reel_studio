@@ -11,6 +11,7 @@ import 'file_actions.dart';
 import 'media_types.dart';
 import 'providers.dart';
 import 'toast.dart';
+import 'video_frame_extract.dart';
 
 /// 兼容调用点的包装；切换菜单不依赖此组件做命中。
 class FsContextMenuTarget extends StatelessWidget {
@@ -653,12 +654,16 @@ Future<void> _grabFrame(
     path: path,
     tag: tag,
     lastFrame: lastFrame,
-    hostContext: context,
   );
   if (!context.mounted) return;
+  final err = VideoFrameExtract.lastError;
   showGlobalToast(
     context,
-    result != null ? '已保存：$result' : '截帧失败：未取得帧数据',
+    result != null
+        ? '已保存：$result'
+        : (err != null && err.isNotEmpty
+            ? '截帧失败：$err'
+            : '截帧失败：未取得帧数据'),
     overlay: overlay,
   );
   if (result != null) onChanged();

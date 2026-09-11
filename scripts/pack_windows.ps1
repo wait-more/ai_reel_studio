@@ -180,6 +180,21 @@ Write-Host "==> Flutter pub get" -ForegroundColor Cyan
 flutter pub get
 if ($LASTEXITCODE -ne 0) { throw "flutter pub get failed" }
 
+# OpenCV（opencv.full）：缺本地包则自动镜像拉取（已有则跳过）
+$EnsureOpenCv = Join-Path $PSScriptRoot 'fetch_opencv_full.ps1'
+Write-Host "==> Ensure OpenCV local bundle" -ForegroundColor Cyan
+& powershell -ExecutionPolicy Bypass -File $EnsureOpenCv
+if ($LASTEXITCODE -ne 0) { throw "fetch_opencv_full.ps1 failed" }
+$OpenCvEnv = Join-Path $Root 'tools\opencv-full\env.ps1'
+if (-not (Test-Path $OpenCvEnv)) { throw "missing $OpenCvEnv after fetch" }
+. $OpenCvEnv
+Write-Host "==> OpenCV_DIR=$env:OpenCV_DIR" -ForegroundColor Cyan
+
+$PatchDartCv = Join-Path $PSScriptRoot 'patch_dartcv_local_opencv.ps1'
+Write-Host "==> Patch dartcv4 to use local OpenCV (no source build)" -ForegroundColor Cyan
+& powershell -ExecutionPolicy Bypass -File $PatchDartCv
+if ($LASTEXITCODE -ne 0) { throw "patch_dartcv_local_opencv.ps1 failed" }
+
 Write-Host "==> flutter build windows $FlutterBuildFlag (v$Version, $Configuration)" -ForegroundColor Cyan
 flutter build windows $FlutterBuildFlag
 if ($LASTEXITCODE -ne 0) { throw "flutter build windows failed" }
