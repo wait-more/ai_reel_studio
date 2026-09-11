@@ -151,16 +151,19 @@ class _MainLayoutState extends ConsumerState<MainLayout> with WindowListener {
         await _saveAllDirty();
         if (!mounted) return;
         if (ref.read(dirtyFilesProvider).isEmpty) {
-          showGlobalToast(context, '已保存。请再次关闭程序');
+          await _allowWindowClose();
         } else {
           showGlobalToast(context, '部分文档保存失败');
         }
       } else if (action == 'discard') {
-        // 先通知编辑器从磁盘恢复，再清草稿/脏标记，避免误把内存稿当已保存。
+        // 放弃修改并留在程序内；脏标记清掉后再次关闭即可退出。
         ref.read(discardUnsavedEditsTickProvider.notifier).state++;
         ref.read(dirtyFilesProvider.notifier).state = {};
         ref.read(draftContentsProvider.notifier).state = {};
-        showGlobalToast(context, '已放弃修改。请再次关闭程序');
+        await Future<void>.delayed(const Duration(milliseconds: 120));
+        if (!mounted) return;
+        ref.read(dirtyFilesProvider.notifier).state = {};
+        showGlobalToast(context, '已放弃修改');
       }
     } finally {
       _closePromptOpen = false;

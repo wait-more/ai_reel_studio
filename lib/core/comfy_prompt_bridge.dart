@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:re_editor/re_editor.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'comfy/comfy_gen_session.dart';
@@ -314,61 +315,66 @@ class _ComfyPromptFillSubmenuButtonState
           letterSpacing: -0.15,
           fontWeight: FontWeight.w400,
         );
-        // 与 DesktopTextSelectionToolbar 同款卡片。
-        // 必须挂入 TextField / SelectableRegion 的 TapRegion 组，否则点击二级
-        // 菜单会被当成「点在选区工具栏外」先 dispose，按钮 onPressed 永远不跑。
+        // 全屏吸收层：避免点击穿透到一级菜单的「点空白关闭」；
+        // 点在菜单外则关掉一级+二级。菜单本体用 CodeEditorTapRegion。
         return Stack(
           children: [
+            Positioned.fill(
+              child: GestureDetector(
+                behavior: HitTestBehavior.translucent,
+                onTap: () {
+                  _removeMenu();
+                  ContextMenuController.removeAny();
+                },
+              ),
+            ),
             Positioned(
               left: topLeft.dx,
               top: topLeft.dy,
-              child: TapRegion(
-                groupId: SelectableRegion,
-                child: TextFieldTapRegion(
-                  child: MouseRegion(
-                    onEnter: (_) {
-                      _overMenu = true;
-                      _cancelClose();
-                      if (mounted) setState(() {});
-                    },
-                    onExit: (_) {
-                      _overMenu = false;
-                      _scheduleClose();
-                      if (mounted) setState(() {});
-                    },
-                    child: Material(
-                      borderRadius: const BorderRadius.all(Radius.circular(7)),
-                      clipBehavior: Clip.antiAlias,
-                      elevation: 1,
-                      type: MaterialType.card,
-                      child: SizedBox(
-                        width: 222,
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.stretch,
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            if (hasLast)
-                              Tooltip(
-                                message: fullLabel,
-                                waitDuration:
-                                    const Duration(milliseconds: 250),
-                                child: DesktopTextSelectionToolbarButton(
-                                  onPressed: () => _run(useLast: true),
-                                  child: Text(
-                                    '填入上次：$shortLabel',
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: labelStyle.copyWith(color: fg),
-                                  ),
+              child: CodeEditorTapRegion(
+                child: MouseRegion(
+                  onEnter: (_) {
+                    _overMenu = true;
+                    _cancelClose();
+                    if (mounted) setState(() {});
+                  },
+                  onExit: (_) {
+                    _overMenu = false;
+                    _scheduleClose();
+                    if (mounted) setState(() {});
+                  },
+                  child: Material(
+                    borderRadius: const BorderRadius.all(Radius.circular(7)),
+                    clipBehavior: Clip.antiAlias,
+                    elevation: 1,
+                    type: MaterialType.card,
+                    child: SizedBox(
+                      width: 222,
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          if (hasLast)
+                            Tooltip(
+                              message: fullLabel,
+                              waitDuration:
+                                  const Duration(milliseconds: 250),
+                              child: DesktopTextSelectionToolbarButton(
+                                onPressed: () => _run(useLast: true),
+                                child: Text(
+                                  '填入上次：$shortLabel',
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: labelStyle.copyWith(color: fg),
                                 ),
                               ),
-                            DesktopTextSelectionToolbarButton.text(
-                              context: ctx,
-                              onPressed: () => _run(useLast: false),
-                              text: '选择目标…',
                             ),
-                          ],
-                        ),
+                          DesktopTextSelectionToolbarButton.text(
+                            context: ctx,
+                            onPressed: () => _run(useLast: false),
+                            text: '选择目标…',
+                          ),
+                        ],
                       ),
                     ),
                   ),
