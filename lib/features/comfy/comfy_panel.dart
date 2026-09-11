@@ -274,6 +274,7 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
     _categoryOrder = [];
     _formError = null;
     _workflow = null;
+    _outputDir = null;
     _outputNameCtrl.clear();
   }
 
@@ -353,6 +354,7 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
       for (final f in _textFocus.values) {
         f.dispose();
       }
+      final rememberedOutputDir = session.outputDir.trim();
       setState(() {
         _textCtrls
           ..clear()
@@ -379,6 +381,8 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
           for (final raw in session.categoryOrder)
             if (int.tryParse(raw) != null) int.parse(raw),
         ];
+        _outputDir =
+            rememberedOutputDir.isEmpty ? null : rememberedOutputDir;
         _outputNameCtrl.text = session.outputFileName;
         _formError = null;
       });
@@ -498,6 +502,7 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
         for (final e in _values.entries)
           if (e.value != null) e.key: e.value,
       },
+      outputDir: _outputDir?.trim() ?? '',
       outputFileName: _outputNameCtrl.text.trim(),
     );
     await ComfyGenSession.save(
@@ -847,6 +852,9 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
     final next = targetSession.copyWith(
       values: Map<String, dynamic>.from(_values),
       enabled: enabled,
+      outputDir: (_outputDir?.trim().isNotEmpty == true)
+          ? _outputDir!.trim()
+          : targetSession.outputDir,
       outputFileName: sourceName.isEmpty
           ? targetSession.outputFileName
           : _withMinusOneSuffix(sourceName),
@@ -931,19 +939,24 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
     return (path: null, folderSelected: false);
   }
 
-  String _defaultOutputDir() {
+  /// 仅作「浏览」对话框的起始位置，不会自动写入输出目录。
+  String? _pickerInitialDir() {
+    final explicit = _outputDir?.trim() ?? '';
+    if (explicit.isNotEmpty) return explicit;
     final fromTree = _dirFromTreeSelection();
     if (fromTree != null && fromTree.isNotEmpty) return fromTree;
-    return AppConfig.instance.projectRoot;
+    final root = AppConfig.instance.projectRoot.trim();
+    return root.isEmpty ? null : root;
   }
 
   Future<void> _pickOutputDir() async {
     final path = await FilePicker.getDirectoryPath(
       dialogTitle: '选择生成输出目录',
-      initialDirectory: _outputDir ?? _defaultOutputDir(),
+      initialDirectory: _pickerInitialDir(),
     );
     if (path == null) return;
     setState(() => _outputDir = path);
+    _schedulePersistSession();
   }
 
   void _useSelectedAsOutputDir() {
@@ -957,6 +970,7 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
       return;
     }
     setState(() => _outputDir = base);
+    _schedulePersistSession();
     showGlobalToast(context, '已设为输出目录');
   }
 
@@ -1035,10 +1049,10 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
 
   String _resolveOutputDir() {
     final explicit = _outputDir?.trim() ?? '';
-    if (explicit.isNotEmpty) return explicit;
-    final fallback = _defaultOutputDir();
-    if (fallback.isEmpty) throw StateError('请先选择输出目录');
-    return fallback;
+    if (explicit.isEmpty) {
+      throw StateError('请先选择输出目录（「当前选中」或「浏览」）');
+    }
+    return explicit;
   }
 
   Map<String, dynamic> _deepCopyMap(Map<String, dynamic> src) =>
@@ -1106,8 +1120,9 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
     try {
       outputDir = _resolveOutputDir();
     } catch (e) {
-      setState(() => _formError = '$e');
-      showGlobalToast(context, '$e');
+      final msg = e is StateError ? e.message : '$e';
+      setState(() => _formError = msg);
+      showGlobalToast(context, msg);
       return;
     }
 
@@ -1750,9 +1765,8 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
 
   /// 运行输出功能区：目录 / 文件名 / 远端清理 / 任务队列。
   Widget _buildRunOutputZone(ColorScheme cs, List<_ComfyJob> serverJobs) {
-    final dirText = (_outputDir != null && _outputDir!.trim().isNotEmpty)
-        ? _outputDir!
-        : (_defaultOutputDir().isNotEmpty ? _defaultOutputDir() : '未选择');
+    final explicit = _outputDir?.trim() ?? '';
+    final dirText = explicit.isNotEmpty ? explicit : '未选择';
     final deleteRemote = ref.watch(comfyDeleteRemoteAfterDownloadProvider);
 
     return Container(

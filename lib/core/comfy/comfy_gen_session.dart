@@ -2,7 +2,13 @@ import 'dart:convert';
 
 import 'package:shared_preferences/shared_preferences.dart';
 
-/// 生成面板会话状态（按 URL + 模板 一份），整合排序/使能/展开/输入值。
+/// 生成面板会话记忆（按「服务器 URL + 模板」一份，同键读写）。
+///
+/// 一并保存：
+/// - 节点排序 / 分类分区顺序
+/// - 节点使能、节点与分类展开
+/// - 各暴露字段输入值（路径 / 文本 / 数字 / 布尔）
+/// - 运行输出：输出目录、保存文件名
 class ComfyGenSession {
   final List<String> order;
   /// 分类分区顺序（[ComfyNodeGroup.sortCategory] 的整型字符串）。
@@ -13,6 +19,8 @@ class ComfyGenSession {
   final Map<String, bool> categoryExpanded;
   /// fieldId → 可 JSON 序列化的值（路径/文本/数字/布尔）。
   final Map<String, dynamic> values;
+  /// 用户设定的输出目录；空表示未选择（不自动回退）。
+  final String outputDir;
   /// 保存文件名（无扩展名或带扩展名均可）；空则沿用 Comfy 返回名。
   final String outputFileName;
 
@@ -23,6 +31,7 @@ class ComfyGenSession {
     this.expanded = const {},
     this.categoryExpanded = const {},
     this.values = const {},
+    this.outputDir = '',
     this.outputFileName = '',
   });
 
@@ -41,6 +50,7 @@ class ComfyGenSession {
         'expanded': expanded,
         'categoryExpanded': categoryExpanded,
         'values': values,
+        'outputDir': outputDir,
         'outputFileName': outputFileName,
       };
 
@@ -71,6 +81,7 @@ class ComfyGenSession {
       expanded: boolMap(json['expanded']),
       categoryExpanded: boolMap(json['categoryExpanded']),
       values: valueMap(json['values']),
+      outputDir: json['outputDir']?.toString() ?? '',
       outputFileName: json['outputFileName']?.toString() ?? '',
     );
   }
@@ -82,6 +93,7 @@ class ComfyGenSession {
     Map<String, bool>? expanded,
     Map<String, bool>? categoryExpanded,
     Map<String, dynamic>? values,
+    String? outputDir,
     String? outputFileName,
   }) {
     return ComfyGenSession(
@@ -91,6 +103,7 @@ class ComfyGenSession {
       expanded: expanded ?? this.expanded,
       categoryExpanded: categoryExpanded ?? this.categoryExpanded,
       values: values ?? this.values,
+      outputDir: outputDir ?? this.outputDir,
       outputFileName: outputFileName ?? this.outputFileName,
     );
   }

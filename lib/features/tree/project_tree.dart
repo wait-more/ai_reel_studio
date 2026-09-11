@@ -54,8 +54,31 @@ class _ProjectTreeState extends ConsumerState<ProjectTree> {
         if (anchor != null && anchor.isNotEmpty) {
           _expandTo(anchor);
         }
+        _seedTreeSelectionFromWorkspace();
         _publishExpandedPaths();
       });
+    }
+  }
+
+  /// 启动恢复后：把树多选列表收成单一导航项，避免 file+dir 双高亮。
+  void _seedTreeSelectionFromWorkspace() {
+    if (ref.read(treeSelectionProvider).isNotEmpty) return;
+    final mode = ref.read(contentModeProvider);
+    if (mode == 'assets') {
+      final dir = ref.read(selectedDirProvider);
+      if (dir != null && dir.isNotEmpty) {
+        _setTreeSelection([FsClipboardItem(path: dir, isDir: true)]);
+      }
+      return;
+    }
+    final file = ref.read(selectedFileProvider);
+    if (file != null && file.isNotEmpty) {
+      _setTreeSelection([FsClipboardItem(path: file, isDir: false)]);
+      return;
+    }
+    final dir = ref.read(selectedDirProvider);
+    if (dir != null && dir.isNotEmpty) {
+      _setTreeSelection([FsClipboardItem(path: dir, isDir: true)]);
     }
   }
 
@@ -668,7 +691,7 @@ class _TreeNodeWidgetState extends ConsumerState<_TreeNodeWidget> {
     );
   }
 
-  /// 选中目录并写入 [selectedDirProvider]（生成栏可用作默认输出目录）。
+  /// 选中目录并写入 [selectedDirProvider]。
   ///
   /// 默认**不**切换中间栏模式：仅在素材栏时，中间网格会随 [selectedDirProvider]
   /// 同步；[forceAssets] 为 true 时（如右键「打开」）才切到素材栏。
@@ -787,19 +810,21 @@ class _TreeNodeWidgetState extends ConsumerState<_TreeNodeWidget> {
         !isFile && ref.watch(selectedDirProvider) == node.path;
     final treeMulti = ref.watch(treeSelectionProvider);
     final inTreeMulti = treeMulti.any((i) => i.path == node.path);
-    // 有树选中列表时只认它；否则按当前中间栏模式只高亮一个导航目标，
-    // 避免 selectedFile + selectedDir 同时亮起（未按 Ctrl 却像多选）。
+    // 有树选中列表时只认它；否则只高亮一个导航目标。
+    // selectedFile / selectedDir 会同时被工作区恢复，不能 OR 否则像多选。
     final bool selected;
     if (treeMulti.isNotEmpty) {
       selected = inTreeMulti;
     } else {
       final mode = ref.watch(contentModeProvider);
-      if (mode == 'editor') {
-        selected = isFile && fileSelected;
-      } else if (mode == 'assets') {
+      if (mode == 'assets') {
         selected = !isFile && dirSelected;
       } else {
-        selected = fileSelected || dirSelected;
+        // 文档 / 生成栏：优先文件；没有文件再亮目录。
+        final hasFile =
+            ref.watch(selectedFileProvider)?.isNotEmpty == true;
+        selected =
+            hasFile ? (isFile && fileSelected) : (!isFile && dirSelected);
       }
     }
     final multiDrag = treeMulti.length > 1 && inTreeMulti ? treeMulti : null;
