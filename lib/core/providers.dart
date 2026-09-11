@@ -130,6 +130,10 @@ final fsClipboardProvider = StateProvider<FsClipboardEntry?>((ref) => null);
 final treeSelectionProvider =
     StateProvider<List<FsClipboardItem>>((ref) => []);
 
+/// 当前树选中是否由 Ctrl+单击建立。
+/// 为 false 时再次 Ctrl+单击会丢弃旧选中并只保留当前项；为 true 时可继续 Ctrl 叠加。
+final treeSelectionByCtrlProvider = StateProvider<bool>((ref) => false);
+
 /// 最近一次与文件系统快捷键相关的操作面板（树 / 物料）。
 enum FsShortcutPane { none, tree, assets }
 

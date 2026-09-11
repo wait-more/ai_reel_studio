@@ -275,6 +275,7 @@ class _ProjectTreeState extends ConsumerState<ProjectTree> {
 
   void _setTreeSelection(List<FsClipboardItem> items) {
     ref.read(treeSelectionProvider.notifier).state = items;
+    ref.read(treeSelectionByCtrlProvider.notifier).state = false;
     ref.read(fsShortcutPaneProvider.notifier).state = FsShortcutPane.tree;
   }
 
@@ -643,6 +644,7 @@ class _TreeNodeWidgetState extends ConsumerState<_TreeNodeWidget> {
     if (!inMulti) {
       multi = [FsClipboardItem(path: node.path, isDir: !isFile)];
       ref.read(treeSelectionProvider.notifier).state = multi;
+      ref.read(treeSelectionByCtrlProvider.notifier).state = false;
     }
     await showFsContextMenu(
       context: context,
@@ -660,6 +662,7 @@ class _TreeNodeWidgetState extends ConsumerState<_TreeNodeWidget> {
       },
       onChanged: () {
         ref.read(treeSelectionProvider.notifier).state = [];
+        ref.read(treeSelectionByCtrlProvider.notifier).state = false;
         widget.onTreeChanged(isFile ? dir : node.path);
       },
     );
@@ -681,30 +684,21 @@ class _TreeNodeWidgetState extends ConsumerState<_TreeNodeWidget> {
       HardwareKeyboard.instance.isControlPressed ||
       HardwareKeyboard.instance.isMetaPressed;
 
-  void _setSingleTreeSelection({required String path, required bool isDir}) {
+  void _setSingleTreeSelection({
+    required String path,
+    required bool isDir,
+    bool byCtrl = false,
+  }) {
     ref.read(treeSelectionProvider.notifier).state = [
       FsClipboardItem(path: path, isDir: isDir),
     ];
+    ref.read(treeSelectionByCtrlProvider.notifier).state = byCtrl;
     ref.read(fsShortcutPaneProvider.notifier).state = FsShortcutPane.tree;
   }
 
-  void _toggleTreeSelection({required String path, required bool isDir}) {
+  /// Ctrl 叠加多选（不再从普通导航状态偷偷塞入旧项）。
+  void _toggleTreeSelectionCtrl({required String path, required bool isDir}) {
     final current = List<FsClipboardItem>.of(ref.read(treeSelectionProvider));
-    // 从「当前高亮项」起步，而不是同时塞入 file+dir 两个导航状态。
-    if (current.isEmpty) {
-      final mode = ref.read(contentModeProvider);
-      if (mode == 'editor') {
-        final file = ref.read(selectedFileProvider);
-        if (file != null && file.isNotEmpty && file != path) {
-          current.add(FsClipboardItem(path: file, isDir: false));
-        }
-      } else {
-        final dir = ref.read(selectedDirProvider);
-        if (dir != null && dir.isNotEmpty && dir != path) {
-          current.add(FsClipboardItem(path: dir, isDir: true));
-        }
-      }
-    }
     final idx = current.indexWhere((i) => i.path == path);
     if (idx >= 0) {
       current.removeAt(idx);
@@ -713,13 +707,38 @@ class _TreeNodeWidgetState extends ConsumerState<_TreeNodeWidget> {
     }
     ref.read(treeSelectionProvider.notifier).state = current;
     ref.read(fsShortcutPaneProvider.notifier).state = FsShortcutPane.tree;
+    if (current.isEmpty) {
+      ref.read(treeSelectionByCtrlProvider.notifier).state = false;
+    }
   }
 
   void _onNodeTap({required bool isFile}) {
     widget.onInteract();
     final path = widget.node.path;
     if (_ctrlHeld) {
-      _toggleTreeSelection(path: path, isDir: !isFile);
+      final byCtrl = ref.read(treeSelectionByCtrlProvider);
+      if (!byCtrl) {
+        // 首次 Ctrl+单击：丢弃普通选中，只保留当前项；文件不打开。
+        _setSingleTreeSelection(path: path, isDir: !isFile, byCtrl: true);
+        if (isFile) {
+          ref.read(selectedFileProvider.notifier).state = path;
+        } else {
+          ref.read(selectedDirProvider.notifier).state = path;
+        }
+      } else {
+        _toggleTreeSelectionCtrl(path: path, isDir: !isFile);
+        if (isFile) {
+          final still = ref.read(treeSelectionProvider).any((i) => i.path == path);
+          if (still) {
+            ref.read(selectedFileProvider.notifier).state = path;
+          }
+        } else {
+          final still = ref.read(treeSelectionProvider).any((i) => i.path == path);
+          if (still) {
+            ref.read(selectedDirProvider.notifier).state = path;
+          }
+        }
+      }
       return;
     }
     if (isFile) {
@@ -804,6 +823,7 @@ class _TreeNodeWidgetState extends ConsumerState<_TreeNodeWidget> {
             },
             onChanged: () {
               ref.read(treeSelectionProvider.notifier).state = [];
+              ref.read(treeSelectionByCtrlProvider.notifier).state = false;
               widget.onTreeChanged(
                 isFile ? Directory(node.path).parent.path : node.path,
               );
@@ -816,6 +836,7 @@ class _TreeNodeWidgetState extends ConsumerState<_TreeNodeWidget> {
               dragItems: multiDrag,
               onChanged: () {
                 ref.read(treeSelectionProvider.notifier).state = [];
+                ref.read(treeSelectionByCtrlProvider.notifier).state = false;
                 widget.onTreeChanged(
                   isFile ? Directory(node.path).parent.path : node.path,
                 );

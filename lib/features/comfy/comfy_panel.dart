@@ -890,10 +890,51 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
     return '$base-1$ext';
   }
 
+  /// 从目录树当前选中解析目录：选中文件夹则用其本身，选中文件则用其所在目录。
+  String? _dirFromTreeSelection() {
+    final multi = ref.read(treeSelectionProvider);
+    if (multi.length == 1) {
+      final it = multi.first;
+      if (it.isDir) {
+        return it.path.isEmpty ? null : it.path;
+      }
+      final parent = p.dirname(it.path);
+      if (parent.isEmpty || parent == '.') return null;
+      return parent;
+    }
+    final file = ref.read(selectedFileProvider);
+    if (file != null && file.isNotEmpty) {
+      final parent = p.dirname(file);
+      if (parent.isNotEmpty && parent != '.') return parent;
+    }
+    final dir = ref.read(selectedDirProvider);
+    if (dir != null && dir.isNotEmpty) return dir;
+    return null;
+  }
+
+  /// 从目录树解析单个文件路径；若当前明确选中的是文件夹则返回 [null] 且 [folderSelected] 为 true。
+  ({String? path, bool folderSelected}) _fileFromTreeSelection() {
+    final multi = ref.read(treeSelectionProvider);
+    if (multi.length == 1) {
+      final it = multi.first;
+      if (it.isDir) return (path: null, folderSelected: true);
+      return (path: it.path, folderSelected: false);
+    }
+    final file = ref.read(selectedFileProvider);
+    if (file != null && file.isNotEmpty) {
+      return (path: file, folderSelected: false);
+    }
+    final dir = ref.read(selectedDirProvider);
+    if (dir != null && dir.isNotEmpty) {
+      return (path: null, folderSelected: true);
+    }
+    return (path: null, folderSelected: false);
+  }
+
   String _defaultOutputDir() {
-    final selectedDir = ref.read(selectedDirProvider);
-    final root = AppConfig.instance.projectRoot;
-    return selectedDir ?? root;
+    final fromTree = _dirFromTreeSelection();
+    if (fromTree != null && fromTree.isNotEmpty) return fromTree;
+    return AppConfig.instance.projectRoot;
   }
 
   Future<void> _pickOutputDir() async {
@@ -906,12 +947,90 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
   }
 
   void _useSelectedAsOutputDir() {
-    final base = _defaultOutputDir();
-    if (base.isEmpty) {
-      showGlobalToast(context, '请先在左侧选中目录');
+    final base = _dirFromTreeSelection();
+    if (base == null || base.isEmpty) {
+      unawaited(_promptTreeSelection(
+        title: '未选中目录',
+        reason: '请先在目录树中选中文件夹或文件。',
+        ctrlHint: '可使用 Ctrl+单击 选中文件（不会打开）；选中文件时将使用其所在目录。',
+      ));
       return;
     }
     setState(() => _outputDir = base);
+    showGlobalToast(context, '已设为输出目录');
+  }
+
+  Future<void> _promptTreeSelection({
+    required String title,
+    required String reason,
+    required String ctrlHint,
+  }) async {
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) {
+        final scheme = Theme.of(ctx).colorScheme;
+        return AlertDialog(
+          titlePadding: const EdgeInsets.fromLTRB(24, 20, 24, 0),
+          contentPadding: const EdgeInsets.fromLTRB(24, 12, 24, 8),
+          actionsPadding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+          title: Text(
+            title,
+            style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+          ),
+          content: SizedBox(
+            width: 320,
+            child: Text(
+              '$reason\n\n$ctrlHint',
+              style: TextStyle(
+                fontSize: 13,
+                height: 1.45,
+                color: scheme.onSurfaceVariant,
+              ),
+            ),
+          ),
+          actions: [
+            FilledButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('知道了'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Future<void> _promptSelectFile({
+    required String reason,
+    String ctrlHint =
+        '请使用 Ctrl+单击 在目录树中选中文件后再试（不会打开文件）。',
+  }) {
+    return _promptTreeSelection(
+      title: '无法使用当前选中',
+      reason: reason,
+      ctrlHint: ctrlHint,
+    );
+  }
+
+  void _useSelectedFile(ComfyExposedField field) {
+    final picked = _fileFromTreeSelection();
+    if (picked.folderSelected) {
+      unawaited(_promptSelectFile(reason: '目录树当前选中的是文件夹。'));
+      return;
+    }
+    final f = picked.path;
+    if (f == null || f.isEmpty) {
+      unawaited(_promptSelectFile(reason: '目录树尚未选中文件。'));
+      return;
+    }
+    if (!_mediaMatches(field.widget, f)) {
+      unawaited(_promptSelectFile(
+        reason: '选中文件类型与当前节点不匹配。',
+        ctrlHint: '请使用 Ctrl+单击 在目录树中选中匹配类型的文件后再试（不会打开文件）。',
+      ));
+      return;
+    }
+    _setFieldValue(field.id, f);
   }
 
   String _resolveOutputDir() {
@@ -1227,15 +1346,6 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
     if (dir.isEmpty || dir == '.') return null;
     if (!Directory(dir).existsSync()) return null;
     return dir;
-  }
-
-  void _useSelectedFile(ComfyExposedField field) {
-    final f = ref.read(selectedFileProvider);
-    if (f == null || !_mediaMatches(field.widget, f)) {
-      showGlobalToast(context, '请先选中匹配类型的文件');
-      return;
-    }
-    _setFieldValue(field.id, f);
   }
 
   @override
