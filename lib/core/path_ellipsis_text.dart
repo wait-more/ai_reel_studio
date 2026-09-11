@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 
 /// 路径过长时从左侧省略、保留尾部（按父级可用宽度计算，含旁边按钮已占宽度）；
-/// 悬停显示完整文本。
+/// 悬停显示完整文本（仅文字区域触发，不占满 Expanded 空白）。
 class PathEllipsisText extends StatelessWidget {
   const PathEllipsisText(
     this.text, {
@@ -22,43 +22,55 @@ class PathEllipsisText extends StatelessWidget {
   Widget build(BuildContext context) {
     final effective = DefaultTextStyle.of(context).style.merge(style);
     final scaler = MediaQuery.textScalerOf(context);
+    final tip = text.trim();
 
-    final child = LayoutBuilder(
+    return LayoutBuilder(
       builder: (context, constraints) {
         final maxW = constraints.maxWidth;
+        final Widget label;
         if (!maxW.isFinite || maxW <= 0) {
-          return Text(
+          label = Text(
             text,
             maxLines: maxLines,
             overflow: TextOverflow.ellipsis,
             softWrap: maxLines > 1,
             style: effective,
           );
+        } else {
+          final display = _fitKeepingTail(
+            text: text,
+            style: effective,
+            maxWidth: maxW,
+            maxLines: maxLines,
+            textScaler: scaler,
+          );
+          label = Text(
+            display,
+            maxLines: maxLines,
+            softWrap: maxLines > 1,
+            overflow: TextOverflow.clip,
+            style: effective,
+            textAlign: TextAlign.left,
+          );
         }
-        final display = _fitKeepingTail(
-          text: text,
-          style: effective,
-          maxWidth: maxW,
-          maxLines: maxLines,
-          textScaler: scaler,
-        );
-        return Text(
-          display,
-          maxLines: maxLines,
-          softWrap: maxLines > 1,
-          overflow: TextOverflow.clip,
-          style: effective,
-          textAlign: TextAlign.left,
+
+        final tipped = tooltip && tip.isNotEmpty
+            ? Tooltip(
+                message: tip,
+                waitDuration: waitDuration,
+                child: label,
+              )
+            : label;
+
+        // widthFactor/heightFactor 使 Align 收缩到文字尺寸，
+        // 避免在 Expanded 里整行空白也弹出完整路径。
+        return Align(
+          alignment: Alignment.centerLeft,
+          widthFactor: 1,
+          heightFactor: 1,
+          child: tipped,
         );
       },
-    );
-
-    final tip = text.trim();
-    if (!tooltip || tip.isEmpty) return child;
-    return Tooltip(
-      message: tip,
-      waitDuration: waitDuration,
-      child: child,
     );
   }
 

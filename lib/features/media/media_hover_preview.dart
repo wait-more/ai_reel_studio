@@ -444,11 +444,13 @@ class _HoverPreviewLayerState extends State<_HoverPreviewLayer> {
 class MediaOutputFileRow extends StatelessWidget {
   final String path;
   final TextStyle? style;
+  final VoidCallback? onDelete;
 
   const MediaOutputFileRow({
     super.key,
     required this.path,
     this.style,
+    this.onDelete,
   });
 
   @override
@@ -461,6 +463,7 @@ class MediaOutputFileRow extends StatelessWidget {
       _ => Icons.insert_drive_file_outlined,
     };
     final name = p.basename(path);
+    final cs = Theme.of(context).colorScheme;
     final row = Row(
       children: [
         Icon(icon, size: 14, color: style?.color),
@@ -476,12 +479,27 @@ class MediaOutputFileRow extends StatelessWidget {
       ],
     );
 
-    if (kind == MediaKind.image ||
-        kind == MediaKind.video ||
-        kind == MediaKind.audio) {
-      return MediaHoverPreviewAnchor(path: path, child: row);
-    }
-    return row;
+    final body = (kind == MediaKind.image ||
+            kind == MediaKind.video ||
+            kind == MediaKind.audio)
+        ? MediaHoverPreviewAnchor(path: path, child: row)
+        : row;
+
+    if (onDelete == null) return body;
+
+    return Row(
+      children: [
+        Expanded(child: body),
+        IconButton(
+          tooltip: '删除文件',
+          icon: Icon(Icons.delete_outline, size: 16, color: cs.error),
+          visualDensity: VisualDensity.compact,
+          constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+          padding: EdgeInsets.zero,
+          onPressed: onDelete,
+        ),
+      ],
+    );
   }
 }
 

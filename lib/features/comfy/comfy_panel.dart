@@ -13,11 +13,20 @@ import '../../core/comfy/comfy_models.dart';
 import '../../core/comfy/comfy_template_store.dart';
 import '../../core/comfy_prompt_bridge.dart';
 import '../../core/config.dart';
+import '../../core/file_actions.dart';
 import '../../core/path_ellipsis_text.dart';
 import '../../core/providers.dart';
 import '../../core/toast.dart';
 import '../media/media_hover_preview.dart';
 import 'comfy_template_library.dart';
+
+String _formatJobElapsed(Duration elapsed) {
+  final s = elapsed.inSeconds;
+  final m = s ~/ 60;
+  final r = s % 60;
+  if (m <= 0) return '${r}s';
+  return '${m}m ${r.toString().padLeft(2, '0')}s';
+}
 
 class _ComfyBundle {
   final List<ComfyTemplate> templates;
@@ -74,6 +83,8 @@ class _ComfyJob {
   _ComfyJobPhase phase = _ComfyJobPhase.preparing;
   String detail = '准备中…';
   ComfyRunStatus? runStatus;
+  /// 累计用时；运行中跟 [runStatus]，结束后固化。
+  Duration elapsed = Duration.zero;
   String? error;
   List<String> outputs = const [];
 
@@ -83,6 +94,10 @@ class _ComfyJob {
       phase != _ComfyJobPhase.failed;
 
   bool get isTerminal => !isActive;
+
+  Duration get displayElapsed => runStatus?.elapsed ?? elapsed;
+
+  String get elapsedLabel => _formatJobElapsed(displayElapsed);
 }
 
 class ComfyPanel extends ConsumerStatefulWidget {
@@ -114,6 +129,7 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
   String? _formError;
   final List<_ComfyJob> _jobs = [];
   static const _kMaxJobs = 30;
+  final ScrollController _jobListScroll = ScrollController();
 
   Timer? _hotReloadTimer;
   Timer? _sessionPersistTimer;
@@ -137,6 +153,7 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
   void dispose() {
     _hotReloadTimer?.cancel();
     _sessionPersistTimer?.cancel();
+    _jobListScroll.dispose();
     _outputNameCtrl.dispose();
     for (final j in _jobs) {
       if (j.isActive) j.cancelToken.cancel();
@@ -1103,6 +1120,43 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
     );
   }
 
+  Future<void> _deleteJobOutput(_ComfyJob job, String path) async {
+    final ok = await deleteEntityDialog(
+      context,
+      path: path,
+      isDir: false,
+      onDone: () => ref.read(treeRefreshTickProvider.notifier).state++,
+    );
+    if (!ok || !mounted) return;
+    _mutateJob(job.id, (j) {
+      j.outputs = j.outputs.where((e) => e != path).toList(growable: false);
+    });
+    showGlobalToast(context, '已删除：${p.basename(path)}');
+  }
+
+  Future<void> _deleteAllJobOutputs(_ComfyJob job) async {
+    final paths = List<String>.from(job.outputs);
+    if (paths.isEmpty) return;
+    final ok = await deleteEntitiesDialog(
+      context,
+      items: [
+        for (final path in paths) FsClipboardItem(path: path, isDir: false),
+      ],
+      onDone: () => ref.read(treeRefreshTickProvider.notifier).state++,
+    );
+    if (!ok || !mounted) return;
+    final remain = <String>[];
+    for (final path in paths) {
+      if (await File(path).exists()) remain.add(path);
+    }
+    if (!mounted) return;
+    _mutateJob(job.id, (j) => j.outputs = List.unmodifiable(remain));
+    final removed = paths.length - remain.length;
+    if (removed > 0) {
+      showGlobalToast(context, '已删除 $removed 个生成文件');
+    }
+  }
+
   /// 入队一次生成：快照当前表单，不锁定界面；可继续编辑并再次生成。
   Future<void> _run() async {
     final template = _selected;
@@ -1174,15 +1228,23 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
 
     setState(() {
       _formError = null;
-      _jobs.insert(0, job);
-      // 每个 URL 各自保留上限，避免 A 的历史挤掉 B 的进行中任务。
+      _jobs.add(job);
+      // 每个 URL 各自保留上限；超限时丢掉该 URL 最早的已结束任务。
       while (_jobs.where((j) => j.serverId == job.serverId).length > _kMaxJobs) {
-        final idx = _jobs.lastIndexWhere(
+        final idx = _jobs.indexWhere(
           (j) => j.serverId == job.serverId && j.isTerminal,
         );
         if (idx < 0) break;
         _jobs.removeAt(idx);
       }
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_jobListScroll.hasClients) return;
+      _jobListScroll.animateTo(
+        _jobListScroll.position.maxScrollExtent,
+        duration: const Duration(milliseconds: 220),
+        curve: Curves.easeOut,
+      );
     });
 
     showGlobalToast(context, '已加入生成队列');
@@ -1272,7 +1334,8 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
         onStatus: (s) {
           _mutateJob(job.id, (j) {
             j.runStatus = s;
-            j.detail = '${s.detail} · 已用时 ${s.elapsedLabel}';
+            j.elapsed = s.elapsed;
+            j.detail = s.detail;
             j.phase = switch (s.phase) {
               ComfyRunPhase.queued => _ComfyJobPhase.queued,
               ComfyRunPhase.running => _ComfyJobPhase.running,
@@ -1287,7 +1350,8 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
       if (cancel.isCancelled) throw const ComfyCancelledException();
       _mutateJob(job.id, (j) {
         j.phase = _ComfyJobPhase.downloading;
-        j.detail = '下载结果 → ${job.outputDir}';
+        j.detail = '正在下载结果…';
+        if (j.runStatus != null) j.elapsed = j.runStatus!.elapsed;
       });
       final saved = await client.saveOutputsToDir(
         historyEntry: history,
@@ -1296,16 +1360,16 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
       );
       ref.read(treeRefreshTickProvider.notifier).state++;
 
-      var detail = '完成，已保存 ${saved.length} 个文件';
+      var detail = '已保存 ${saved.length} 个文件';
       final promptId = job.promptId;
       if (ref.read(comfyDeleteRemoteAfterDownloadProvider) &&
           promptId != null &&
           promptId.isNotEmpty) {
         try {
           await client.deleteHistory([promptId]);
-          detail = '$detail；已清理远端输出';
+          detail = '$detail · 远端已清理';
         } catch (_) {
-          detail = '$detail；远端清理失败（可手动在 Comfy 删除）';
+          detail = '$detail · 远端清理失败';
         }
       }
 
@@ -1313,6 +1377,7 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
         j.phase = _ComfyJobPhase.completed;
         j.detail = detail;
         j.outputs = saved;
+        if (j.runStatus != null) j.elapsed = j.runStatus!.elapsed;
         j.runStatus = null;
         j.cancelling = false;
       });
@@ -1322,6 +1387,7 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
         j.phase = _ComfyJobPhase.cancelled;
         j.detail = '已取消';
         j.error = null;
+        if (j.runStatus != null) j.elapsed = j.runStatus!.elapsed;
         j.runStatus = null;
         j.cancelling = false;
       });
@@ -1330,6 +1396,7 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
         j.phase = _ComfyJobPhase.failed;
         j.detail = '失败';
         j.error = '$e';
+        if (j.runStatus != null) j.elapsed = j.runStatus!.elapsed;
         j.runStatus = null;
         j.cancelling = false;
       });
@@ -1726,56 +1793,72 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
         ),
         const Divider(height: 1),
         Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              _buildRunOutputZone(cs, serverJobs),
-              _buildZoneDivider(
-                cs,
-                icon: Icons.tune,
-                title: '节点参数',
-                subtitle: '点选编辑 · 长按拖拽排序 · 拖分区标题调整顺序',
-                trailing: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    TextButton(
-                      onPressed: () => _setAllExpanded(true),
-                      style: TextButton.styleFrom(
-                        visualDensity: VisualDensity.compact,
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              // 至少放下约 2 张任务卡（含间距），多任务时可再滚。
+              final jobMaxH =
+                  (constraints.maxHeight * 0.55).clamp(360.0, 520.0);
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  _buildRunOutputZone(cs),
+                  if (serverJobs.isNotEmpty)
+                    Container(
+                      width: double.infinity,
+                      decoration: BoxDecoration(
+                        color: cs.surfaceContainerLow,
+                        border: Border(
+                          top: BorderSide(
+                            color: cs.outline.withValues(alpha: 0.45),
+                          ),
+                        ),
                       ),
-                      child: const Text('全展开'),
+                      padding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
+                      child: _buildJobList(cs, serverJobs, maxHeight: jobMaxH),
                     ),
-                    TextButton(
-                      onPressed: () => _setAllExpanded(false),
-                      style: TextButton.styleFrom(
-                        visualDensity: VisualDensity.compact,
-                      ),
-                      child: const Text('全折叠'),
+                  _buildZoneDivider(
+                    cs,
+                    icon: Icons.tune,
+                    title: '节点参数',
+                    subtitle: '点选编辑 · 长按拖拽排序 · 拖分区标题调整顺序',
+                    trailing: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        TextButton(
+                          onPressed: () => _setAllExpanded(true),
+                          style: TextButton.styleFrom(
+                            visualDensity: VisualDensity.compact,
+                          ),
+                          child: const Text('全展开'),
+                        ),
+                        TextButton(
+                          onPressed: () => _setAllExpanded(false),
+                          style: TextButton.styleFrom(
+                            visualDensity: VisualDensity.compact,
+                          ),
+                          child: const Text('全折叠'),
+                        ),
+                      ],
                     ),
-                  ],
-                ),
-              ),
-              Expanded(child: _buildNodeSectionsList()),
-            ],
+                  ),
+                  Expanded(child: _buildNodeSectionsList()),
+                ],
+              );
+            },
           ),
         ),
       ],
     );
   }
 
-  /// 运行输出功能区：目录 / 文件名 / 远端清理 / 任务队列。
-  Widget _buildRunOutputZone(ColorScheme cs, List<_ComfyJob> serverJobs) {
+  /// 运行输出功能区：目录 / 文件名 / 远端清理（任务列表单独占 Flexible 区域）。
+  Widget _buildRunOutputZone(ColorScheme cs) {
     final explicit = _outputDir?.trim() ?? '';
     final dirText = explicit.isNotEmpty ? explicit : '未选择';
     final deleteRemote = ref.watch(comfyDeleteRemoteAfterDownloadProvider);
 
     return Container(
-      decoration: BoxDecoration(
-        color: cs.surfaceContainerLow,
-        border: Border(
-          bottom: BorderSide(color: cs.outlineVariant.withValues(alpha: 0.7)),
-        ),
-      ),
+      color: cs.surfaceContainerLow,
       padding: const EdgeInsets.fromLTRB(14, 10, 14, 12),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -1898,10 +1981,6 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
               style: TextStyle(color: cs.error, fontSize: 12),
             ),
           ],
-          if (serverJobs.isNotEmpty) ...[
-            const SizedBox(height: 10),
-            _buildJobList(cs, serverJobs),
-          ],
         ],
       ),
     );
@@ -1960,6 +2039,10 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
       decoration: BoxDecoration(
         color: cs.surface,
         border: Border(
+          top: BorderSide(
+            color: cs.outline.withValues(alpha: 0.55),
+            width: 1,
+          ),
           bottom: BorderSide(color: cs.outlineVariant.withValues(alpha: 0.55)),
         ),
       ),
@@ -2058,21 +2141,44 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
     );
   }
 
-  Widget _buildJobList(ColorScheme cs, List<_ComfyJob> jobs) {
+  Widget _buildJobList(
+    ColorScheme cs,
+    List<_ComfyJob> jobs, {
+    required double maxHeight,
+  }) {
     final activeCount = jobs.where((j) => j.isActive).length;
     final finishedCount = jobs.length - activeCount;
+    const headerH = 32.0;
+    final listMax = (maxHeight - headerH).clamp(80.0, maxHeight);
     return Column(
+      mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Row(
           children: [
-            Text('生成任务', style: Theme.of(context).textTheme.titleSmall),
-            const SizedBox(width: 8),
-            Text(
-              activeCount > 0 ? '进行中 $activeCount' : '无进行中任务',
-              style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant),
+            Expanded(
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.baseline,
+                textBaseline: TextBaseline.alphabetic,
+                children: [
+                  Text(
+                    '生成任务',
+                    style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                          height: 1.1,
+                        ),
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    activeCount > 0 ? '进行中 $activeCount' : '无进行中任务',
+                    style: TextStyle(
+                      fontSize: 11,
+                      height: 1.1,
+                      color: cs.onSurfaceVariant,
+                    ),
+                  ),
+                ],
+              ),
             ),
-            const Spacer(),
             if (finishedCount > 0)
               TextButton(
                 onPressed: _clearFinishedJobs,
@@ -2083,13 +2189,53 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
               ),
           ],
         ),
-        const SizedBox(height: 6),
+        Padding(
+          padding: const EdgeInsets.only(top: 8, bottom: 8),
+          child: Divider(
+            height: 1,
+            thickness: 1,
+            color: cs.outline.withValues(alpha: 0.4),
+          ),
+        ),
         ConstrainedBox(
-          constraints: const BoxConstraints(maxHeight: 280),
+          constraints: BoxConstraints(maxHeight: listMax),
           child: ListView.separated(
+            controller: _jobListScroll,
             shrinkWrap: true,
+            physics: const ClampingScrollPhysics(),
             itemCount: jobs.length,
-            separatorBuilder: (_, __) => const SizedBox(height: 8),
+            separatorBuilder: (_, __) => Padding(
+              padding: const EdgeInsets.symmetric(vertical: 6),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Divider(
+                      height: 1,
+                      thickness: 1,
+                      color: cs.outlineVariant.withValues(alpha: 0.9),
+                    ),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 8),
+                    child: Text(
+                      '·',
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: cs.onSurfaceVariant.withValues(alpha: 0.7),
+                        height: 1,
+                      ),
+                    ),
+                  ),
+                  Expanded(
+                    child: Divider(
+                      height: 1,
+                      thickness: 1,
+                      color: cs.outlineVariant.withValues(alpha: 0.9),
+                    ),
+                  ),
+                ],
+              ),
+            ),
             itemBuilder: (context, i) => _buildJobCard(jobs[i], cs),
           ),
         ),
@@ -2137,178 +2283,226 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
       _ComfyJobPhase.cancelled => '已取消',
       _ComfyJobPhase.failed => '失败',
     };
-    final color = switch (job.phase) {
+    final accent = switch (job.phase) {
       _ComfyJobPhase.failed => cs.error,
       _ComfyJobPhase.cancelled => cs.onSurfaceVariant,
-      _ComfyJobPhase.completed => Colors.green.shade700,
+      _ComfyJobPhase.completed => const Color(0xFF2E7D32),
       _ => cs.primary,
     };
     final progress = job.runStatus?.progressFraction;
     final time = TimeOfDay.fromDateTime(job.createdAt);
+    final timeText =
+        '${time.hour.toString().padLeft(2, '0')}:${time.minute.toString().padLeft(2, '0')}';
     final muted = TextStyle(fontSize: 11, color: cs.onSurfaceVariant);
+    final showElapsed = job.displayElapsed > Duration.zero || job.isActive;
+
+    final metaBits = <String>[
+      timeText,
+      if (showElapsed) '用时 ${job.elapsedLabel}',
+      if (job.runStatus?.progressLabel.isNotEmpty == true)
+        job.runStatus!.progressLabel,
+      if (job.runStatus?.currentNodeId != null)
+        '节点 ${job.runStatus!.currentNodeId}',
+    ];
 
     return Container(
-      padding: const EdgeInsets.all(10),
       decoration: BoxDecoration(
-        color: cs.surfaceContainerHighest,
-        borderRadius: BorderRadius.circular(8),
+        color: cs.surface,
+        borderRadius: BorderRadius.circular(10),
         border: Border.all(
-          color: (job.isActive ? cs.primary : cs.outlineVariant)
-              .withValues(alpha: 0.7),
+          color: job.isActive
+              ? accent.withValues(alpha: 0.7)
+              : cs.outline.withValues(alpha: 0.55),
+          width: job.isActive ? 1.2 : 1,
         ),
+        boxShadow: [
+          BoxShadow(
+            color: cs.shadow.withValues(alpha: 0.06),
+            blurRadius: 4,
+            offset: const Offset(0, 1),
+          ),
+        ],
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+      clipBehavior: Clip.antiAlias,
+      child: Stack(
         children: [
-          Row(
-            children: [
-              if (job.isActive) ...[
-                SizedBox(
-                  width: 14,
-                  height: 14,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 2,
-                    color: color,
-                    value: progress,
-                  ),
+          Positioned(
+            left: 0,
+            top: 0,
+            bottom: 0,
+            child: ColoredBox(color: accent, child: const SizedBox(width: 3)),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 9, 8, 9),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    _JobPhaseChip(
+                      label: phaseLabel,
+                      color: accent,
+                      busy: job.isActive,
+                      progress: progress,
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        job.templateName,
+                        style: const TextStyle(
+                          fontWeight: FontWeight.w600,
+                          fontSize: 13,
+                          height: 1.25,
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    if (job.isActive)
+                      TextButton(
+                        onPressed:
+                            job.cancelling ? null : () => _cancelJob(job),
+                        style: TextButton.styleFrom(
+                          foregroundColor: cs.error,
+                          visualDensity: VisualDensity.compact,
+                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                          padding: const EdgeInsets.symmetric(horizontal: 8),
+                        ),
+                        child: Text(job.cancelling ? '取消中…' : '取消'),
+                      )
+                    else
+                      IconButton(
+                        tooltip: '从列表移除',
+                        icon: const Icon(Icons.close, size: 16),
+                        visualDensity: VisualDensity.compact,
+                        constraints: const BoxConstraints(
+                          minWidth: 28,
+                          minHeight: 28,
+                        ),
+                        padding: EdgeInsets.zero,
+                        onPressed: () => _dismissJob(job.id),
+                      ),
+                  ],
                 ),
-                const SizedBox(width: 8),
-              ],
-              Expanded(
-                child: Text(
-                  '${job.templateName} · $phaseLabel',
-                  style: TextStyle(
-                    fontWeight: FontWeight.w700,
-                    fontSize: 13,
-                    color: color,
-                  ),
+                const SizedBox(height: 6),
+                Text(
+                  metaBits.join('  ·  '),
+                  style: muted,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                 ),
-              ),
-              Text(
-                '${time.hour.toString().padLeft(2, '0')}:${time.minute.toString().padLeft(2, '0')}',
-                style: muted,
-              ),
-              if (job.isActive)
-                TextButton(
-                  onPressed: job.cancelling ? null : () => _cancelJob(job),
-                  style: TextButton.styleFrom(
-                    foregroundColor: cs.error,
-                    visualDensity: VisualDensity.compact,
+                if (job.isActive) ...[
+                  const SizedBox(height: 8),
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(999),
+                    child: LinearProgressIndicator(
+                      minHeight: 4,
+                      value: progress,
+                      color: accent,
+                      backgroundColor: cs.surfaceContainerLow,
+                    ),
                   ),
-                  child: Text(job.cancelling ? '取消中…' : '取消'),
-                )
-              else
-                IconButton(
-                  tooltip: '移除',
-                  icon: const Icon(Icons.close, size: 16),
-                  visualDensity: VisualDensity.compact,
-                  onPressed: () => _dismissJob(job.id),
-                ),
-            ],
-          ),
-          if (job.isActive) ...[
-            const SizedBox(height: 6),
-            ClipRRect(
-              borderRadius: BorderRadius.circular(4),
-              child: LinearProgressIndicator(
-                minHeight: 5,
-                value: progress,
-                color: cs.primary,
-                backgroundColor: cs.surfaceContainerLow,
-              ),
-            ),
-          ],
-          const SizedBox(height: 6),
-          Text(
-            job.detail,
-            style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500),
-          ),
-          const SizedBox(height: 4),
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Padding(
-                padding: const EdgeInsets.only(top: 2),
-                child: Text('输出：', style: muted),
-              ),
-              Expanded(
-                child: InkWell(
+                ],
+                if (job.detail.isNotEmpty) ...[
+                  const SizedBox(height: 6),
+                  Text(
+                    job.detail,
+                    style: TextStyle(
+                      fontSize: 12,
+                      height: 1.3,
+                      color: cs.onSurface.withValues(alpha: 0.88),
+                    ),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ],
+                const SizedBox(height: 6),
+                InkWell(
                   onTap: () => _revealJobOutputsInAssets(job),
-                  borderRadius: BorderRadius.circular(4),
+                  borderRadius: BorderRadius.circular(6),
                   child: Padding(
                     padding: const EdgeInsets.symmetric(
                       horizontal: 2,
                       vertical: 2,
                     ),
                     child: Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
+                        Icon(
+                          Icons.folder_open_outlined,
+                          size: 14,
+                          color: cs.primary.withValues(alpha: 0.9),
+                        ),
+                        const SizedBox(width: 6),
                         Expanded(
                           child: PathEllipsisText(
                             job.outputDir,
-                            maxLines: 2,
+                            maxLines: 1,
                             style: muted.copyWith(
                               color: cs.primary,
                               decoration: TextDecoration.underline,
                               decorationColor:
-                                  cs.primary.withValues(alpha: 0.45),
+                                  cs.primary.withValues(alpha: 0.4),
                             ),
                           ),
-                        ),
-                        Icon(
-                          Icons.folder_open,
-                          size: 14,
-                          color: cs.primary.withValues(alpha: 0.85),
                         ),
                       ],
                     ),
                   ),
                 ),
-              ),
-            ],
+                if (job.outputFileName.isNotEmpty) ...[
+                  const SizedBox(height: 2),
+                  Padding(
+                    padding: const EdgeInsets.only(left: 20),
+                    child: PathEllipsisText(
+                      job.outputFileName,
+                      style: muted,
+                    ),
+                  ),
+                ],
+                if (job.error != null) ...[
+                  const SizedBox(height: 6),
+                  SelectableText(
+                    job.error!,
+                    style: TextStyle(color: cs.error, fontSize: 11),
+                  ),
+                ],
+                if (job.outputs.isNotEmpty) ...[
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      Text(
+                        '生成文件 ${job.outputs.length}',
+                        style: muted.copyWith(fontWeight: FontWeight.w600),
+                      ),
+                      const Spacer(),
+                      TextButton(
+                        onPressed: () => _deleteAllJobOutputs(job),
+                        style: TextButton.styleFrom(
+                          foregroundColor: cs.error,
+                          visualDensity: VisualDensity.compact,
+                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                          padding: const EdgeInsets.symmetric(horizontal: 6),
+                        ),
+                        child: const Text('全部删除', style: TextStyle(fontSize: 11)),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                  ...job.outputs.map(
+                    (path) => Padding(
+                      padding: const EdgeInsets.only(bottom: 4),
+                      child: MediaOutputFileRow(
+                        path: path,
+                        style: muted,
+                        onDelete: () => _deleteJobOutput(job, path),
+                      ),
+                    ),
+                  ),
+                ],
+              ],
+            ),
           ),
-          if (job.outputFileName.isNotEmpty) ...[
-            const SizedBox(height: 2),
-            PathEllipsisText(
-              '文件名：${job.outputFileName}',
-              style: muted,
-            ),
-          ],
-          if (job.runStatus != null) ...[
-            const SizedBox(height: 4),
-            Text(
-              [
-                if (job.runStatus!.progressLabel.isNotEmpty)
-                  job.runStatus!.progressLabel,
-                if (job.runStatus!.currentNodeId != null)
-                  '节点 ${job.runStatus!.currentNodeId}',
-                '用时 ${job.runStatus!.elapsedLabel}',
-                if (job.promptId != null)
-                  '任务 ${job.promptId!.length > 10 ? '${job.promptId!.substring(0, 10)}…' : job.promptId}',
-              ].join('  ·  '),
-              style: muted,
-            ),
-          ],
-          if (job.error != null) ...[
-            const SizedBox(height: 4),
-            SelectableText(
-              job.error!,
-              style: TextStyle(color: cs.error, fontSize: 11),
-            ),
-          ],
-          if (job.outputs.isNotEmpty) ...[
-            const SizedBox(height: 6),
-            Text('输出文件', style: muted.copyWith(fontWeight: FontWeight.w600)),
-            const SizedBox(height: 4),
-            ...job.outputs.map(
-              (path) => Padding(
-                padding: const EdgeInsets.only(bottom: 4),
-                child: MediaOutputFileRow(path: path, style: muted),
-              ),
-            ),
-          ],
         ],
       ),
     );
@@ -2844,6 +3038,57 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
           ),
         );
     }
+  }
+}
+
+class _JobPhaseChip extends StatelessWidget {
+  final String label;
+  final Color color;
+  final bool busy;
+  final double? progress;
+
+  const _JobPhaseChip({
+    required this.label,
+    required this.color,
+    required this.busy,
+    this.progress,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (busy) ...[
+            SizedBox(
+              width: 10,
+              height: 10,
+              child: CircularProgressIndicator(
+                strokeWidth: 1.6,
+                color: color,
+                value: progress,
+              ),
+            ),
+            const SizedBox(width: 5),
+          ],
+          Text(
+            label,
+            style: TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.w600,
+              color: color,
+              height: 1.1,
+            ),
+          ),
+        ],
+      ),
+    );
   }
 }
 
