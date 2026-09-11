@@ -48,6 +48,7 @@ class _MediaHoverPreviewAnchorState extends State<MediaHoverPreviewAnchor> {
   bool _overAnchor = false;
   bool _overPopup = false;
   bool _playing = false;
+  bool _nativeFs = false;
 
   @override
   void dispose() {
@@ -59,6 +60,7 @@ class _MediaHoverPreviewAnchorState extends State<MediaHoverPreviewAnchor> {
 
   void _removeOverlay({bool disposeOnly = false}) {
     if (_entry == null) return;
+    if (!disposeOnly && _nativeFs) return;
     if (_activeHoverPreview == _entry) {
       _activeHoverPreview = null;
     }
@@ -145,22 +147,18 @@ class _MediaHoverPreviewAnchorState extends State<MediaHoverPreviewAnchor> {
           _playing = v;
           if (!v) _scheduleCloseIfIdle();
         },
+        onNativeFullscreen: (v) {
+          _nativeFs = v;
+          if (v) _playing = true;
+        },
         onDismiss: _dismiss,
         onFullscreen: () {
+          // 图片：关掉小窗后开独立查看器。视频走控件自带全屏，不走这里。
           final path = widget.path;
           _dismiss();
-          final kind = classifyMedia(path);
           WidgetsBinding.instance.addPostFrameCallback((_) {
             if (!context.mounted) return;
-            if (kind == MediaKind.image) {
-              showImageViewerDialog(context, path);
-            } else if (kind == MediaKind.video || kind == MediaKind.audio) {
-              showMediaPreviewDialog(
-                context,
-                path: path,
-                isVideo: kind == MediaKind.video,
-              );
-            }
+            showImageViewerDialog(context, path);
             widget.onOpenFullscreen?.call();
           });
         },
@@ -197,6 +195,7 @@ class _HoverPreviewLayer extends StatefulWidget {
   final String path;
   final ValueChanged<bool> onOverPopup;
   final ValueChanged<bool> onPlayingChanged;
+  final ValueChanged<bool> onNativeFullscreen;
   final VoidCallback onDismiss;
   final VoidCallback onFullscreen;
 
@@ -208,6 +207,7 @@ class _HoverPreviewLayer extends StatefulWidget {
     required this.path,
     required this.onOverPopup,
     required this.onPlayingChanged,
+    required this.onNativeFullscreen,
     required this.onDismiss,
     required this.onFullscreen,
   });
@@ -219,10 +219,13 @@ class _HoverPreviewLayer extends StatefulWidget {
 class _HoverPreviewLayerState extends State<_HoverPreviewLayer> {
   final FocusNode _focus = FocusNode();
   final GlobalKey _popupKey = GlobalKey();
+  final GlobalKey<VideoState> _videoStateKey = GlobalKey<VideoState>();
   Player? _player;
   VideoController? _video;
   bool _ready = false;
   bool _starting = false;
+  /// 控件自带全屏时小窗必须仍挂着（共用 Player），只隐藏、不销毁。
+  bool _nativeFs = false;
 
   MediaKind get _kind => classifyMedia(widget.path);
 
@@ -233,6 +236,7 @@ class _HoverPreviewLayerState extends State<_HoverPreviewLayer> {
   void initState() {
     super.initState();
     GestureBinding.instance.pointerRouter.addGlobalRoute(_onGlobalPointer);
+    HardwareKeyboard.instance.addHandler(_onGlobalKey);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       _focus.requestFocus();
@@ -242,6 +246,7 @@ class _HoverPreviewLayerState extends State<_HoverPreviewLayer> {
 
   @override
   void dispose() {
+    HardwareKeyboard.instance.removeHandler(_onGlobalKey);
     GestureBinding.instance.pointerRouter.removeGlobalRoute(_onGlobalPointer);
     _focus.dispose();
     unawaited(_disposePlayer());
@@ -250,6 +255,7 @@ class _HoverPreviewLayerState extends State<_HoverPreviewLayer> {
 
   void _onGlobalPointer(PointerEvent event) {
     if (event is! PointerDownEvent) return;
+    if (_nativeFs) return;
     final box = _popupKey.currentContext?.findRenderObject() as RenderBox?;
     if (box == null || !box.hasSize) return;
     final local = box.globalToLocal(event.position);
@@ -261,15 +267,44 @@ class _HoverPreviewLayerState extends State<_HoverPreviewLayer> {
     }
   }
 
+  bool _onGlobalKey(KeyEvent event) {
+    if (event is! KeyDownEvent) return false;
+    if (_nativeFs) return false;
+    if (event.logicalKey != LogicalKeyboardKey.escape) return false;
+    widget.onDismiss();
+    return true;
+  }
+
   Future<void> _disposePlayer() async {
     final player = _player;
     _player = null;
     _video = null;
+    _ready = false;
+    _starting = false;
     if (player != null) {
       try {
         await player.dispose();
       } catch (_) {}
     }
+  }
+
+  Future<void> _onEnterNativeFullscreen() async {
+    _nativeFs = true;
+    widget.onNativeFullscreen(true);
+    widget.onPlayingChanged(true);
+    if (mounted) setState(() {});
+    await defaultEnterNativeFullscreen();
+  }
+
+  Future<void> _onExitNativeFullscreen() async {
+    await defaultExitNativeFullscreen();
+    _nativeFs = false;
+    widget.onNativeFullscreen(false);
+    if (mounted) setState(() {});
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _nativeFs) return;
+      _focus.requestFocus();
+    });
   }
 
   Future<void> _startPlayer() async {
@@ -301,6 +336,7 @@ class _HoverPreviewLayerState extends State<_HoverPreviewLayer> {
   KeyEventResult _onKey(FocusNode node, KeyEvent event) {
     if (event is! KeyDownEvent) return KeyEventResult.ignored;
     if (event.logicalKey == LogicalKeyboardKey.escape) {
+      if (_nativeFs) return KeyEventResult.ignored;
       widget.onDismiss();
       return KeyEventResult.handled;
     }
@@ -370,9 +406,11 @@ class _HoverPreviewLayerState extends State<_HoverPreviewLayer> {
       children: [
         if (_ready && _video != null)
           Video(
+            key: _videoStateKey,
             controller: _video!,
-            // 自带播放 / 音量 / 进度 / 全屏，不再外包一层窗口控件。
             controls: AdaptiveVideoControls,
+            onEnterFullscreen: _onEnterNativeFullscreen,
+            onExitFullscreen: _onExitNativeFullscreen,
           )
         else
           ColoredBox(
@@ -393,15 +431,16 @@ class _HoverPreviewLayerState extends State<_HoverPreviewLayer> {
                     ),
             ),
           ),
-        Positioned(
-          top: 6,
-          right: 6,
-          child: _floatingBtn(
-            icon: Icons.close,
-            tip: '关闭 (Esc)',
-            onPressed: widget.onDismiss,
+        if (!_nativeFs)
+          Positioned(
+            top: 6,
+            right: 6,
+            child: _floatingBtn(
+              icon: Icons.close,
+              tip: '关闭 (Esc)',
+              onPressed: widget.onDismiss,
+            ),
           ),
-        ),
       ],
     );
   }
@@ -417,23 +456,44 @@ class _HoverPreviewLayerState extends State<_HoverPreviewLayer> {
             top: widget.top,
             width: widget.width,
             height: widget.height,
-            child: Focus(
-              focusNode: _focus,
-              onKeyEvent: _onKey,
-              child: MouseRegion(
-                onEnter: (_) => widget.onOverPopup(true),
-                onExit: (_) => widget.onOverPopup(false),
-                child: Material(
-                  key: _popupKey,
-                  elevation: 10,
-                  color: Colors.black,
-                  borderRadius: BorderRadius.circular(8),
-                  clipBehavior: Clip.antiAlias,
-                  child: _kind == MediaKind.image ? _imageBody() : _avBody(),
+            child: IgnorePointer(
+              ignoring: _nativeFs,
+              child: Opacity(
+                opacity: _nativeFs ? 0 : 1,
+                child: Focus(
+                  autofocus: true,
+                  focusNode: _focus,
+                  onKeyEvent: _onKey,
+                  child: MouseRegion(
+                    onEnter: (_) => widget.onOverPopup(true),
+                    onExit: (_) => widget.onOverPopup(false),
+                    child: Material(
+                      key: _popupKey,
+                      elevation: 10,
+                      color: Colors.black,
+                      borderRadius: BorderRadius.circular(8),
+                      clipBehavior: Clip.antiAlias,
+                      child:
+                          _kind == MediaKind.image ? _imageBody() : _avBody(),
+                    ),
+                  ),
                 ),
               ),
             ),
           ),
+          if (_nativeFs)
+            Positioned(
+              top: 12,
+              right: 12,
+              child: _floatingBtn(
+                icon: Icons.close,
+                tip: '退出全屏 (Esc)',
+                onPressed: () {
+                  final vs = _videoStateKey.currentState;
+                  if (vs != null) unawaited(vs.exitFullscreen());
+                },
+              ),
+            ),
         ],
       ),
     );
