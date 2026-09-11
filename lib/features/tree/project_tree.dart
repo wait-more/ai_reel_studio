@@ -655,8 +655,7 @@ class _TreeNodeWidgetState extends ConsumerState<_TreeNodeWidget> {
         if (isFile) {
           _openFile(node.path);
         } else {
-          ref.read(selectedDirProvider.notifier).state = node.path;
-          ref.read(contentModeProvider.notifier).state = 'assets';
+          _selectDir(node.path, forceAssets: true);
         }
       },
       onChanged: () {
@@ -666,26 +665,16 @@ class _TreeNodeWidgetState extends ConsumerState<_TreeNodeWidget> {
     );
   }
 
-  /// 折叠后中间栏回到的父目录；不超过项目根。
-  String _parentDirForAssets(String dirPath) {
-    final parent = Directory(dirPath).parent.path;
-    final root = AppConfig.instance.projectRoot;
-    if (root.isEmpty) return parent;
-    final rootNorm = root.toLowerCase();
-    final parentNorm = parent.toLowerCase();
-    if (parentNorm == rootNorm) return root;
-    final prefix = rootNorm.endsWith(Platform.pathSeparator)
-        ? rootNorm
-        : '$rootNorm${Platform.pathSeparator}';
-    if (!parentNorm.startsWith(prefix)) return root;
-    return parent;
-  }
-
-  void _selectDirInAssets(String dirPath) {
+  /// 选中目录并写入 [selectedDirProvider]（生成栏可用作默认输出目录）。
+  ///
+  /// 默认**不**切换中间栏模式：仅在素材栏时，中间网格会随 [selectedDirProvider]
+  /// 同步；[forceAssets] 为 true 时（如右键「打开」）才切到素材栏。
+  void _selectDir(String dirPath, {bool forceAssets = false}) {
     ref.read(selectedDirProvider.notifier).state = dirPath;
-    ref.read(contentModeProvider.notifier).state = 'assets';
-    // 与单击目录一致：同步树选中，避免仍高亮旧文件。
     _setSingleTreeSelection(path: dirPath, isDir: true);
+    if (forceAssets) {
+      ref.read(contentModeProvider.notifier).state = 'assets';
+    }
   }
 
   bool get _ctrlHeld =>
@@ -733,12 +722,12 @@ class _TreeNodeWidgetState extends ConsumerState<_TreeNodeWidget> {
       _toggleTreeSelection(path: path, isDir: !isFile);
       return;
     }
-    // 普通单击：始终重置为单项选中（清掉之前的多选/残留）。
-    _setSingleTreeSelection(path: path, isDir: !isFile);
     if (isFile) {
+      _setSingleTreeSelection(path: path, isDir: false);
       _openFile(path);
     } else {
-      _selectDirInAssets(path);
+      // 目录：只选中；素材栏下中间同步，文档/生成栏不抢切模式。
+      _selectDir(path);
     }
   }
 
@@ -754,16 +743,14 @@ class _TreeNodeWidgetState extends ConsumerState<_TreeNodeWidget> {
     setState(() {});
 
     if (expanding) {
-      // 展开：中间栏同步进该文件夹
-      _selectDirInAssets(node.path);
+      // 展开：素材栏下让中间进入该文件夹，并选中当前项。
+      // 折叠则只收起树，不改选中、也不把中间甩到父级（体感更稳）。
+      _selectDir(node.path);
       if (!node.isLoaded) {
         await DirectoryParser.loadChildrenAsync(node);
         if (!mounted) return;
         setState(() {});
       }
-    } else {
-      // 折叠：中间栏回到该文件夹所在层级（父目录）
-      _selectDirInAssets(_parentDirForAssets(node.path));
     }
     _syncExpandedPathsToProvider();
   }
@@ -812,8 +799,7 @@ class _TreeNodeWidgetState extends ConsumerState<_TreeNodeWidget> {
               if (isFile) {
                 _openFile(node.path);
               } else {
-                ref.read(selectedDirProvider.notifier).state = node.path;
-                ref.read(contentModeProvider.notifier).state = 'assets';
+                _selectDir(node.path, forceAssets: true);
               }
             },
             onChanged: () {
