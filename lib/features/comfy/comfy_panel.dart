@@ -100,6 +100,8 @@ class _ComfyJob {
   String get elapsedLabel => _formatJobElapsed(displayElapsed);
 }
 
+enum _ServerLinkState { unknown, checking, online, offline }
+
 class ComfyPanel extends ConsumerStatefulWidget {
   const ComfyPanel({super.key});
 
@@ -124,14 +126,16 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
 
   String? _outputDir;
   final TextEditingController _outputNameCtrl = TextEditingController();
-  bool _online = false;
-  bool _checking = false;
+  /// 各实例连接状态（未探测过为 unknown）。
+  final Map<String, _ServerLinkState> _serverLink = {};
+  bool _pingingAll = false;
   String? _formError;
   final List<_ComfyJob> _jobs = [];
   static const _kMaxJobs = 30;
   final ScrollController _jobListScroll = ScrollController();
 
   Timer? _hotReloadTimer;
+  Timer? _serverPingTimer;
   Timer? _sessionPersistTimer;
   String _lastSig = '';
   double _leftSplit = 0.38;
@@ -146,12 +150,18 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
     _hotReloadTimer = Timer.periodic(const Duration(seconds: 2), (_) {
       _pollHotReload();
     });
-    WidgetsBinding.instance.addPostFrameCallback((_) => _checkConnection());
+    _serverPingTimer = Timer.periodic(const Duration(seconds: 12), (_) {
+      unawaited(_pingAllServers());
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      unawaited(_pingAllServers(showChecking: true));
+    });
   }
 
   @override
   void dispose() {
     _hotReloadTimer?.cancel();
+    _serverPingTimer?.cancel();
     _sessionPersistTimer?.cancel();
     _jobListScroll.dispose();
     _outputNameCtrl.dispose();
@@ -186,28 +196,69 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
   List<_ComfyJob> _jobsForServer(String serverId) =>
       _jobs.where((j) => j.serverId == serverId).toList(growable: false);
 
-  ComfyClient _client() => ComfyClient(
-        baseUrl: ref.read(comfyBaseUrlProvider),
-        apiKey: ref.read(comfyApiKeyProvider),
-      );
+  /// 该 URL 上最老的进行中任务（按 [createdAt] 升序）。
+  _ComfyJob? _oldestActiveJob(String serverId) {
+    final active = _jobsForServer(serverId).where((j) => j.isActive).toList();
+    if (active.isEmpty) return null;
+    active.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+    return active.first;
+  }
 
-  Future<void> _checkConnection() async {
+  _ServerLinkState _linkOf(String serverId) =>
+      _serverLink[serverId] ?? _ServerLinkState.unknown;
+
+  bool get _online {
+    final id = ref.read(comfySelectedServerIdProvider);
+    return _linkOf(id) == _ServerLinkState.online;
+  }
+
+  Future<void> _checkConnection() => _pingAllServers(showChecking: true);
+
+  Future<void> _pingAllServers({bool showChecking = false}) async {
     final gen = ++_connGen;
-    if (mounted) setState(() => _checking = true);
-    final client = _client();
+    final servers = List<ComfyServer>.of(ref.read(comfyServersProvider));
+    if (servers.isEmpty) {
+      if (mounted) {
+        setState(() {
+          _serverLink.clear();
+          _pingingAll = false;
+        });
+      }
+      return;
+    }
+    if (mounted) {
+      setState(() {
+        _pingingAll = showChecking;
+        if (showChecking) {
+          for (final s in servers) {
+            _serverLink[s.id] = _ServerLinkState.checking;
+          }
+        } else {
+          for (final s in servers) {
+            if (!_serverLink.containsKey(s.id)) {
+              _serverLink[s.id] = _ServerLinkState.checking;
+            }
+          }
+        }
+      });
+    }
+    await Future.wait(servers.map(_pingOneServer));
+    if (!mounted || gen != _connGen) return;
+    setState(() => _pingingAll = false);
+  }
+
+  Future<void> _pingOneServer(ComfyServer server) async {
+    final client = ComfyClient(baseUrl: server.baseUrl, apiKey: server.apiKey);
     try {
       final ok = await client.ping();
-      if (!mounted || gen != _connGen) return;
+      if (!mounted) return;
       setState(() {
-        _online = ok;
-        _checking = false;
+        _serverLink[server.id] =
+            ok ? _ServerLinkState.online : _ServerLinkState.offline;
       });
     } catch (_) {
-      if (!mounted || gen != _connGen) return;
-      setState(() {
-        _online = false;
-        _checking = false;
-      });
+      if (!mounted) return;
+      setState(() => _serverLink[server.id] = _ServerLinkState.offline);
     } finally {
       client.close();
     }
@@ -1435,12 +1486,20 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
     final bundleAsync = ref.watch(comfyBundleProvider);
     final servers = ref.watch(comfyServersProvider);
     final selectedServerId = ref.watch(comfySelectedServerIdProvider);
-    final baseUrl = ref.watch(comfyBaseUrlProvider);
     final cs = Theme.of(context).colorScheme;
 
     ref.listen(comfySelectedServerIdProvider, (prev, next) {
       if (prev == next) return;
       _checkConnection();
+    });
+
+    ref.listen(comfyServersProvider, (prev, next) {
+      if (prev == null) return;
+      if (prev.length == next.length &&
+          prev.every((s) => next.any((n) => n.id == s.id && n.baseUrl == s.baseUrl))) {
+        return;
+      }
+      unawaited(_pingAllServers());
     });
 
     ref.listen(comfyBundleProvider, (prev, next) {
@@ -1508,7 +1567,6 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
                       child: _buildServerList(
                         servers,
                         selectedServerId,
-                        baseUrl,
                       ),
                     ),
                     GestureDetector(
@@ -1558,12 +1616,92 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
     );
   }
 
+  String _shortJobPhase(_ComfyJobPhase phase) => switch (phase) {
+        _ComfyJobPhase.preparing => '准备中',
+        _ComfyJobPhase.uploading => '上传中',
+        _ComfyJobPhase.submitting => '提交中',
+        _ComfyJobPhase.queued => '排队中',
+        _ComfyJobPhase.running => '执行中',
+        _ComfyJobPhase.downloading => '下载中',
+        _ComfyJobPhase.completed => '已完成',
+        _ComfyJobPhase.cancelled => '已取消',
+        _ComfyJobPhase.failed => '失败',
+      };
+
+  String _serverTaskSummary(String serverId) {
+    final activeCount =
+        _jobsForServer(serverId).where((j) => j.isActive).length;
+    if (activeCount == 0) return '空闲';
+    final oldest = _oldestActiveJob(serverId)!;
+    final phase = _shortJobPhase(oldest.phase);
+    final queue = oldest.runStatus?.queuePosition;
+    final queueBit =
+        oldest.phase == _ComfyJobPhase.queued && queue != null ? ' #$queue' : '';
+    final extra = activeCount > 1 ? ' · 另有 ${activeCount - 1} 个' : '';
+    return '${oldest.templateName} · $phase$queueBit$extra';
+  }
+
+  /// 本机会话内该 URL 的任务计数。
+  ({int total, int active, int completed, int failed, int cancelled})
+      _serverJobCounts(String serverId) {
+    final jobs = _jobsForServer(serverId);
+    var active = 0, completed = 0, failed = 0, cancelled = 0;
+    for (final j in jobs) {
+      switch (j.phase) {
+        case _ComfyJobPhase.completed:
+          completed++;
+        case _ComfyJobPhase.failed:
+          failed++;
+        case _ComfyJobPhase.cancelled:
+          cancelled++;
+        default:
+          active++;
+      }
+    }
+    return (
+      total: jobs.length,
+      active: active,
+      completed: completed,
+      failed: failed,
+      cancelled: cancelled,
+    );
+  }
+
+  String _serverJobCountLine(String serverId) {
+    final c = _serverJobCounts(serverId);
+    if (c.total == 0) return '任务 0';
+    final bits = <String>[
+      '共 ${c.total}',
+      if (c.active > 0) '进行 ${c.active}',
+      '完成 ${c.completed}',
+      if (c.failed > 0) '失败 ${c.failed}',
+      if (c.cancelled > 0) '取消 ${c.cancelled}',
+    ];
+    return bits.join(' · ');
+  }
+
+  Color _linkColor(_ServerLinkState link, ColorScheme cs) => switch (link) {
+        _ServerLinkState.online => Colors.green,
+        _ServerLinkState.offline => cs.error,
+        _ServerLinkState.checking => cs.onSurfaceVariant,
+        _ServerLinkState.unknown => cs.outline,
+      };
+
+  String _linkHint(_ServerLinkState link) => switch (link) {
+        _ServerLinkState.online => '在线',
+        _ServerLinkState.offline => '离线',
+        _ServerLinkState.checking => '探测中',
+        _ServerLinkState.unknown => '未探测',
+      };
+
   Widget _buildServerList(
     List<ComfyServer> servers,
     String selectedId,
-    String baseUrl,
   ) {
     final cs = Theme.of(context).colorScheme;
+    final onlineCount = servers
+        .where((s) => _linkOf(s.id) == _ServerLinkState.online)
+        .length;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -1578,24 +1716,24 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
                 ),
               ),
               Icon(
-                _checking
+                _pingingAll
                     ? Icons.hourglass_top
-                    : (_online ? Icons.cloud_done : Icons.cloud_off),
+                    : Icons.cloud_done,
                 size: 14,
-                color: _checking
+                color: _pingingAll
                     ? cs.onSurfaceVariant
-                    : (_online ? Colors.green : cs.error),
+                    : (onlineCount > 0 ? Colors.green : cs.error),
               ),
               const SizedBox(width: 2),
               TextButton(
-                onPressed: _checking ? null : _checkConnection,
+                onPressed: _pingingAll ? null : _checkConnection,
                 style: TextButton.styleFrom(
                   visualDensity: VisualDensity.compact,
                   padding: const EdgeInsets.symmetric(horizontal: 8),
                   minimumSize: const Size(0, 28),
                   tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                 ),
-                child: Text(_checking ? '检测中' : '重试'),
+                child: Text(_pingingAll ? '检测中' : '重试'),
               ),
             ],
           ),
@@ -1604,12 +1742,14 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
           Padding(
             padding: const EdgeInsets.fromLTRB(10, 0, 10, 6),
             child: Text(
-              _online ? '已连接' : '未连接 · $baseUrl',
+              _pingingAll
+                  ? '正在检测全部实例…'
+                  : '在线 $onlineCount / ${servers.length} · 当前 ${_online ? '已连接' : '未连接'}',
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: TextStyle(
                 fontSize: 11,
-                color: _online ? Colors.green.shade700 : cs.error,
+                color: cs.onSurfaceVariant,
               ),
             ),
           ),
@@ -1622,29 +1762,131 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
                     style: TextStyle(color: cs.onSurfaceVariant, fontSize: 12),
                   ),
                 )
-              : ListView.builder(
+              : ListView.separated(
+                  padding: const EdgeInsets.symmetric(vertical: 4),
                   itemCount: servers.length,
+                  separatorBuilder: (_, __) => Divider(
+                    height: 1,
+                    thickness: 1,
+                    indent: 10,
+                    endIndent: 10,
+                    color: cs.outlineVariant.withValues(alpha: 0.7),
+                  ),
                   itemBuilder: (context, i) {
                     final s = servers[i];
-                    final active = s.id == selectedId;
-                    return ListTile(
-                      dense: true,
-                      selected: active,
-                      title: Text(s.name, maxLines: 1),
-                      subtitle: Text(
-                        s.baseUrl,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(fontSize: 11),
+                    final selected = s.id == selectedId;
+                    final link = _linkOf(s.id);
+                    final linkColor = _linkColor(link, cs);
+                    final oldest = _oldestActiveJob(s.id);
+                    final progress = oldest?.runStatus?.progressFraction;
+                    final progressLabel = oldest?.runStatus?.progressLabel ?? '';
+                    return Material(
+                      color: selected
+                          ? cs.primaryContainer.withValues(alpha: 0.45)
+                          : Colors.transparent,
+                      child: InkWell(
+                        onTap: () => _selectServer(s.id),
+                        child: Padding(
+                          padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                children: [
+                                  Container(
+                                    width: 8,
+                                    height: 8,
+                                    decoration: BoxDecoration(
+                                      shape: BoxShape.circle,
+                                      color: link == _ServerLinkState.online
+                                          ? linkColor
+                                          : Colors.transparent,
+                                      border: Border.all(
+                                        color: linkColor,
+                                        width: 1.5,
+                                      ),
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Expanded(
+                                    child: Text(
+                                      s.name,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: TextStyle(
+                                        fontWeight: selected
+                                            ? FontWeight.w600
+                                            : FontWeight.w500,
+                                      ),
+                                    ),
+                                  ),
+                                  Text(
+                                    _linkHint(link),
+                                    style: TextStyle(
+                                      fontSize: 10,
+                                      color: linkColor,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 2),
+                              Text(
+                                s.baseUrl,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  color: cs.onSurfaceVariant,
+                                ),
+                              ),
+                              const SizedBox(height: 3),
+                              Text(
+                                _serverJobCountLine(s.id),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  color: cs.onSurfaceVariant,
+                                ),
+                              ),
+                              const SizedBox(height: 2),
+                              Text(
+                                _serverTaskSummary(s.id),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  color: oldest != null
+                                      ? cs.primary
+                                      : cs.onSurfaceVariant,
+                                ),
+                              ),
+                              if (oldest != null) ...[
+                                const SizedBox(height: 5),
+                                ClipRRect(
+                                  borderRadius: BorderRadius.circular(2),
+                                  child: LinearProgressIndicator(
+                                    value: progress,
+                                    minHeight: 3,
+                                  ),
+                                ),
+                                if (progressLabel.isNotEmpty) ...[
+                                  const SizedBox(height: 2),
+                                  Text(
+                                    progressLabel,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: TextStyle(
+                                      fontSize: 10,
+                                      color: cs.onSurfaceVariant,
+                                    ),
+                                  ),
+                                ],
+                              ],
+                            ],
+                          ),
+                        ),
                       ),
-                      trailing: active
-                          ? Icon(
-                              _online ? Icons.circle : Icons.circle_outlined,
-                              size: 10,
-                              color: _online ? Colors.green : cs.error,
-                            )
-                          : null,
-                      onTap: () => _selectServer(s.id),
                     );
                   },
                 ),
