@@ -9,6 +9,7 @@ import 'package:media_kit_video/media_kit_video.dart';
 import 'package:path/path.dart' as p;
 
 import '../../core/media_types.dart';
+import '../../core/path_ellipsis_text.dart';
 import 'media_preview.dart';
 
 /// 全局同时只保留一个悬停预览 Overlay。
@@ -524,32 +525,38 @@ class MediaOutputFileRow extends StatelessWidget {
     };
     final name = p.basename(path);
     final cs = Theme.of(context).colorScheme;
+    final canPreview = kind == MediaKind.image ||
+        kind == MediaKind.video ||
+        kind == MediaKind.audio;
+
+    // 预览只绑在文件名文字上（与 PathEllipsisText 同理），不占满行尾空白。
+    final nameLabel = PathEllipsisText(
+      name,
+      style: style,
+      tooltip: false,
+    );
+    final nameChild = canPreview
+        ? MediaHoverPreviewAnchor(path: path, child: nameLabel)
+        : nameLabel;
+
     final row = Row(
       children: [
         Icon(icon, size: 14, color: style?.color),
         const SizedBox(width: 6),
         Expanded(
-          child: Text(
-            name,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: style,
+          child: Align(
+            alignment: Alignment.centerLeft,
+            child: nameChild,
           ),
         ),
       ],
     );
 
-    final body = (kind == MediaKind.image ||
-            kind == MediaKind.video ||
-            kind == MediaKind.audio)
-        ? MediaHoverPreviewAnchor(path: path, child: row)
-        : row;
-
-    if (onDelete == null) return body;
+    if (onDelete == null) return row;
 
     return Row(
       children: [
-        Expanded(child: body),
+        Expanded(child: row),
         IconButton(
           tooltip: '删除文件',
           icon: Icon(Icons.delete_outline, size: 16, color: cs.error),

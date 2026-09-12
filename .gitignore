@@ -51,3 +51,5 @@ app.*.map.json
 
 # Local native tool caches (not committed)
 /tools/opencv-full/
+/tools/ffmpeg-kit/
+/tools/ffmpeg/
