@@ -170,6 +170,14 @@ final comfySelectedServerIdProvider = StateProvider<String>(
   (ref) => AppConfig.instance.comfySelectedServerId,
 );
 
+/// 已开启、可出现在生成面板中的实例。
+final comfyEnabledServersProvider = Provider<List<ComfyServer>>((ref) {
+  return ref
+      .watch(comfyServersProvider)
+      .where((s) => s.enabled)
+      .toList(growable: false);
+});
+
 /// 兼容旧代码：当前选中实例的 URL / Key。
 final comfyBaseUrlProvider = Provider<String>((ref) {
   final id = ref.watch(comfySelectedServerIdProvider);

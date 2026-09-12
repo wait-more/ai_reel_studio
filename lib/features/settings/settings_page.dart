@@ -408,8 +408,8 @@ class _ComfySectionState extends ConsumerState<_ComfySection> {
         Text('ComfyUI 实例', style: Theme.of(context).textTheme.titleMedium),
         const SizedBox(height: 8),
         Text(
-          '可配置多个 ComfyUI 地址。同一动作共享一份 workflow 模板，'
-          '各实例的节点暴露配置可单独保存。当前实例在「生成」顶栏切换。',
+          '可配置多个 ComfyUI 地址。关闭「启用」后该实例不会出现在生成面板列表中。'
+          '同一动作共享一份 workflow 模板，各实例的节点暴露配置可单独保存。',
           style: Theme.of(context).textTheme.bodySmall?.copyWith(
                 color: cs.onSurfaceVariant,
               ),
@@ -421,20 +421,25 @@ class _ComfySectionState extends ConsumerState<_ComfySection> {
             margin: const EdgeInsets.only(bottom: 8),
             child: ListTile(
               selected: active,
+              enabled: s.enabled,
               leading: Icon(
                 active ? Icons.radio_button_checked : Icons.radio_button_off,
                 size: 20,
               ),
               title: Text(s.name),
               subtitle: Text(
-                s.baseUrl,
+                s.enabled ? s.baseUrl : '${s.baseUrl} · 已关闭',
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
               ),
-              onTap: () => _selectServer(s.id),
+              onTap: s.enabled ? () => _selectServer(s.id) : null,
               trailing: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
+                  Switch(
+                    value: s.enabled,
+                    onChanged: (v) => _setEnabled(s, v),
+                  ),
                   IconButton(
                     tooltip: '编辑',
                     icon: const Icon(Icons.edit_outlined, size: 20),
@@ -481,6 +486,14 @@ class _ComfySectionState extends ConsumerState<_ComfySection> {
   Future<void> _selectServer(String id) async {
     await AppConfig.instance.setComfySelectedServerId(id);
     ref.read(comfySelectedServerIdProvider.notifier).state = id;
+  }
+
+  Future<void> _setEnabled(ComfyServer server, bool enabled) async {
+    final next = ref
+        .read(comfyServersProvider)
+        .map((s) => s.id == server.id ? s.copyWith(enabled: enabled) : s)
+        .toList();
+    await _persist(next);
   }
 
   Future<void> _addServer() async {
@@ -542,70 +555,84 @@ Future<ComfyServer?> _editServerDialog(
     text: existing?.baseUrl ?? AppConfig.defaultComfyBaseUrl,
   );
   final keyCtrl = TextEditingController(text: existing?.apiKey ?? '');
+  var enabled = existing?.enabled ?? true;
 
   return showDialog<ComfyServer>(
     context: context,
     builder: (ctx) {
-      return AlertDialog(
-        title: Text(existing == null ? '添加 ComfyUI 实例' : '编辑实例'),
-        content: SizedBox(
-          width: 420,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextField(
-                controller: nameCtrl,
-                decoration: const InputDecoration(
-                  labelText: '名称',
-                  hintText: '例如 本机 / 云 GPU',
-                  isDense: true,
-                ),
+      return StatefulBuilder(
+        builder: (ctx, setLocal) {
+          return AlertDialog(
+            title: Text(existing == null ? '添加 ComfyUI 实例' : '编辑实例'),
+            content: SizedBox(
+              width: 420,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  TextField(
+                    controller: nameCtrl,
+                    decoration: const InputDecoration(
+                      labelText: '名称',
+                      hintText: '例如 本机 / 云 GPU',
+                      isDense: true,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: urlCtrl,
+                    decoration: const InputDecoration(
+                      labelText: 'Base URL',
+                      hintText: AppConfig.defaultComfyBaseUrl,
+                      isDense: true,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: keyCtrl,
+                    decoration: const InputDecoration(
+                      labelText: 'API Key（可选）',
+                      isDense: true,
+                    ),
+                    obscureText: true,
+                  ),
+                  const SizedBox(height: 8),
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('启用'),
+                    subtitle: const Text('关闭后不显示在生成面板'),
+                    value: enabled,
+                    onChanged: (v) => setLocal(() => enabled = v),
+                  ),
+                ],
               ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: urlCtrl,
-                decoration: const InputDecoration(
-                  labelText: 'Base URL',
-                  hintText: AppConfig.defaultComfyBaseUrl,
-                  isDense: true,
-                ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('取消'),
               ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: keyCtrl,
-                decoration: const InputDecoration(
-                  labelText: 'API Key（可选）',
-                  isDense: true,
-                ),
-                obscureText: true,
+              FilledButton(
+                onPressed: () {
+                  final name = nameCtrl.text.trim();
+                  final url = urlCtrl.text.trim();
+                  if (url.isEmpty) return;
+                  Navigator.pop(
+                    ctx,
+                    ComfyServer(
+                      id: existing?.id ??
+                          'srv_${DateTime.now().millisecondsSinceEpoch}',
+                      name: name.isEmpty ? 'ComfyUI' : name,
+                      baseUrl: url,
+                      apiKey: keyCtrl.text,
+                      enabled: enabled,
+                    ),
+                  );
+                },
+                child: const Text('保存'),
               ),
             ],
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('取消'),
-          ),
-          FilledButton(
-            onPressed: () {
-              final name = nameCtrl.text.trim();
-              final url = urlCtrl.text.trim();
-              if (url.isEmpty) return;
-              Navigator.pop(
-                ctx,
-                ComfyServer(
-                  id: existing?.id ??
-                      'srv_${DateTime.now().millisecondsSinceEpoch}',
-                  name: name.isEmpty ? 'ComfyUI' : name,
-                  baseUrl: url,
-                  apiKey: keyCtrl.text,
-                ),
-              );
-            },
-            child: const Text('保存'),
-          ),
-        ],
+          );
+        },
       );
     },
   );

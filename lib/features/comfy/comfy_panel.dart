@@ -216,7 +216,7 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
 
   Future<void> _pingAllServers({bool showChecking = false}) async {
     final gen = ++_connGen;
-    final servers = List<ComfyServer>.of(ref.read(comfyServersProvider));
+    final servers = List<ComfyServer>.of(ref.read(comfyEnabledServersProvider));
     if (servers.isEmpty) {
       if (mounted) {
         setState(() {
@@ -833,12 +833,12 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
 
     final currentId = _serverId;
     final others = ref
-        .read(comfyServersProvider)
+        .read(comfyEnabledServersProvider)
         .where((s) => s.id != currentId)
         .toList(growable: false);
     if (others.isEmpty) {
       if (mounted) {
-        showGlobalToast(context, '请先在设置中添加其它 Comfy 实例');
+        showGlobalToast(context, '没有其它已开启的 Comfy 实例');
       }
       return;
     }
@@ -1484,7 +1484,8 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
   @override
   Widget build(BuildContext context) {
     final bundleAsync = ref.watch(comfyBundleProvider);
-    final servers = ref.watch(comfyServersProvider);
+    final allServers = ref.watch(comfyServersProvider);
+    final servers = ref.watch(comfyEnabledServersProvider);
     final selectedServerId = ref.watch(comfySelectedServerIdProvider);
     final cs = Theme.of(context).colorScheme;
 
@@ -1496,7 +1497,10 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
     ref.listen(comfyServersProvider, (prev, next) {
       if (prev == null) return;
       if (prev.length == next.length &&
-          prev.every((s) => next.any((n) => n.id == s.id && n.baseUrl == s.baseUrl))) {
+          prev.every((s) => next.any((n) =>
+              n.id == s.id &&
+              n.baseUrl == s.baseUrl &&
+              n.enabled == s.enabled))) {
         return;
       }
       unawaited(_pingAllServers());
@@ -1567,6 +1571,7 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
                       child: _buildServerList(
                         servers,
                         selectedServerId,
+                        hasConfiguredServers: allServers.isNotEmpty,
                       ),
                     ),
                     GestureDetector(
@@ -1696,8 +1701,9 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
 
   Widget _buildServerList(
     List<ComfyServer> servers,
-    String selectedId,
-  ) {
+    String selectedId, {
+    required bool hasConfiguredServers,
+  }) {
     final cs = Theme.of(context).colorScheme;
     final onlineCount = servers
         .where((s) => _linkOf(s.id) == _ServerLinkState.online)
@@ -1757,9 +1763,18 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
         Expanded(
           child: servers.isEmpty
               ? Center(
-                  child: Text(
-                    '请先在设置中添加实例',
-                    style: TextStyle(color: cs.onSurfaceVariant, fontSize: 12),
+                  child: Padding(
+                    padding: const EdgeInsets.all(12),
+                    child: Text(
+                      hasConfiguredServers
+                          ? '没有已开启的实例\n请在设置中启用'
+                          : '请先在设置中添加实例',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        color: cs.onSurfaceVariant,
+                        fontSize: 12,
+                      ),
+                    ),
                   ),
                 )
               : ListView.separated(

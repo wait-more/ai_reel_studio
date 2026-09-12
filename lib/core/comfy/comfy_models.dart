@@ -6,12 +6,15 @@ class ComfyServer {
   final String name;
   final String baseUrl;
   final String apiKey;
+  /// 关闭后不出现在生成面板 URL 列表中。
+  final bool enabled;
 
   const ComfyServer({
     required this.id,
     required this.name,
     required this.baseUrl,
     this.apiKey = '',
+    this.enabled = true,
   });
 
   ComfyServer copyWith({
@@ -19,12 +22,14 @@ class ComfyServer {
     String? name,
     String? baseUrl,
     String? apiKey,
+    bool? enabled,
   }) {
     return ComfyServer(
       id: id ?? this.id,
       name: name ?? this.name,
       baseUrl: baseUrl ?? this.baseUrl,
       apiKey: apiKey ?? this.apiKey,
+      enabled: enabled ?? this.enabled,
     );
   }
 
@@ -33,6 +38,7 @@ class ComfyServer {
         'name': name,
         'baseUrl': baseUrl,
         'apiKey': apiKey,
+        'enabled': enabled,
       };
 
   factory ComfyServer.fromJson(Map<String, dynamic> json) {
@@ -42,6 +48,7 @@ class ComfyServer {
       name: json['name'] as String? ?? 'ComfyUI',
       baseUrl: (json['baseUrl'] as String? ?? 'http://127.0.0.1:8188').trim(),
       apiKey: json['apiKey'] as String? ?? '',
+      enabled: json['enabled'] as bool? ?? true,
     );
   }
 

@@ -494,9 +494,12 @@ Future<bool> _sendSelectionToComfyPromptImpl(
     return false;
   }
 
-  final servers = container.read(comfyServersProvider);
+  final servers = container
+      .read(comfyServersProvider)
+      .where((s) => s.enabled)
+      .toList(growable: false);
   if (servers.isEmpty) {
-    showGlobalToast(context, '请先在设置中添加 Comfy 实例');
+    showGlobalToast(context, '请先在设置中启用至少一个 Comfy 实例');
     return false;
   }
 
@@ -642,6 +645,7 @@ Future<bool> _sendSelectionToComfyPromptImpl(
     }
   }
   if (server == null) return null;
+  if (!server.enabled) return null;
   if (!bindings.forServer(server.id).templateIds.contains(last.templateId)) {
     return null;
   }

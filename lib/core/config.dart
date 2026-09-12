@@ -176,10 +176,14 @@ class AppConfig {
       legacyKey: prefs.getString(_kComfyApiKey),
     );
     final sel = prefs.getString(_kComfySelectedServerId);
-    if (sel != null && _comfyServers.any((s) => s.id == sel)) {
+    if (sel != null &&
+        _comfyServers.any((s) => s.id == sel && s.enabled)) {
       _comfySelectedServerId = sel;
     } else {
-      _comfySelectedServerId = _comfyServers.first.id;
+      final firstEnabled = _comfyServers.where((s) => s.enabled);
+      _comfySelectedServerId = firstEnabled.isNotEmpty
+          ? firstEnabled.first.id
+          : _comfyServers.first.id;
     }
     _comfyDeleteRemoteAfterDownload =
         prefs.getBool(_kComfyDeleteRemoteAfterDownload) ?? true;
@@ -317,8 +321,16 @@ class AppConfig {
     _comfyServers = servers.isEmpty
         ? [ComfyServer.localDefault()]
         : List.of(servers);
-    if (!_comfyServers.any((s) => s.id == _comfySelectedServerId)) {
-      _comfySelectedServerId = _comfyServers.first.id;
+    final selectedStillValid = _comfyServers.any(
+      (s) => s.id == _comfySelectedServerId && s.enabled,
+    );
+    if (!selectedStillValid) {
+      final firstEnabled = _comfyServers.where((s) => s.enabled);
+      if (firstEnabled.isNotEmpty) {
+        _comfySelectedServerId = firstEnabled.first.id;
+      } else if (!_comfyServers.any((s) => s.id == _comfySelectedServerId)) {
+        _comfySelectedServerId = _comfyServers.first.id;
+      }
     }
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(
@@ -329,7 +341,7 @@ class AppConfig {
   }
 
   Future<void> setComfySelectedServerId(String id) async {
-    if (!_comfyServers.any((s) => s.id == id)) return;
+    if (!_comfyServers.any((s) => s.id == id && s.enabled)) return;
     _comfySelectedServerId = id;
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_kComfySelectedServerId, id);
