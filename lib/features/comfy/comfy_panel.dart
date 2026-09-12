@@ -2819,34 +2819,40 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
   void _focusFirstTextFieldOf(ComfyExposedNode node) {
     String? fieldId;
     FocusNode? target;
+    ComfyWidgetKind? kind;
     for (final field in node.fields) {
       if (!_isTextInputField(field)) continue;
       final fn = _textFocus[field.id];
       if (fn != null) {
         fieldId = field.id;
         target = fn;
+        kind = field.widget;
         break;
       }
     }
-    if (target == null || fieldId == null) return;
+    if (target == null || fieldId == null || kind == null) return;
     final focus = target;
     final id = fieldId;
+    final selectAll =
+        kind == ComfyWidgetKind.int || kind == ComfyWidgetKind.float;
 
-    void placeCaretAtEnd() {
+    void applySelection() {
       final ctrl = _textCtrls[id];
       if (ctrl == null) return;
       final len = ctrl.text.length;
-      ctrl.selection = TextSelection.collapsed(offset: len);
+      ctrl.selection = selectAll
+          ? TextSelection(baseOffset: 0, extentOffset: len)
+          : TextSelection.collapsed(offset: len);
     }
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       focus.requestFocus();
-      placeCaretAtEnd();
-      // 桌面端获焦后常会再触发一次全选，补一帧把光标放回末尾。
+      applySelection();
+      // 桌面端获焦后可能再改一次选区，补一帧稳住目标选区。
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted || !focus.hasFocus) return;
-        placeCaretAtEnd();
+        applySelection();
       });
     });
   }
@@ -3014,6 +3020,33 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
         );
       case ComfyWidgetKind.int:
       case ComfyWidgetKind.float:
+        return Padding(
+          padding: const EdgeInsets.only(bottom: 8),
+          child: TextField(
+            controller: _textCtrls[field.id],
+            focusNode: _textFocus[field.id],
+            onChanged: (_) => _schedulePersistSession(),
+            keyboardType: const TextInputType.numberWithOptions(decimal: true),
+            // 数值框点击即全选，方便直接覆盖输入（种子等）。
+            onTap: () {
+              final ctrl = _textCtrls[field.id];
+              if (ctrl == null) return;
+              ctrl.selection = TextSelection(
+                baseOffset: 0,
+                extentOffset: ctrl.text.length,
+              );
+            },
+            decoration: InputDecoration(
+              isDense: true,
+              labelText: field.label,
+              border: const OutlineInputBorder(),
+              contentPadding: const EdgeInsets.symmetric(
+                horizontal: 10,
+                vertical: 10,
+              ),
+            ),
+          ),
+        );
       case ComfyWidgetKind.text:
       case ComfyWidgetKind.choice:
         return Padding(
@@ -3022,10 +3055,7 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
             controller: _textCtrls[field.id],
             focusNode: _textFocus[field.id],
             onChanged: (_) => _schedulePersistSession(),
-            keyboardType: field.widget == ComfyWidgetKind.int ||
-                    field.widget == ComfyWidgetKind.float
-                ? const TextInputType.numberWithOptions(decimal: true)
-                : TextInputType.text,
+            keyboardType: TextInputType.text,
             decoration: InputDecoration(
               isDense: true,
               labelText: field.label,
