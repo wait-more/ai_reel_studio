@@ -742,21 +742,16 @@ class _TreeNodeWidgetState extends ConsumerState<_TreeNodeWidget> {
       final byCtrl = ref.read(treeSelectionByCtrlProvider);
       if (!byCtrl) {
         // 首次 Ctrl+单击：丢弃普通选中，只保留当前项；文件不打开。
+        // 不改 selectedFileProvider，避免编辑器「当前文档」被未打开的文件顶掉。
         _setSingleTreeSelection(path: path, isDir: !isFile, byCtrl: true);
-        if (isFile) {
-          ref.read(selectedFileProvider.notifier).state = path;
-        } else {
+        if (!isFile) {
           ref.read(selectedDirProvider.notifier).state = path;
         }
       } else {
         _toggleTreeSelectionCtrl(path: path, isDir: !isFile);
-        if (isFile) {
-          final still = ref.read(treeSelectionProvider).any((i) => i.path == path);
-          if (still) {
-            ref.read(selectedFileProvider.notifier).state = path;
-          }
-        } else {
-          final still = ref.read(treeSelectionProvider).any((i) => i.path == path);
+        if (!isFile) {
+          final still =
+              ref.read(treeSelectionProvider).any((i) => i.path == path);
           if (still) {
             ref.read(selectedDirProvider.notifier).state = path;
           }

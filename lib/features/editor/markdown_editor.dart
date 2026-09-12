@@ -27,6 +27,21 @@ class MarkdownEditor extends ConsumerWidget {
     final tabs = ref.watch(openTabsProvider);
     final selectedFile = ref.watch(selectedFileProvider);
 
+    // Tab 仍在但 selectedFile 丢失/不在列表（例如曾 Ctrl 选树文件）时，回落到有效 Tab。
+    if (tabs.isNotEmpty &&
+        (selectedFile == null || !tabs.contains(selectedFile))) {
+      final fallback = tabs.last;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        final t = ref.read(openTabsProvider);
+        final s = ref.read(selectedFileProvider);
+        if (t.isEmpty) return;
+        if (s == null || !t.contains(s)) {
+          ref.read(selectedFileProvider.notifier).state =
+              t.contains(fallback) ? fallback : t.last;
+        }
+      });
+    }
+
     if (tabs.isEmpty) {
       return _emptyState(context);
     }

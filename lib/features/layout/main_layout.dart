@@ -432,8 +432,16 @@ class _MainLayoutState extends ConsumerState<MainLayout> with WindowListener {
       String current, String badge) {
     final active = current == value;
     return InkWell(
-      onTap: () =>
-          ref.read(contentModeProvider.notifier).state = value,
+      onTap: () {
+        ref.read(contentModeProvider.notifier).state = value;
+        if (value == 'editor') {
+          final tabs = ref.read(openTabsProvider);
+          final sel = ref.read(selectedFileProvider);
+          if (tabs.isNotEmpty && (sel == null || !tabs.contains(sel))) {
+            ref.read(selectedFileProvider.notifier).state = tabs.last;
+          }
+        }
+      },
       borderRadius: BorderRadius.circular(6),
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
