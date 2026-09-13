@@ -1039,6 +1039,7 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
     }
     setState(() => _outputDir = base);
     _schedulePersistSession();
+    _releaseTreeCtrlMemoryAfterUse();
     showGlobalToast(context, '已设为输出目录');
   }
 
@@ -1113,6 +1114,14 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
       return;
     }
     _setFieldValue(field.id, f);
+    _releaseTreeCtrlMemoryAfterUse();
+  }
+
+  /// 「用当前选中 / 当前选中」消费后：只清 Ctrl 多选会话记忆，保留树高亮。
+  /// 下次 Ctrl+单击会当作新一轮起点（丢弃旧集合、只留当前项），避免高亮瞬间消失乱跳。
+  void _releaseTreeCtrlMemoryAfterUse() {
+    if (!ref.read(treeSelectionByCtrlProvider)) return;
+    ref.read(treeSelectionByCtrlProvider.notifier).state = false;
   }
 
   String _resolveOutputDir() {
