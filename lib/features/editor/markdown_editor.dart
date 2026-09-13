@@ -1158,10 +1158,11 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
     final theme = Theme.of(context);
     final dark = theme.brightness == Brightness.dark;
     final cs = theme.colorScheme;
-
     return CallbackShortcuts(
       bindings: {
-        const SingleActivator(LogicalKeyboardKey.keyS, control: true): _save,
+        const SingleActivator(LogicalKeyboardKey.keyS, control: true): () {
+          unawaited(_save());
+        },
         const SingleActivator(
           LogicalKeyboardKey.keyO,
           control: true,
@@ -1194,6 +1195,8 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
                 wordWrap: true,
                 padding: _editorPadding,
                 onChanged: (_) => _onEditorContentChanged(),
+                // Drop re_editor Ctrl+S so outer CallbackShortcuts can save.
+                shortcutsActivatorsBuilder: const _EditorShortcutsBuilder(),
                 style: CodeEditorStyle(
                   fontSize: fontSize,
                   fontFamily: 'Consolas',
@@ -1410,6 +1413,19 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
     if (name.endsWith('.mp4') || name.endsWith('.mov')) return Icons.videocam;
     if (name.endsWith('.wav') || name.endsWith('.mp3')) return Icons.music_note;
     return Icons.insert_drive_file_outlined;
+  }
+}
+
+/// Drop re_editor default Ctrl+S (no save impl; only swallows the key).
+class _EditorShortcutsBuilder extends CodeShortcutsActivatorsBuilder {
+  const _EditorShortcutsBuilder();
+
+  static const _defaults = DefaultCodeShortcutsActivatorsBuilder();
+
+  @override
+  List<ShortcutActivator>? build(CodeShortcutType type) {
+    if (type == CodeShortcutType.save) return null;
+    return _defaults.build(type);
   }
 }
 
