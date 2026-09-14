@@ -193,47 +193,450 @@ String _displayLabelFor({
 }) =>
     '${server.name} · ${template.name} · ${_fieldPickLabel(template, field)}';
 
-Future<T?> _pickOne<T>({
+class _PromptFillPickResult {
+  final ComfyServer server;
+  final ComfyTemplate template;
+  final ComfyExposedField field;
+
+  const _PromptFillPickResult({
+    required this.server,
+    required this.template,
+    required this.field,
+  });
+}
+
+/// 单窗完成实例 → 模板 → 字段选择，顶部展示操作流程。
+Future<_PromptFillPickResult?> _pickPromptFillTarget({
   required BuildContext context,
-  required String title,
-  required List<T> items,
-  required String Function(T) labelOf,
-  String Function(T)? subtitleOf,
-  T? initiallySelected,
-  bool forceDialog = false,
-}) async {
-  if (items.isEmpty) return null;
-  if (!forceDialog && items.length == 1) return items.first;
-  return showDialog<T>(
+  required List<ComfyServer> servers,
+  required List<ComfyTemplate> allTemplates,
+  required ComfyBindings bindings,
+  ComfyPromptSendTarget? last,
+}) {
+  return showDialog<_PromptFillPickResult>(
     context: context,
     useRootNavigator: true,
-    builder: (ctx) => SimpleDialog(
-      title: Text(title),
-      children: [
-        for (final item in items)
-          SimpleDialogOption(
-            onPressed: () => Navigator.of(ctx).pop(item),
-            child: ListTile(
-              contentPadding: EdgeInsets.zero,
-              dense: true,
-              selected: initiallySelected != null &&
-                      identical(item, initiallySelected)
-                  ? true
-                  : (initiallySelected != null && item == initiallySelected),
-              title: Text(labelOf(item)),
-              subtitle: subtitleOf == null
-                  ? null
-                  : Text(
-                      subtitleOf(item),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(fontSize: 11),
-                    ),
-            ),
-          ),
-      ],
+    builder: (ctx) => _PromptFillPickerDialog(
+      servers: servers,
+      allTemplates: allTemplates,
+      bindings: bindings,
+      last: last,
     ),
   );
+}
+
+class _PromptFillPickerDialog extends StatefulWidget {
+  final List<ComfyServer> servers;
+  final List<ComfyTemplate> allTemplates;
+  final ComfyBindings bindings;
+  final ComfyPromptSendTarget? last;
+
+  const _PromptFillPickerDialog({
+    required this.servers,
+    required this.allTemplates,
+    required this.bindings,
+    this.last,
+  });
+
+  @override
+  State<_PromptFillPickerDialog> createState() =>
+      _PromptFillPickerDialogState();
+}
+
+class _PromptFillPickerDialogState extends State<_PromptFillPickerDialog> {
+  late ComfyServer _server;
+  ComfyTemplate? _template;
+  ComfyExposedField? _field;
+
+  @override
+  void initState() {
+    super.initState();
+    _server = _initialServer();
+    _template = _initialTemplate(_server);
+    _field = _initialField(_template);
+  }
+
+  ComfyServer _initialServer() {
+    final last = widget.last;
+    if (last != null) {
+      for (final s in widget.servers) {
+        if (s.id == last.serverId) return s;
+      }
+    }
+    return widget.servers.first;
+  }
+
+  List<ComfyTemplate> _templatesFor(ComfyServer server) {
+    final ids = widget.bindings.forServer(server.id).templateIds.toSet();
+    return [
+      for (final t in widget.allTemplates)
+        if (ids.contains(t.id)) t,
+    ];
+  }
+
+  ComfyTemplate? _initialTemplate(ComfyServer server) {
+    final bound = _templatesFor(server);
+    if (bound.isEmpty) return null;
+    final last = widget.last;
+    if (last != null && last.serverId == server.id) {
+      for (final t in bound) {
+        if (t.id == last.templateId) return t;
+      }
+    }
+    return bound.first;
+  }
+
+  ComfyExposedField? _initialField(ComfyTemplate? template) {
+    if (template == null) return null;
+    final fields = comfyPromptFieldsOf(template);
+    if (fields.isEmpty) return null;
+    final last = widget.last;
+    if (last != null &&
+        last.serverId == _server.id &&
+        last.templateId == template.id) {
+      for (final f in fields) {
+        if (f.id == last.fieldId) return f;
+      }
+    }
+    return fields.first;
+  }
+
+  void _selectServer(ComfyServer server) {
+    if (identical(_server, server)) return;
+    setState(() {
+      _server = server;
+      _template = _initialTemplate(server);
+      _field = _initialField(_template);
+    });
+  }
+
+  void _selectTemplate(ComfyTemplate template) {
+    if (_template?.id == template.id) return;
+    setState(() {
+      _template = template;
+      _field = _initialField(template);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final templates = _templatesFor(_server);
+    final fields =
+        _template == null ? const <ComfyExposedField>[] : comfyPromptFieldsOf(_template!);
+    final canSubmit = _template != null && _field != null;
+
+    return Dialog(
+      insetPadding: const EdgeInsets.symmetric(horizontal: 28, vertical: 24),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 380, maxHeight: 520),
+        child: Material(
+          color: cs.surface,
+          borderRadius: BorderRadius.circular(12),
+          clipBehavior: Clip.antiAlias,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(14, 12, 6, 0),
+                child: Row(
+                  children: [
+                    Icon(Icons.auto_awesome, size: 18, color: cs.primary),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        '填入生成提示词',
+                        style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                              fontWeight: FontWeight.w700,
+                            ),
+                      ),
+                    ),
+                    IconButton(
+                      tooltip: '关闭',
+                      visualDensity: VisualDensity.compact,
+                      icon: const Icon(Icons.close, size: 18),
+                      onPressed: () => Navigator.of(context).pop(),
+                    ),
+                  ],
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(14, 4, 14, 8),
+                child: _flowGuide(context),
+              ),
+              Flexible(
+                child: SingleChildScrollView(
+                  padding: const EdgeInsets.fromLTRB(14, 0, 14, 8),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      _sectionBlock(
+                        context,
+                        label: '实例',
+                        child: Column(
+                          children: [
+                            for (var i = 0; i < widget.servers.length; i++) ...[
+                              if (i > 0) const SizedBox(height: 4),
+                              _optionTile(
+                                context,
+                                selected: widget.servers[i].id == _server.id,
+                                title: widget.servers[i].name,
+                                subtitle: widget.servers[i].baseUrl,
+                                onTap: () => _selectServer(widget.servers[i]),
+                              ),
+                            ],
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      _sectionBlock(
+                        context,
+                        label: '模板',
+                        child: templates.isEmpty
+                            ? _emptyHint(context, '该实例尚未绑定模板')
+                            : Column(
+                                children: [
+                                  for (var i = 0; i < templates.length; i++) ...[
+                                    if (i > 0) const SizedBox(height: 4),
+                                    _optionTile(
+                                      context,
+                                      selected: _template?.id == templates[i].id,
+                                      title: templates[i].name,
+                                      subtitle:
+                                          '${templates[i].nodes.length} 个节点',
+                                      onTap: () =>
+                                          _selectTemplate(templates[i]),
+                                    ),
+                                  ],
+                                ],
+                              ),
+                      ),
+                      const SizedBox(height: 8),
+                      _sectionBlock(
+                        context,
+                        label: '目标字段',
+                        child: _template == null
+                            ? _emptyHint(context, '请先选择模板')
+                            : fields.isEmpty
+                                ? _emptyHint(context, '该模板没有可用文本字段')
+                                : Column(
+                                    children: [
+                                      for (var i = 0; i < fields.length; i++) ...[
+                                        if (i > 0) const SizedBox(height: 4),
+                                        _optionTile(
+                                          context,
+                                          selected: _field?.id == fields[i].id,
+                                          title: _fieldPickLabel(
+                                            _template!,
+                                            fields[i],
+                                          ),
+                                          subtitle: fields[i].widget ==
+                                                  ComfyWidgetKind.multiline
+                                              ? '多行'
+                                              : '单行',
+                                          onTap: () => setState(
+                                            () => _field = fields[i],
+                                          ),
+                                        ),
+                                      ],
+                                    ],
+                                  ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              const Divider(height: 1),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(12, 8, 12, 10),
+                child: Row(
+                  children: [
+                    TextButton(
+                      onPressed: () => Navigator.of(context).pop(),
+                      child: const Text('取消'),
+                    ),
+                    const Spacer(),
+                    FilledButton(
+                      onPressed: !canSubmit
+                          ? null
+                          : () {
+                              Navigator.of(context).pop(
+                                _PromptFillPickResult(
+                                  server: _server,
+                                  template: _template!,
+                                  field: _field!,
+                                ),
+                              );
+                            },
+                      child: const Text('填入'),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _flowGuide(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    const steps = ['先选实例', '再选模板', '最后选目标字段'];
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      decoration: BoxDecoration(
+        color: cs.surfaceContainerHighest.withValues(alpha: 0.55),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Wrap(
+        crossAxisAlignment: WrapCrossAlignment.center,
+        spacing: 4,
+        runSpacing: 4,
+        children: [
+          for (var i = 0; i < steps.length; i++) ...[
+            if (i > 0)
+              Icon(
+                Icons.chevron_right,
+                size: 14,
+                color: cs.onSurfaceVariant.withValues(alpha: 0.7),
+              ),
+            Text(
+              '${i + 1}. ${steps[i]}',
+              style: TextStyle(
+                fontSize: 12,
+                height: 1.35,
+                color: cs.onSurfaceVariant,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _sectionBlock(
+    BuildContext context, {
+    required String label,
+    required Widget child,
+  }) {
+    final cs = Theme.of(context).colorScheme;
+    return Container(
+      padding: const EdgeInsets.fromLTRB(8, 8, 8, 8),
+      decoration: BoxDecoration(
+        color: cs.surfaceContainerHighest.withValues(alpha: 0.28),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(
+          color: cs.outlineVariant.withValues(alpha: 0.65),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _sectionLabel(context, label),
+          const SizedBox(height: 6),
+          child,
+        ],
+      ),
+    );
+  }
+
+  Widget _sectionLabel(BuildContext context, String text) {
+    final cs = Theme.of(context).colorScheme;
+    return Text(
+      text,
+      style: TextStyle(
+        fontSize: 11,
+        fontWeight: FontWeight.w700,
+        letterSpacing: 0.2,
+        color: cs.onSurfaceVariant,
+      ),
+    );
+  }
+
+  Widget _emptyHint(BuildContext context, String text) {
+    final cs = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 2),
+      child: Text(
+        text,
+        style: TextStyle(fontSize: 12, color: cs.error.withValues(alpha: 0.85)),
+      ),
+    );
+  }
+
+  Widget _optionTile(
+    BuildContext context, {
+    required bool selected,
+    required String title,
+    String? subtitle,
+    required VoidCallback onTap,
+  }) {
+    final cs = Theme.of(context).colorScheme;
+    return Material(
+      color: selected
+          ? cs.primary.withValues(alpha: 0.10)
+          : cs.surfaceContainerLow.withValues(alpha: 0.65),
+      borderRadius: BorderRadius.circular(8),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(8),
+        child: Container(
+          padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(
+              color: selected
+                  ? cs.primary.withValues(alpha: 0.45)
+                  : cs.outlineVariant.withValues(alpha: 0.55),
+            ),
+          ),
+          child: Row(
+            children: [
+              Icon(
+                selected ? Icons.check_circle : Icons.circle_outlined,
+                size: 16,
+                color: selected ? cs.primary : cs.outline,
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight:
+                            selected ? FontWeight.w600 : FontWeight.w500,
+                      ),
+                    ),
+                    if (subtitle != null && subtitle.isNotEmpty) ...[
+                      const SizedBox(height: 1),
+                      Text(
+                        subtitle,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 10.5,
+                          color: cs.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 /// 选区工具栏上的「填入生成提示词」：悬停后在右侧展开二级菜单。
@@ -537,95 +940,40 @@ Future<bool> _sendSelectionToComfyPromptImpl(
     );
   }
 
-  ComfyServer? preferredServer;
-  if (last != null) {
-    for (final s in servers) {
-      if (s.id == last.serverId) {
-        preferredServer = s;
+  // 预先校验：至少一个实例有可填模板+字段，避免弹出空窗。
+  var anyReady = false;
+  for (final s in servers) {
+    final boundIds = bindings.forServer(s.id).templateIds.toSet();
+    for (final t in templates) {
+      if (!boundIds.contains(t.id)) continue;
+      if (comfyPromptFieldsOf(t).isNotEmpty) {
+        anyReady = true;
         break;
       }
     }
+    if (anyReady) break;
   }
-
-  final server = await _pickOne<ComfyServer>(
-    context: context,
-    title: '填入生成提示词 · 选择实例',
-    items: servers,
-    labelOf: (s) => s.name,
-    subtitleOf: (s) => s.baseUrl,
-    initiallySelected: preferredServer,
-  );
-  if (server == null || !context.mounted) return false;
-
-  final boundIds = bindings.forServer(server.id).templateIds.toSet();
-  final boundTemplates = [
-    for (final t in templates)
-      if (boundIds.contains(t.id)) t,
-  ];
-  if (boundTemplates.isEmpty) {
-    showGlobalToast(context, '该实例尚未绑定模板');
+  if (!anyReady) {
+    showGlobalToast(context, '没有可填入的模板字段，请先在生成面板绑定模板');
     return false;
   }
 
-  ComfyTemplate? preferredTemplate;
-  if (last != null && last.serverId == server.id) {
-    for (final t in boundTemplates) {
-      if (t.id == last.templateId) {
-        preferredTemplate = t;
-        break;
-      }
-    }
-  }
-
-  final template = await _pickOne<ComfyTemplate>(
+  final picked = await _pickPromptFillTarget(
     context: context,
-    title: '选择模板',
-    items: boundTemplates,
-    labelOf: (t) => t.name,
-    subtitleOf: (t) => '${t.nodes.length} 个节点',
-    initiallySelected: preferredTemplate,
+    servers: servers,
+    allTemplates: templates,
+    bindings: bindings,
+    last: last,
   );
-  if (template == null || !context.mounted) return false;
-
-  final fields = comfyPromptFieldsOf(template);
-  if (fields.isEmpty) {
-    showGlobalToast(context, '该模板没有可用的文本/多行字段');
-    return false;
-  }
-
-  ComfyExposedField? preferredField;
-  if (last != null &&
-      last.serverId == server.id &&
-      last.templateId == template.id) {
-    for (final f in fields) {
-      if (f.id == last.fieldId) {
-        preferredField = f;
-        break;
-      }
-    }
-  }
-  preferredField ??= fields.first;
-
-  // 节点/字段始终弹出选择（即使只有一个），模板仅一个时可自动跳过。
-  final field = await _pickOne<ComfyExposedField>(
-    context: context,
-    title: '选择目标节点',
-    items: fields,
-    labelOf: (f) => _fieldPickLabel(template, f),
-    subtitleOf: (f) =>
-        f.widget == ComfyWidgetKind.multiline ? '多行' : '单行',
-    initiallySelected: preferredField,
-    forceDialog: true,
-  );
-  if (field == null || !context.mounted) return false;
+  if (picked == null || !context.mounted) return false;
 
   return _commitPromptFill(
     context,
     container,
     text: trimmed,
-    server: server,
-    template: template,
-    field: field,
+    server: picked.server,
+    template: picked.template,
+    field: picked.field,
   );
 }
 
