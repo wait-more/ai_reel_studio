@@ -827,7 +827,7 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
 
   /// 将当前模板的节点参数与 bypass 使能复制到其它 Comfy 实例，便于并行同跑。
   /// 注意：种子会在各自点击「生成」提交时重新随机，不会沿用同一 seed 出同片。
-  Future<void> _twinTaskToOtherServer() async {
+  Future<void> _twinTaskToOtherServer(BuildContext anchorContext) async {
     final template = _selected;
     if (template == null) return;
 
@@ -843,54 +843,27 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
       return;
     }
 
-    final target = await showDialog<ComfyServer>(
-      context: context,
-      builder: (ctx) => SimpleDialog(
-        title: const Text('选择孪生目标实例'),
-        children: [
-          for (final s in others)
-            SimpleDialogOption(
-              onPressed: () => Navigator.of(ctx).pop(s),
-              child: ListTile(
-                contentPadding: EdgeInsets.zero,
-                dense: true,
-                title: Text(s.name),
-                subtitle: Text(
-                  s.baseUrl,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(fontSize: 11),
-                ),
-              ),
-            ),
-        ],
-      ),
+    final bindings = await ComfyTemplateStore.loadBindings();
+    if (!mounted || !anchorContext.mounted) return;
+    final boundIdsByServer = <String, bool>{
+      for (final s in others)
+        s.id: bindings.forServer(s.id).templateIds.contains(template.id),
+    };
+
+    final target = await _showTwinTargetPicker(
+      anchorContext: anchorContext,
+      servers: others,
+      boundIdsByServer: boundIdsByServer,
     );
     if (target == null || !mounted) return;
 
-    final bindings = await ComfyTemplateStore.loadBindings();
-    if (!mounted) return;
-    final bound = bindings.forServer(target.id).templateIds.contains(template.id);
+    final bound = boundIdsByServer[target.id] == true;
     if (!bound) {
-      final ok = await showDialog<bool>(
-        context: context,
-        builder: (ctx) => AlertDialog(
-          title: const Text('尚未绑定模板'),
-          content: Text(
-            '目标实例「${target.name}」尚未绑定模板「${template.name}」。\n'
-            '是否绑定并孪生参数？',
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(ctx).pop(false),
-              child: const Text('取消'),
-            ),
-            FilledButton(
-              onPressed: () => Navigator.of(ctx).pop(true),
-              child: const Text('绑定并孪生'),
-            ),
-          ],
-        ),
+      if (!anchorContext.mounted) return;
+      final ok = await _showTwinBindConfirm(
+        anchorContext: anchorContext,
+        target: target,
+        templateName: template.name,
       );
       if (ok != true || !mounted) return;
       await ComfyTemplateStore.bindTemplates(
@@ -944,6 +917,248 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
     if (!mounted) return;
     // 切到目标 URL 后明确打开刚孪生的模板（载入目标会话中的值/使能）。
     await _selectTemplate(template, persistCurrent: false);
+  }
+
+  Future<ComfyServer?> _showTwinTargetPicker({
+    required BuildContext anchorContext,
+    required List<ComfyServer> servers,
+    required Map<String, bool> boundIdsByServer,
+  }) {
+    return _showAnchoredPopup<ComfyServer>(
+      anchorContext: anchorContext,
+      width: 268,
+      builder: (ctx, cs) => Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 10, 12, 6),
+            child: Row(
+              children: [
+                Icon(
+                  Icons.control_point_duplicate_outlined,
+                  size: 16,
+                  color: cs.primary,
+                ),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    '孪生到实例',
+                    style: Theme.of(ctx).textTheme.titleSmall?.copyWith(
+                          fontWeight: FontWeight.w700,
+                        ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+            child: Text(
+              '复制当前参数与使能，便于并行同跑',
+              style: TextStyle(
+                fontSize: 11,
+                height: 1.3,
+                color: cs.onSurfaceVariant,
+              ),
+            ),
+          ),
+          const Divider(height: 1),
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxHeight: 240),
+            child: ListView.separated(
+              shrinkWrap: true,
+              padding: const EdgeInsets.fromLTRB(8, 8, 8, 8),
+              itemCount: servers.length,
+              separatorBuilder: (_, _) => const SizedBox(height: 4),
+              itemBuilder: (ctx, i) {
+                final s = servers[i];
+                final bound = boundIdsByServer[s.id] == true;
+                return Material(
+                  color: cs.surfaceContainerLow.withValues(alpha: 0.7),
+                  borderRadius: BorderRadius.circular(8),
+                  child: InkWell(
+                    borderRadius: BorderRadius.circular(8),
+                    onTap: () => Navigator.of(ctx).pop(s),
+                    child: Container(
+                      padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(
+                          color: cs.outlineVariant.withValues(alpha: 0.55),
+                        ),
+                      ),
+                      child: Row(
+                        children: [
+                          Icon(
+                            Icons.dns_outlined,
+                            size: 15,
+                            color: cs.onSurfaceVariant,
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  s.name,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                                const SizedBox(height: 1),
+                                Text(
+                                  s.baseUrl,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    fontSize: 10.5,
+                                    color: cs.onSurfaceVariant,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          const SizedBox(width: 6),
+                          Text(
+                            bound ? '已绑定' : '将绑定',
+                            style: TextStyle(
+                              fontSize: 10.5,
+                              fontWeight: FontWeight.w600,
+                              color: bound
+                                  ? cs.primary
+                                  : cs.tertiary,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<bool?> _showTwinBindConfirm({
+    required BuildContext anchorContext,
+    required ComfyServer target,
+    required String templateName,
+  }) {
+    return _showAnchoredPopup<bool>(
+      anchorContext: anchorContext,
+      width: 268,
+      builder: (ctx, cs) => Padding(
+        padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              '尚未绑定模板',
+              style: Theme.of(ctx).textTheme.titleSmall?.copyWith(
+                    fontWeight: FontWeight.w700,
+                  ),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              '「${target.name}」未绑定「$templateName」。绑定后将复制当前参数。',
+              style: TextStyle(
+                fontSize: 12,
+                height: 1.35,
+                color: cs.onSurfaceVariant,
+              ),
+            ),
+            const SizedBox(height: 10),
+            Row(
+              children: [
+                TextButton(
+                  onPressed: () => Navigator.of(ctx).pop(false),
+                  style: TextButton.styleFrom(
+                    visualDensity: VisualDensity.compact,
+                  ),
+                  child: const Text('取消'),
+                ),
+                const Spacer(),
+                FilledButton(
+                  onPressed: () => Navigator.of(ctx).pop(true),
+                  style: FilledButton.styleFrom(
+                    visualDensity: VisualDensity.compact,
+                  ),
+                  child: const Text('绑定并孪生'),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<T?> _showAnchoredPopup<T>({
+    required BuildContext anchorContext,
+    required double width,
+    required Widget Function(BuildContext context, ColorScheme cs) builder,
+  }) {
+    final box = anchorContext.findRenderObject() as RenderBox?;
+    final overlay = Overlay.of(anchorContext).context.findRenderObject()
+        as RenderBox?;
+    if (box == null || overlay == null || !box.hasSize) {
+      return Future<T?>.value(null);
+    }
+
+    final topLeft = box.localToGlobal(Offset.zero, ancestor: overlay);
+    final size = box.size;
+    final overlaySize = overlay.size;
+    const gap = 6.0;
+    const margin = 8.0;
+    // 预估高度：尽量贴按钮下方；空间不够则翻到上方。
+    const estimatedHeight = 220.0;
+
+    var left = topLeft.dx + size.width - width;
+    if (left < margin) left = margin;
+    if (left + width > overlaySize.width - margin) {
+      left = overlaySize.width - width - margin;
+    }
+
+    var top = topLeft.dy + size.height + gap;
+    if (top + estimatedHeight > overlaySize.height - margin) {
+      top = topLeft.dy - estimatedHeight - gap;
+      if (top < margin) top = margin;
+    }
+
+    return showDialog<T>(
+      context: context,
+      barrierColor: Colors.black.withValues(alpha: 0.18),
+      builder: (ctx) {
+        final cs = Theme.of(ctx).colorScheme;
+        return SizedBox.expand(
+          child: Stack(
+            children: [
+              Positioned(
+                left: left,
+                top: top,
+                width: width,
+                child: Material(
+                  color: cs.surface,
+                  elevation: 10,
+                  shadowColor: Colors.black.withValues(alpha: 0.28),
+                  borderRadius: BorderRadius.circular(12),
+                  clipBehavior: Clip.antiAlias,
+                  child: builder(ctx, cs),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
   }
 
   /// `foo` → `foo-1`；`foo.png` → `foo-1.png`；
@@ -2026,20 +2241,22 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
                 ),
               ),
               const SizedBox(width: 8),
-              Tooltip(
-                message: '将当前节点参数与使能复制到其它 Comfy 实例，便于并行同跑',
-                waitDuration: const Duration(milliseconds: 400),
-                child: TextButton.icon(
-                  onPressed: _twinTaskToOtherServer,
-                  style: TextButton.styleFrom(
-                    visualDensity: VisualDensity.compact,
-                    minimumSize: const Size(0, 36),
+              Builder(
+                builder: (btnCtx) => Tooltip(
+                  message: '将当前节点参数与使能复制到其它 Comfy 实例，便于并行同跑',
+                  waitDuration: const Duration(milliseconds: 400),
+                  child: TextButton.icon(
+                    onPressed: () => _twinTaskToOtherServer(btnCtx),
+                    style: TextButton.styleFrom(
+                      visualDensity: VisualDensity.compact,
+                      minimumSize: const Size(0, 36),
+                    ),
+                    icon: const Icon(
+                      Icons.control_point_duplicate_outlined,
+                      size: 18,
+                    ),
+                    label: const Text('任务孪生'),
                   ),
-                  icon: const Icon(
-                    Icons.control_point_duplicate_outlined,
-                    size: 18,
-                  ),
-                  label: const Text('任务孪生'),
                 ),
               ),
               const SizedBox(width: 8),
