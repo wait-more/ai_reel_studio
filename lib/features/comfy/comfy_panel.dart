@@ -137,8 +137,9 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
   Timer? _hotReloadTimer;
   Timer? _serverPingTimer;
   Timer? _sessionPersistTimer;
+  Timer? _leftSplitPersistTimer;
   String _lastSig = '';
-  double _leftSplit = 0.38;
+  double _leftSplit = AppConfig.instance.comfyLeftSplit;
   /// 忽略过期的连接检测 / 模板加载，避免切换 URL 时连环闪烁。
   int _connGen = 0;
   int _loadGen = 0;
@@ -163,6 +164,10 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
     _hotReloadTimer?.cancel();
     _serverPingTimer?.cancel();
     _sessionPersistTimer?.cancel();
+    _leftSplitPersistTimer?.cancel();
+    if (_leftSplit != AppConfig.instance.comfyLeftSplit) {
+      unawaited(AppConfig.instance.setComfyLeftSplit(_leftSplit));
+    }
     _jobListScroll.dispose();
     _outputNameCtrl.dispose();
     for (final j in _jobs) {
@@ -474,6 +479,13 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
     _sessionPersistTimer?.cancel();
     _sessionPersistTimer = Timer(const Duration(milliseconds: 350), () {
       _persistSession();
+    });
+  }
+
+  void _schedulePersistLeftSplit() {
+    _leftSplitPersistTimer?.cancel();
+    _leftSplitPersistTimer = Timer(const Duration(milliseconds: 250), () {
+      unawaited(AppConfig.instance.setComfyLeftSplit(_leftSplit));
     });
   }
 
@@ -1788,41 +1800,55 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
               width: 230,
               child: Material(
                 color: cs.surfaceContainerLow,
-                child: Column(
-                  children: [
-                    Expanded(
-                      flex: (_leftSplit * 100).round().clamp(25, 60),
-                      child: _buildServerList(
-                        servers,
-                        selectedServerId,
-                        hasConfiguredServers: allServers.isNotEmpty,
-                      ),
-                    ),
-                    GestureDetector(
-                      behavior: HitTestBehavior.opaque,
-                      onVerticalDragUpdate: (d) {
-                        setState(() {
-                          _leftSplit =
-                              (_leftSplit + d.delta.dy / 400).clamp(0.22, 0.7);
-                        });
-                      },
-                      child: MouseRegion(
-                        cursor: SystemMouseCursors.resizeUpDown,
-                        child: Container(
-                          height: 6,
-                          color: cs.outlineVariant.withValues(alpha: 0.5),
+                child: LayoutBuilder(
+                  builder: (context, constraints) {
+                    const dividerH = 6.0;
+                    final avail =
+                        (constraints.maxHeight - dividerH).clamp(0.0, double.infinity);
+                    final topH = avail * _leftSplit;
+                    final bottomH = avail - topH;
+                    return Column(
+                      children: [
+                        SizedBox(
+                          height: topH,
+                          child: _buildServerList(
+                            servers,
+                            selectedServerId,
+                            hasConfiguredServers: allServers.isNotEmpty,
+                          ),
                         ),
-                      ),
-                    ),
-                    Expanded(
-                      flex: ((1 - _leftSplit) * 100).round().clamp(40, 75),
-                      child: _buildTemplateList(
-                        boundTemplates,
-                        binding,
-                        bundle.templates,
-                      ),
-                    ),
-                  ],
+                        GestureDetector(
+                          behavior: HitTestBehavior.opaque,
+                          onVerticalDragUpdate: (d) {
+                            if (avail <= 0) return;
+                            setState(() {
+                              _leftSplit =
+                                  (_leftSplit + d.delta.dy / avail).clamp(
+                                AppConfig.comfyLeftSplitMin,
+                                AppConfig.comfyLeftSplitMax,
+                              );
+                            });
+                            _schedulePersistLeftSplit();
+                          },
+                          child: MouseRegion(
+                            cursor: SystemMouseCursors.resizeUpDown,
+                            child: Container(
+                              height: dividerH,
+                              color: cs.outlineVariant.withValues(alpha: 0.5),
+                            ),
+                          ),
+                        ),
+                        SizedBox(
+                          height: bottomH,
+                          child: _buildTemplateList(
+                            boundTemplates,
+                            binding,
+                            bundle.templates,
+                          ),
+                        ),
+                      ],
+                    );
+                  },
                 ),
               ),
             ),

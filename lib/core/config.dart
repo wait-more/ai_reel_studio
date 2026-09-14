@@ -73,8 +73,13 @@ class AppConfig {
   static const _kComfySelectedServerId = 'comfySelectedServerId';
   static const _kComfyDeleteRemoteAfterDownload =
       'comfyDeleteRemoteAfterDownload';
+  static const _kComfyLeftSplit = 'comfyLeftSplit';
 
   static const defaultComfyBaseUrl = 'http://127.0.0.1:8188';
+  /// 生成面板左侧：URL 列表占比（相对模板绑定区）。
+  static const defaultComfyLeftSplit = 0.38;
+  static const comfyLeftSplitMin = 0.22;
+  static const comfyLeftSplitMax = 0.7;
 
   static const defaultStartCmds = <StartCmd>[
     StartCmd(name: 'opencode', command: 'opencode'),
@@ -116,6 +121,7 @@ class AppConfig {
   List<ComfyServer> _comfyServers = [ComfyServer.localDefault()];
   String _comfySelectedServerId = 'local';
   bool _comfyDeleteRemoteAfterDownload = true;
+  double _comfyLeftSplit = defaultComfyLeftSplit;
   AssetPanelPrefs _assetPanelPrefs = AssetPanelPrefs.defaults();
 
   String get projectRoot => _projectRoot;
@@ -128,6 +134,8 @@ class AppConfig {
   List<ComfyServer> get comfyServers => List.unmodifiable(_comfyServers);
   String get comfySelectedServerId => _comfySelectedServerId;
   bool get comfyDeleteRemoteAfterDownload => _comfyDeleteRemoteAfterDownload;
+  /// 生成面板左侧 URL / 模板绑定 分隔比例。
+  double get comfyLeftSplit => _comfyLeftSplit;
   /// 素材栏偏好整包（视图 / 列宽 / 排序）。
   AssetPanelPrefs get assetPanelPrefs => _assetPanelPrefs;
   /// `grid` | `list`
@@ -187,6 +195,8 @@ class AppConfig {
     }
     _comfyDeleteRemoteAfterDownload =
         prefs.getBool(_kComfyDeleteRemoteAfterDownload) ?? true;
+    _comfyLeftSplit = (prefs.getDouble(_kComfyLeftSplit) ?? defaultComfyLeftSplit)
+        .clamp(comfyLeftSplitMin, comfyLeftSplitMax);
     _assetPanelPrefs = await _loadAssetPanelPrefs(prefs);
   }
 
@@ -372,6 +382,13 @@ class AppConfig {
     _comfyDeleteRemoteAfterDownload = value;
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool(_kComfyDeleteRemoteAfterDownload, value);
+  }
+
+  Future<void> setComfyLeftSplit(double value) async {
+    _comfyLeftSplit =
+        value.clamp(comfyLeftSplitMin, comfyLeftSplitMax).toDouble();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setDouble(_kComfyLeftSplit, _comfyLeftSplit);
   }
 
   static List<ComfyServer> _loadComfyServers(
