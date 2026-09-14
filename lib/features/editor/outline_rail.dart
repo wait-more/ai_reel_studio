@@ -35,12 +35,23 @@ class _OutlineRailState extends State<OutlineRail> {
   Timer? _closeTimer;
   OverlayEntry? _overlay;
   final GlobalKey _anchorKey = GlobalKey();
+  final ScrollController _listScroll = ScrollController();
+
+  /// 与 [_panel] 中单行标题高度对齐，便于按 index 定位。
+  static const double _itemExtent = 28;
+
+  @override
+  void initState() {
+    super.initState();
+    _scheduleEnsureActiveVisible();
+  }
 
   @override
   void dispose() {
     _openTimer?.cancel();
     _closeTimer?.cancel();
     _removeOverlay();
+    _listScroll.dispose();
     super.dispose();
   }
 
@@ -50,16 +61,58 @@ class _OutlineRailState extends State<OutlineRail> {
     if (widget.pinned) {
       _removeOverlay();
       _hoverOpen = false;
-      return;
     }
     // 不可在父级 build/didUpdateWidget 里同步 markNeedsBuild，
     // 否则 Overlay 重入 build 时 InheritedWidget 依赖会断言失败。
-    if (_overlay != null &&
+    if (!widget.pinned &&
+        _overlay != null &&
         (oldWidget.headings != widget.headings ||
             oldWidget.activeIndex != widget.activeIndex)) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted && _overlay != null) _overlay!.markNeedsBuild();
       });
+    }
+    final pinnedOpened = !oldWidget.pinned && widget.pinned;
+    if (pinnedOpened ||
+        oldWidget.activeIndex != widget.activeIndex ||
+        oldWidget.headings != widget.headings) {
+      _scheduleEnsureActiveVisible(
+        animate: !pinnedOpened && oldWidget.activeIndex >= 0,
+      );
+    }
+  }
+
+  void _scheduleEnsureActiveVisible({bool animate = false}) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _ensureActiveVisible(animate: animate);
+    });
+  }
+
+  void _ensureActiveVisible({bool animate = false}) {
+    final i = widget.activeIndex;
+    if (i < 0 || !_listScroll.hasClients) return;
+    final pos = _listScroll.position;
+    if (!pos.hasPixels || pos.viewportDimension <= 0) return;
+    final itemTop = i * _itemExtent;
+    final itemBottom = itemTop + _itemExtent;
+    final viewTop = pos.pixels;
+    final viewBottom = viewTop + pos.viewportDimension;
+    // 已在可视区内则不动，避免跟滚时来回抖。
+    if (itemTop >= viewTop + 4 && itemBottom <= viewBottom - 4) return;
+    final target = (itemTop - (pos.viewportDimension - _itemExtent) / 2)
+        .clamp(0.0, pos.maxScrollExtent);
+    if ((pos.pixels - target).abs() < 1) return;
+    if (animate) {
+      unawaited(
+        _listScroll.animateTo(
+          target,
+          duration: const Duration(milliseconds: 140),
+          curve: Curves.easeOut,
+        ),
+      );
+    } else {
+      _listScroll.jumpTo(target);
     }
   }
 
@@ -121,6 +174,7 @@ class _OutlineRailState extends State<OutlineRail> {
       },
     );
     overlayState.insert(_overlay!);
+    _scheduleEnsureActiveVisible();
   }
 
   void _scheduleOpen() {
@@ -267,8 +321,10 @@ class _OutlineRailState extends State<OutlineRail> {
                   ),
                 )
               : ListView.builder(
+                  controller: _listScroll,
                   primary: false,
                   padding: const EdgeInsets.symmetric(vertical: 4),
+                  itemExtent: _itemExtent,
                   itemCount: w.headings.length,
                   itemBuilder: (context, i) {
                     final h = w.headings[i];
@@ -282,11 +338,10 @@ class _OutlineRailState extends State<OutlineRail> {
                         }
                       },
                       child: Container(
+                        alignment: Alignment.centerLeft,
                         padding: EdgeInsets.only(
                           left: 8.0 + (h.level - 1) * 10.0,
                           right: 8,
-                          top: 5,
-                          bottom: 5,
                         ),
                         color: active
                             ? theme.colorScheme.primary.withValues(alpha: 0.14)
