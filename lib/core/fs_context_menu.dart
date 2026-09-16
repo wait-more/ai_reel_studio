@@ -14,6 +14,13 @@ import 'providers.dart';
 import 'toast.dart';
 import 'video_frame_extract.dart';
 
+/// 其它 Overlay 菜单（如文档标签菜单）注册的关闭回调，避免互相 import。
+bool Function()? _peerOverlayMenuDismisser;
+
+void registerPeerOverlayMenuDismisser(bool Function() dismiss) {
+  _peerOverlayMenuDismisser = dismiss;
+}
+
 /// 兼容调用点的包装；切换菜单不依赖此组件做命中。
 class FsContextMenuTarget extends StatelessWidget {
   const FsContextMenuTarget({
@@ -114,6 +121,7 @@ Future<void> showFsContextMenu({
       : null;
 
   _dismissActiveMenu();
+  _peerOverlayMenuDismisser?.call();
 
   final isVideo = !background && !isDir && classifyMedia(path) == MediaKind.video;
   final completer = Completer<String?>();

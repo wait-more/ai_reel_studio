@@ -432,6 +432,14 @@ class _ProjectTreeState extends ConsumerState<ProjectTree> {
     ref.listen(selectedDirProvider, (_, next) => _expandTo(next));
     ref.listen(selectedFileProvider, (_, next) => _expandTo(next));
 
+    // 标签「在目录树中定位」：强制展开，即使已是当前文件。
+    ref.listen(treeRevealRequestProvider, (prev, next) {
+      if (next == null || prev?.nonce == next.nonce) return;
+      _lastSyncedPath = null;
+      _expandTo(next.path);
+      _setTreeSelection([FsClipboardItem(path: next.path, isDir: false)]);
+    });
+
     // 物料网格发生结构变更时，重建树以保持两边同步
     ref.listen(treeRefreshTickProvider, (prev, next) {
       if (next == prev || !AppConfig.instance.isConfigured) return;

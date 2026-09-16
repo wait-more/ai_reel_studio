@@ -7,6 +7,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:re_editor/re_editor.dart';
 import '../../core/agent_bridge.dart';
 import '../../core/comfy_prompt_bridge.dart';
+import '../../core/editor_tab_menu.dart';
+import '../../core/file_actions.dart';
 import '../../core/providers.dart';
 import '../../core/toast.dart';
 import '../../core/workspace_memory.dart';
@@ -18,6 +20,8 @@ import 're_editor_context_menu.dart';
 
 /// 大纲是否钉住（会话内保持）。
 final outlinePinnedProvider = StateProvider<bool>((ref) => false);
+
+int _treeRevealNonce = 0;
 
 class MarkdownEditor extends ConsumerWidget {
   const MarkdownEditor({super.key});
@@ -102,7 +106,10 @@ class MarkdownEditor extends ConsumerWidget {
               selected: isSelected,
               onSelect: () =>
                   ref.read(selectedFileProvider.notifier).state = path,
-              onClose: () => _closeTab(context, path, ref),
+              onClose: () => unawaited(_closeTab(context, path, ref)),
+              onContextMenu: (pos) => unawaited(
+                _showTabMenu(context, ref, path: path, index: index, pos: pos),
+              ),
             ),
           );
         },
@@ -206,6 +213,101 @@ class MarkdownEditor extends ConsumerWidget {
     _forceCloseTab(context, path, ref);
   }
 
+  Future<void> _showTabMenu(
+    BuildContext context,
+    WidgetRef ref, {
+    required String path,
+    required int index,
+    required Offset pos,
+  }) async {
+    final tabs = ref.read(openTabsProvider);
+    if (index < 0 || index >= tabs.length || tabs[index] != path) return;
+
+    final action = await showEditorTabMenu(
+      context: context,
+      globalPosition: pos,
+      canCloseOthers: tabs.length > 1,
+      canCloseRight: index < tabs.length - 1,
+    );
+    if (action == null || !context.mounted) return;
+
+    switch (action) {
+      case 'close':
+        await _closeTab(context, path, ref);
+      case 'closeOthers':
+        await _closeTabsExcept(context, ref, keep: path);
+      case 'closeRight':
+        await _closeTabsToTheRight(context, ref, fromIndex: index);
+      case 'closeAll':
+        await _closeAllTabs(context, ref);
+      case 'reveal':
+        await revealInExplorer(path);
+      case 'revealTree':
+        ref.read(selectedFileProvider.notifier).state = path;
+        ref.read(treeRevealRequestProvider.notifier).state = TreeRevealRequest(
+          path: path,
+          nonce: ++_treeRevealNonce,
+        );
+      case 'copyAbsPath':
+        await copyAbsolutePath(context, path);
+      case 'copyRelPath':
+        await copyProjectRelativePath(context, path);
+      case 'copyName':
+        await copyBaseName(context, path);
+    }
+  }
+
+  Future<void> _closeTabsExcept(
+    BuildContext context,
+    WidgetRef ref, {
+    required String keep,
+  }) async {
+    ref.read(selectedFileProvider.notifier).state = keep;
+    final targets =
+        ref.read(openTabsProvider).where((t) => t != keep).toList();
+    for (final path in targets) {
+      if (!context.mounted) return;
+      if (!ref.read(openTabsProvider).contains(path)) continue;
+      final before = ref.read(openTabsProvider).length;
+      await _closeTab(context, path, ref);
+      if (!context.mounted) return;
+      // 用户取消关闭：标签仍在，停止后续批量关闭。
+      if (ref.read(openTabsProvider).length == before) return;
+    }
+  }
+
+  Future<void> _closeTabsToTheRight(
+    BuildContext context,
+    WidgetRef ref, {
+    required int fromIndex,
+  }) async {
+    final tabs = ref.read(openTabsProvider);
+    if (fromIndex < 0 || fromIndex >= tabs.length) return;
+    final keep = tabs[fromIndex];
+    ref.read(selectedFileProvider.notifier).state = keep;
+    final targets = tabs.sublist(fromIndex + 1);
+    for (final path in targets) {
+      if (!context.mounted) return;
+      if (!ref.read(openTabsProvider).contains(path)) continue;
+      final before = ref.read(openTabsProvider).length;
+      await _closeTab(context, path, ref);
+      if (!context.mounted) return;
+      if (ref.read(openTabsProvider).length == before) return;
+    }
+  }
+
+  Future<void> _closeAllTabs(BuildContext context, WidgetRef ref) async {
+    final targets = List<String>.of(ref.read(openTabsProvider));
+    for (final path in targets) {
+      if (!context.mounted) return;
+      if (!ref.read(openTabsProvider).contains(path)) continue;
+      final before = ref.read(openTabsProvider).length;
+      await _closeTab(context, path, ref);
+      if (!context.mounted) return;
+      if (ref.read(openTabsProvider).length == before) return;
+    }
+  }
+
   Widget _emptyState(BuildContext context) {
     return Center(
       child: Column(
@@ -237,12 +339,14 @@ class _EditorTabChip extends StatefulWidget {
     required this.selected,
     required this.onSelect,
     required this.onClose,
+    required this.onContextMenu,
   });
 
   final String title;
   final bool selected;
   final VoidCallback onSelect;
   final VoidCallback onClose;
+  final ValueChanged<Offset> onContextMenu;
 
   @override
   State<_EditorTabChip> createState() => _EditorTabChipState();
@@ -251,6 +355,7 @@ class _EditorTabChip extends StatefulWidget {
 class _EditorTabChipState extends State<_EditorTabChip> {
   bool _hovering = false;
   bool _closeHovering = false;
+  Offset _menuPos = Offset.zero;
 
   @override
   Widget build(BuildContext context) {
@@ -295,6 +400,8 @@ class _EditorTabChipState extends State<_EditorTabChip> {
           color: Colors.transparent,
           child: InkWell(
             onTap: widget.onSelect,
+            onSecondaryTapDown: (d) => _menuPos = d.globalPosition,
+            onSecondaryTap: () => widget.onContextMenu(_menuPos),
             borderRadius: BorderRadius.circular(8),
             hoverColor: Colors.transparent,
             splashColor: scheme.primary.withValues(alpha: 0.08),

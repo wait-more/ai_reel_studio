@@ -130,6 +130,17 @@ final fsClipboardProvider = StateProvider<FsClipboardEntry?>((ref) => null);
 final treeSelectionProvider =
     StateProvider<List<FsClipboardItem>>((ref) => []);
 
+/// 请求目录树展开并选中某路径（标签「在目录树中定位」等）。
+class TreeRevealRequest {
+  final String path;
+  final int nonce;
+
+  const TreeRevealRequest({required this.path, required this.nonce});
+}
+
+final treeRevealRequestProvider =
+    StateProvider<TreeRevealRequest?>((ref) => null);
+
 /// 当前树选中是否由 Ctrl+单击建立。
 /// 为 false 时再次 Ctrl+单击会丢弃旧选中并只保留当前项；为 true 时可继续 Ctrl 叠加。
 final treeSelectionByCtrlProvider = StateProvider<bool>((ref) => false);
