@@ -13,6 +13,7 @@ import '../../core/config.dart';
 import '../../core/file_actions.dart';
 import '../../core/fs_context_menu.dart';
 import '../../core/fs_drag.dart';
+import '../../core/inline_fs_edit.dart';
 import '../../core/media_types.dart';
 import '../../core/progress.dart';
 import '../../core/providers.dart';
@@ -612,6 +613,7 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
         path: dir,
         isDir: true,
         displayName: destName.isEmpty ? dir : destName,
+        surface: FsShortcutPane.assets,
         onOpen: () async {},
         onChanged: () {
           _clearSelection();
@@ -637,6 +639,7 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
       isDir: target.isDir,
       displayName: name,
       multiItems: items.length > 1 ? items : null,
+      surface: FsShortcutPane.assets,
       onOpen: () async {
         if (target.isDir) {
           _enterDir(target.path);
@@ -703,6 +706,7 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
       isDir: true,
       displayName: name.isEmpty ? dir : name,
       background: true,
+      surface: FsShortcutPane.assets,
       onOpen: () async {},
       onChanged: () {
         _clearSelection();
@@ -1063,23 +1067,22 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
   }
 
   
-/// 新建文档：输入文件名，创建于 [dir] 下并打开编辑器。
-  Future<void> _newDocument(String dir) async {
-    final created = await newDocumentDialog(context, parentDir: dir);
-    if (created == null) return;
-    _reloadAndSyncTree();
-    ref.read(selectedFileProvider.notifier).state = created;
-    final tabs = ref.read(openTabsProvider);
-    if (!tabs.contains(created)) {
-      ref.read(openTabsProvider.notifier).state = [...tabs, created];
-    }
-    ref.read(contentModeProvider.notifier).state = 'editor';
+/// 新建文档：在当前目录原地输入文件名。
+  void _newDocument(String dir) {
+    beginInlineNewDocument(
+      ref,
+      parentDir: dir,
+      surface: FsShortcutPane.assets,
+    );
   }
 
-  /// 新建文件夹：输入名称，创建于 [dir] 下。
-  Future<void> _newFolder(String dir) async {
-    final created = await newFolderDialog(context, parentDir: dir);
-    if (created != null) _reloadAndSyncTree();
+  /// 新建文件夹：在当前目录原地输入名称。
+  void _newFolder(String dir) {
+    beginInlineNewFolder(
+      ref,
+      parentDir: dir,
+      surface: FsShortcutPane.assets,
+    );
   }
 
   /// 导入物料：系统文件选择器多选，复制到 [dir]。
@@ -1231,13 +1234,19 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
 
   Widget _buildBody(BuildContext context) {
     final dir = _currentDir;
+    final inline = ref.watch(inlineFsEditProvider);
+    final creatingHere =
+        dir != null &&
+        inline != null &&
+        inline.matchesCreateUnder(dir, FsShortcutPane.assets);
+    final createEdit = creatingHere ? inline : null;
     Widget body;
-    if (_loading && _entries.isEmpty) {
+    if (_loading && _entries.isEmpty && !creatingHere) {
       body = _wrapBackgroundMenu(
         context,
         const Center(child: CircularProgressIndicator()),
       );
-    } else if (_visibleEntries.isEmpty) {
+    } else if (_visibleEntries.isEmpty && !creatingHere) {
       body = _wrapBackgroundMenu(
         context,
         SizedBox.expand(
@@ -1267,14 +1276,38 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
       );
     } else {
       final entries = _visibleEntries;
-      final primary = Theme.of(context).colorScheme.primary;
+      final itemCount = entries.length + (createEdit != null ? 1 : 0);
+      Widget itemAt(int index, {required bool list}) {
+        if (createEdit != null && index == 0) {
+          return _InlineCreateAssetRow(
+            listMode: list,
+            edit: createEdit,
+            onCommitted: (created) {
+              _reloadAndSyncTree();
+              if (createEdit.kind == InlineFsEditKind.newDocument) {
+                ref.read(selectedFileProvider.notifier).state = created;
+                final tabs = ref.read(openTabsProvider);
+                if (!tabs.contains(created)) {
+                  ref.read(openTabsProvider.notifier).state = [
+                    ...tabs,
+                    created
+                  ];
+                }
+                ref.read(contentModeProvider.notifier).state = 'editor';
+              }
+            },
+          );
+        }
+        final ei = createEdit != null ? index - 1 : index;
+        return _buildAssetItem(entries[ei], list: list);
+      }
+
       final content = _viewMode == _AssetViewMode.list
           ? ListView.builder(
               padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
-              itemCount: entries.length,
+              itemCount: itemCount,
               itemExtent: _kListRowH,
-              itemBuilder: (context, index) =>
-                  _buildAssetItem(entries[index], list: true),
+              itemBuilder: (context, index) => itemAt(index, list: true),
             )
           : GridView.builder(
               padding: const EdgeInsets.all(12),
@@ -1284,10 +1317,10 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
                 crossAxisSpacing: 10,
                 childAspectRatio: 0.9,
               ),
-              itemCount: entries.length,
-              itemBuilder: (context, index) =>
-                  _buildAssetItem(entries[index], list: false),
+              itemCount: itemCount,
+              itemBuilder: (context, index) => itemAt(index, list: false),
             );
+      final primary = Theme.of(context).colorScheme.primary;
       final selectable = GestureDetector(
         behavior: HitTestBehavior.translucent,
         onSecondaryTapDown: (d) => _backgroundMenuPos = d.globalPosition,
@@ -1625,6 +1658,8 @@ class _AssetCard extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final scheme = Theme.of(context).colorScheme;
+    final inline = ref.watch(inlineFsEditProvider);
+    final renaming = inline?.matchesRename(entity.path, FsShortcutPane.assets) == true;
     return FsContextMenuTarget(
       path: entity.path,
       isDir: _isDir,
@@ -1639,27 +1674,55 @@ class _AssetCard extends ConsumerWidget {
         dragItems: _multiSelected ? selectedItems : null,
         onChanged: onChanged,
         child: InkWell(
-          onTapDown: (_) {
-            if (!_ctrlHeld && !selected) {
-              onSelect(false);
-            }
-          },
-          onTap: () {
-            if (_ctrlHeld) {
-              onSelect(true);
-            } else {
-              onSelect(false);
-            }
-          },
-          onDoubleTap: _open,
-          onSecondaryTapDown: (d) => _menuPos = d.globalPosition,
-          onSecondaryTap: () => _showMenu(context, ref),
+          onTapDown: renaming
+              ? null
+              : (_) {
+                  if (!_ctrlHeld && !selected) {
+                    onSelect(false);
+                  }
+                },
+          onTap: renaming
+              ? null
+              : () {
+                  if (_ctrlHeld) {
+                    onSelect(true);
+                  } else {
+                    onSelect(false);
+                  }
+                },
+          onDoubleTap: renaming ? null : _open,
+          onSecondaryTapDown:
+              renaming ? null : (d) => _menuPos = d.globalPosition,
+          onSecondaryTap: renaming ? null : () => _showMenu(context, ref),
           borderRadius: BorderRadius.circular(listMode ? 6 : 8),
           child: listMode
-              ? _buildListBody(context, ref, scheme)
-              : _buildGridBody(context, ref, scheme),
+              ? _buildListBody(context, ref, scheme, inline)
+              : _buildGridBody(context, ref, scheme, inline),
         ),
       ),
+    );
+  }
+
+  Widget _nameWidget(BuildContext context, WidgetRef ref, InlineFsEdit? inline) {
+    final renaming = inline?.matchesRename(entity.path, FsShortcutPane.assets) == true;
+    if (!renaming) {
+      return Text(
+        _name,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: const TextStyle(fontSize: 12),
+      );
+    }
+    final edit = inline!;
+    return InlineFsNameField(
+      key: ValueKey('asset-rename-${edit.nonce}'),
+      initialName: edit.initialName,
+      isDir: _isDir,
+      onSubmit: (name) async {
+        final created = await commitInlineFsEdit(context, ref, edit, name);
+        if (created != null) onChanged();
+      },
+      onCancel: () => clearInlineFsEdit(ref),
     );
   }
 
@@ -1667,6 +1730,7 @@ class _AssetCard extends ConsumerWidget {
     BuildContext context,
     WidgetRef ref,
     ColorScheme scheme,
+    InlineFsEdit? inline,
   ) {
     return Container(
       decoration: BoxDecoration(
@@ -1693,12 +1757,7 @@ class _AssetCard extends ConsumerWidget {
               children: [
                 if (_isDir) _statusBubble(ref),
                 Expanded(
-                  child: Text(
-                    _name,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(fontSize: 11),
-                  ),
+                  child: _nameWidget(context, ref, inline),
                 ),
               ],
             ),
@@ -1712,6 +1771,7 @@ class _AssetCard extends ConsumerWidget {
     BuildContext context,
     WidgetRef ref,
     ColorScheme scheme,
+    InlineFsEdit? inline,
   ) {
     final muted = TextStyle(fontSize: 12, color: scheme.onSurfaceVariant);
     Widget cell({
@@ -1754,12 +1814,7 @@ class _AssetCard extends ConsumerWidget {
                 const SizedBox(width: 8),
                 if (_isDir) _statusBubble(ref),
                 Expanded(
-                  child: Text(
-                    _name,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(fontSize: 13),
-                  ),
+                  child: _nameWidget(context, ref, inline),
                 ),
               ],
             ),
@@ -1849,6 +1904,7 @@ class _AssetCard extends ConsumerWidget {
       isDir: _isDir,
       displayName: _name,
       multiItems: _multiSelected ? selectedItems : null,
+      surface: FsShortcutPane.assets,
       onOpen: () async => _open(),
       onChanged: onChanged,
     );
@@ -1906,6 +1962,75 @@ class _AssetCard extends ConsumerWidget {
     }
     if (lower.endsWith('.md')) return (Icons.description, Colors.blueGrey);
     return (Icons.insert_drive_file, Colors.grey);
+  }
+}
+
+class _InlineCreateAssetRow extends ConsumerWidget {
+  const _InlineCreateAssetRow({
+    required this.listMode,
+    required this.edit,
+    required this.onCommitted,
+  });
+
+  final bool listMode;
+  final InlineFsEdit edit;
+  final ValueChanged<String> onCommitted;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final scheme = Theme.of(context).colorScheme;
+    final isFolder = edit.kind == InlineFsEditKind.newFolder;
+    final field = InlineFsNameField(
+      key: ValueKey('asset-create-${edit.nonce}'),
+      initialName: edit.initialName,
+      isDir: isFolder,
+      onSubmit: (name) async {
+        final created = await commitInlineFsEdit(context, ref, edit, name);
+        if (created != null) onCommitted(created);
+      },
+      onCancel: () => clearInlineFsEdit(ref),
+    );
+
+    if (listMode) {
+      return Container(
+        height: _kListRowH,
+        padding: const EdgeInsets.symmetric(horizontal: 8),
+        alignment: Alignment.centerLeft,
+        child: Row(
+          children: [
+            Icon(
+              isFolder ? Icons.folder_outlined : Icons.description_outlined,
+              size: 18,
+              color: scheme.primary,
+            ),
+            const SizedBox(width: 8),
+            Expanded(child: field),
+          ],
+        ),
+      );
+    }
+
+    return Container(
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainerHigh,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: scheme.primary, width: 1.5),
+      ),
+      padding: const EdgeInsets.all(8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Expanded(
+            child: Icon(
+              isFolder ? Icons.create_new_folder_outlined : Icons.note_add_outlined,
+              size: 36,
+              color: scheme.primary,
+            ),
+          ),
+          field,
+        ],
+      ),
+    );
   }
 }
 

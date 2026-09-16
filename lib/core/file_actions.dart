@@ -47,7 +47,7 @@ Future<String?> promptTextDialog(
           controller: ctrl,
           autofocus: true,
           style: const TextStyle(fontSize: 13),
-          decoration: InputDecoration(labelText: label, isDense: true),
+          decoration: _dialogNameFieldDecoration(ctx, labelText: label),
           textInputAction: TextInputAction.done,
           onSubmitted: (_) => Navigator.pop(ctx, true),
         ),
@@ -71,6 +71,31 @@ Future<String?> promptTextDialog(
       ctrl.dispose();
     });
   }
+}
+
+/// 新建/重命名对话框输入框：描边方框，避免下划线挤占字符可读性。
+InputDecoration _dialogNameFieldDecoration(
+  BuildContext context, {
+  String? labelText,
+  String? hintText,
+}) {
+  final cs = Theme.of(context).colorScheme;
+  OutlineInputBorder border(Color color, {double width = 1}) =>
+      OutlineInputBorder(
+        borderRadius: BorderRadius.circular(8),
+        borderSide: BorderSide(color: color, width: width),
+      );
+  return InputDecoration(
+    labelText: labelText,
+    hintText: hintText,
+    isDense: true,
+    filled: true,
+    fillColor: cs.surfaceContainerHighest.withValues(alpha: 0.35),
+    contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+    border: border(cs.outlineVariant),
+    enabledBorder: border(cs.outlineVariant),
+    focusedBorder: border(cs.primary, width: 1.5),
+  );
 }
 
 Future<void> copyTextToClipboard(
@@ -103,7 +128,7 @@ Future<void> copyProjectRelativePath(BuildContext context, String path) async {
 Future<void> copyBaseName(BuildContext context, String path) =>
     copyTextToClipboard(context, p.basename(path), toast: '已复制名称');
 
-String _uniqueSiblingPath(String parentDir, String name, {required bool isDir}) {
+String uniqueSiblingPath(String parentDir, String name, {required bool isDir}) {
   final ext = isDir ? '' : p.extension(name);
   final base = isDir ? name : p.basenameWithoutExtension(name);
   final first = isDir ? '${base}_copy' : '${base}_copy$ext';
@@ -177,9 +202,9 @@ Future<String?> relocateEntity(
       }
       return srcPath;
     }
-    target = _uniqueSiblingPath(destDir, name, isDir: isDir);
+    target = uniqueSiblingPath(destDir, name, isDir: isDir);
   } else if (await File(target).exists() || await Directory(target).exists()) {
-    target = _uniqueSiblingPath(destDir, name, isDir: isDir);
+    target = uniqueSiblingPath(destDir, name, isDir: isDir);
   }
 
   try {
@@ -360,7 +385,7 @@ Future<int> importDroppedPaths(
       }
       var target = p.join(destDir, name);
       if (await File(target).exists() || await Directory(target).exists()) {
-        target = _uniqueSiblingPath(destDir, name, isDir: isDir);
+        target = uniqueSiblingPath(destDir, name, isDir: isDir);
       }
       if (isDir) {
         await _copyDirectoryRecursive(Directory(src), Directory(target));
@@ -380,7 +405,7 @@ Future<int> importDroppedPaths(
 }
 
 /// 按系统资源管理器习惯拆分：主名 + 后缀（含点）；隐藏文件整段为主名。
-({String stem, String ext}) _explorerNameParts(
+({String stem, String ext}) explorerNameParts(
   String fileName, {
   required bool isDir,
 }) {
@@ -412,7 +437,7 @@ Future<String?> renameEntityDialog(
 }) async {
   final entity = isDir ? Directory(path) : File(path);
   final oldName = p.basename(path);
-  final parts = _explorerNameParts(oldName, isDir: isDir);
+  final parts = explorerNameParts(oldName, isDir: isDir);
 
   final newName = await showDialog<String>(
     context: context,
@@ -506,10 +531,10 @@ class _ExplorerStyleNameDialogState extends State<_ExplorerStyleNameDialog> {
         focusNode: _focus,
         autofocus: true,
         style: const TextStyle(fontSize: 13),
-        decoration: InputDecoration(
+        decoration: _dialogNameFieldDecoration(
+          context,
           labelText: '名称',
           hintText: widget.hintText,
-          isDense: true,
         ),
         textInputAction: TextInputAction.done,
         onSubmitted: (_) => _submit(),
@@ -536,7 +561,7 @@ Future<String?> duplicateFileDialog(
 }) async {
   final file = File(path);
   final name = p.basename(path);
-  final target = _uniqueSiblingPath(file.parent.path, name, isDir: false);
+  final target = uniqueSiblingPath(file.parent.path, name, isDir: false);
   try {
     await file.copy(target);
   } catch (e) {
@@ -571,7 +596,7 @@ Future<String?> duplicateFolderDialog(
     return null;
   }
   final name = p.basename(path);
-  final target = _uniqueSiblingPath(p.dirname(path), name, isDir: true);
+  final target = uniqueSiblingPath(p.dirname(path), name, isDir: true);
   try {
     await _copyDirectoryRecursive(src, Directory(target));
   } catch (e) {
@@ -674,7 +699,7 @@ Future<String?> newDocumentDialog(
     return null;
   }
   // 未写后缀时默认 .md（与资源管理器「新建」后可改后缀一致）。
-  final parts = _explorerNameParts(name, isDir: false);
+  final parts = explorerNameParts(name, isDir: false);
   if (parts.ext.isEmpty) {
     name = '$name.md';
   }

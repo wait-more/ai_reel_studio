@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path/path.dart' as p;
 import 'package:window_manager/window_manager.dart';
 import '../../core/agent_bridge.dart';
+import '../../core/fs_context_menu.dart';
 import '../../core/providers.dart';
 import '../../core/toast.dart';
 import '../../core/workspace_memory.dart';
@@ -277,6 +278,9 @@ class _MainLayoutState extends ConsumerState<MainLayout> with WindowListener {
       return KeyEventResult.handled;
     }
     if (key == LogicalKeyboardKey.escape) {
+      if (dismissFsContextMenu()) {
+        return KeyEventResult.handled;
+      }
       _dispatchFsShortcut('escape');
       return KeyEventResult.handled;
     }

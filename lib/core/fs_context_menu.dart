@@ -8,6 +8,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../features/media/media_preview.dart';
 import 'file_actions.dart';
+import 'inline_fs_edit.dart';
 import 'media_types.dart';
 import 'providers.dart';
 import 'toast.dart';
@@ -41,6 +42,14 @@ void Function(String?)? _activeComplete;
 bool Function(KeyEvent)? _activeKeyHandler;
 void Function(PointerEvent)? _activePointerRoute;
 Rect? _activeMenuRect;
+int _menuEpoch = 0;
+
+/// 关掉当前文件系统右键菜单。已关掉或没有菜单时返回 false。
+bool dismissFsContextMenu() {
+  if (_activeComplete == null && _activeMenuEntry == null) return false;
+  _dismissActiveMenu();
+  return true;
+}
 
 void _detachPointerRoute() {
   final route = _activePointerRoute;
@@ -91,6 +100,8 @@ Future<void> showFsContextMenu({
   List<FsClipboardItem>? multiItems,
   /// 物料栏空白处右键：针对当前目录，仅保留粘贴/新建/导入等，不含删除重命名。
   bool background = false,
+  /// 原地新建/重命名出现在目录树还是素材栏。
+  required FsShortcutPane surface,
 }) async {
   final overlayState = Overlay.maybeOf(context, rootOverlay: true);
   if (overlayState == null || !context.mounted) return;
@@ -109,9 +120,12 @@ Future<void> showFsContextMenu({
   late OverlayEntry entry;
   // 每次菜单使用独立 Key，避免与尚未卸掉的旧 Overlay 抢同一个 GlobalKey。
   final menuKey = GlobalKey();
+  final epoch = ++_menuEpoch;
 
   void close([String? action]) {
+    if (epoch != _menuEpoch) return;
     if (completer.isCompleted) return;
+    _menuEpoch++;
     _detachKeyHandler();
     _detachPointerRoute();
     _removeMenuEntry(entry);
@@ -129,7 +143,7 @@ Future<void> showFsContextMenu({
 
   void onGlobalPointer(PointerEvent event) {
     if (event is! PointerDownEvent) return;
-    if (_activeComplete != close) return;
+    if (epoch != _menuEpoch) return;
 
     final rect = _activeMenuRect;
     if (rect != null && rect.inflate(2).contains(event.position)) {
@@ -369,14 +383,15 @@ Future<void> showFsContextMenu({
         ],
       ];
 
-      // 估算高度用于贴边；实际以布局为准。
-      final menuHeight = (children.length * 36.0).clamp(80.0, size.height - 16);
+      // 命中检测用真实布局高度，避免估算过高把空白点击当成点在菜单内。
+      final estimatedHeight =
+          (children.length * 36.0).clamp(80.0, 480.0);
       final left =
           globalPosition.dx.clamp(8.0, size.width - menuWidth - 8.0);
       final top =
-          globalPosition.dy.clamp(8.0, size.height - menuHeight - 8.0);
+          globalPosition.dy.clamp(8.0, size.height - estimatedHeight - 8.0);
 
-      _activeMenuRect = Rect.fromLTWH(left, top, menuWidth, menuHeight);
+      _activeMenuRect ??= Rect.fromLTWH(left, top, menuWidth, estimatedHeight);
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (_activeMenuEntry != entry || !entry.mounted) return;
         final box =
@@ -418,8 +433,9 @@ Future<void> showFsContextMenu({
   overlayState.insert(entry);
 
   final action = await completer.future;
-  _detachKeyHandler();
-  _detachPointerRoute();
+  // 换地方再右键会先关掉本菜单再开新菜单；不要把新菜单的监听卸掉。
+  if (_activeKeyHandler == onKey) _detachKeyHandler();
+  if (_activePointerRoute == onGlobalPointer) _detachPointerRoute();
   if (action == null) return;
   await _waitPostFrame();
   // 优先用调用方 context（有正确 Overlay 祖先）；菜单用的 overlayState.context
@@ -438,6 +454,7 @@ Future<void> showFsContextMenu({
     onOpen: onOpen,
     onChanged: onChanged,
     multiItems: batch,
+    surface: surface,
   );
 }
 
@@ -474,6 +491,7 @@ Future<void> runFsAction({
   required Future<void> Function() onOpen,
   required void Function() onChanged,
   List<FsClipboardItem>? multiItems,
+  required FsShortcutPane surface,
 }) async {
   void toast(String msg) =>
       showGlobalToast(context, msg, overlay: overlay);
@@ -519,17 +537,17 @@ Future<void> runFsAction({
       );
       break;
     case 'newDoc':
-      final created = await newDocumentDialog(context, parentDir: path);
-      if (created != null) {
-        _openInEditor(container, created);
-        onChanged();
-      }
+      beginInlineNewDocumentContainer(
+        container,
+        parentDir: path,
+        surface: surface,
+      );
       break;
     case 'newFolder':
-      await newFolderDialog(
-        context,
+      beginInlineNewFolderContainer(
+        container,
         parentDir: path,
-        onDone: onChanged,
+        surface: surface,
       );
       break;
     case 'progress':
@@ -584,11 +602,11 @@ Future<void> runFsAction({
       }
       break;
     case 'rename':
-      await renameEntityDialog(
-        context,
+      beginInlineRenameContainer(
+        container,
         path: path,
         isDir: isDir,
-        onDone: onChanged,
+        surface: surface,
       );
       break;
     case 'properties':
@@ -631,15 +649,6 @@ Future<void> runFsAction({
       }
       break;
   }
-}
-
-void _openInEditor(ProviderContainer container, String path) {
-  container.read(selectedFileProvider.notifier).state = path;
-  final tabs = container.read(openTabsProvider);
-  if (!tabs.contains(path)) {
-    container.read(openTabsProvider.notifier).state = [...tabs, path];
-  }
-  container.read(contentModeProvider.notifier).state = 'editor';
 }
 
 Future<void> _grabFrame(

@@ -7,9 +7,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/config.dart';
 import '../../core/directory_parser.dart';
 import '../../core/directory_watcher.dart';
-import '../../core/file_actions.dart';
 import '../../core/fs_context_menu.dart';
 import '../../core/fs_drag.dart';
+import '../../core/inline_fs_edit.dart';
 import '../../core/media_types.dart';
 import '../../core/progress.dart';
 import '../../core/providers.dart';
@@ -169,26 +169,11 @@ class _ProjectTreeState extends ConsumerState<ProjectTree> {
 /// 在项目根目录下新建顶层剧本（目录），成功后重建并定位到新剧本。
   Future<void> _createScript() async {
     if (!AppConfig.instance.isConfigured) return;
-    final projectRoot = AppConfig.instance.projectRoot;
-    final name = await promptTextDialog(
-      context,
-      title: '新建顶层剧本',
-      label: '建议格式：编号_类型_名称（如 004_悬疑_深渊来电）',
+    beginInlineNewFolder(
+      ref,
+      parentDir: AppConfig.instance.projectRoot,
+      surface: FsShortcutPane.tree,
     );
-    if (name == null || name.trim().isEmpty) return;
-    final target = '$projectRoot${Platform.pathSeparator}${name.trim()}';
-    try {
-      await Directory(target).create(recursive: true);
-    } catch (e) {
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text('创建失败：$e', style: const TextStyle(fontSize: 12)),
-          duration: const Duration(seconds: 3),
-        ));
-      }
-      return;
-    }
-    _handleTreeChanged(target);
   }
 
   String? _lastSyncedPath;
@@ -255,6 +240,26 @@ class _ProjectTreeState extends ConsumerState<ProjectTree> {
     setState(() {});
     _expandInto(match, segments, index + 1, sep);
     if (isFinal) _publishExpandedPaths();
+  }
+
+  Future<void> _ensureInlineAnchorVisible(
+    String anchor, {
+    required bool expandLeaf,
+  }) async {
+    if (!mounted || anchor.isEmpty) return;
+    _lastSyncedPath = null;
+    _expandTo(anchor);
+    if (!expandLeaf) return;
+    final root = ref.read(treeRootProvider);
+    final node = _findNodeByPath(root, anchor);
+    if (node == null || node.type == ScriptNodeType.file) return;
+    if (!node.isLoaded) {
+      await DirectoryParser.loadChildrenAsync(node);
+      if (!mounted) return;
+    }
+    node.isExpanded = true;
+    setState(() {});
+    _publishExpandedPaths();
   }
 
   @override
@@ -384,6 +389,7 @@ class _ProjectTreeState extends ConsumerState<ProjectTree> {
         path: dest,
         isDir: true,
         displayName: name.isEmpty ? dest : name,
+        surface: FsShortcutPane.tree,
         onOpen: () async {},
         onChanged: () {
           _setTreeSelection([]);
@@ -407,6 +413,7 @@ class _ProjectTreeState extends ConsumerState<ProjectTree> {
       isDir: target.isDir,
       displayName: name,
       multiItems: items.length > 1 ? items : null,
+      surface: FsShortcutPane.tree,
       onOpen: () async => _openTreeItem(target),
       onChanged: () {
         _setTreeSelection([]);
@@ -438,6 +445,14 @@ class _ProjectTreeState extends ConsumerState<ProjectTree> {
       if (next == null || next.pane != FsShortcutPane.tree) return;
       if (prev?.nonce == next.nonce) return;
       _whenNotTyping(() => unawaited(_fsShortcut(next.action)));
+    });
+
+    // 原地新建/重命名：展开并滚到目标位置。
+    ref.listen(inlineFsEditProvider, (prev, next) {
+      if (next == null || prev?.nonce == next.nonce) return;
+      if (next.surface != FsShortcutPane.tree) return;
+      final anchor = next.path ?? next.parentDir;
+      unawaited(_ensureInlineAnchorVisible(anchor, expandLeaf: next.path == null));
     });
 
     return Focus(
@@ -523,17 +538,32 @@ class _ProjectTreeState extends ConsumerState<ProjectTree> {
     final visibleRoots = _searchText.isEmpty
         ? root.children
         : _filterNodes(root.children);
+    final inline = ref.watch(inlineFsEditProvider);
+    final creatingAtRoot = inline != null &&
+        inline.matchesCreateUnder(
+          AppConfig.instance.projectRoot,
+          FsShortcutPane.tree,
+        );
+    final rootCreateEdit = creatingAtRoot ? inline : null;
 
-    if (visibleRoots.isEmpty) {
+    if (visibleRoots.isEmpty && rootCreateEdit == null) {
       return const Center(child: Text('无匹配结果'));
     }
 
     return ListView.builder(
       padding: const EdgeInsets.symmetric(vertical: 4),
-      itemCount: visibleRoots.length,
+      itemCount: visibleRoots.length + (rootCreateEdit != null ? 1 : 0),
       itemBuilder: (context, index) {
+        if (rootCreateEdit != null && index == 0) {
+          return _InlineCreateTreeRow(
+            level: 0,
+            edit: rootCreateEdit,
+            onTreeChanged: _handleTreeChanged,
+          );
+        }
+        final nodeIndex = rootCreateEdit != null ? index - 1 : index;
         return _TreeNodeWidget(
-          node: visibleRoots[index],
+          node: visibleRoots[nodeIndex],
           level: 0,
           onTreeChanged: _handleTreeChanged,
           onInteract: _ensurePanelFocus,
@@ -676,6 +706,7 @@ class _TreeNodeWidgetState extends ConsumerState<_TreeNodeWidget> {
       isDir: !isFile,
       displayName: node.name,
       multiItems: multi.length > 1 ? multi : null,
+      surface: FsShortcutPane.tree,
       onOpen: () async {
         if (isFile) {
           _openFile(node.path);
@@ -824,6 +855,14 @@ class _TreeNodeWidgetState extends ConsumerState<_TreeNodeWidget> {
     }
     final multiDrag = treeMulti.length > 1 && inTreeMulti ? treeMulti : null;
     final scheme = Theme.of(context).colorScheme;
+    final inline = ref.watch(inlineFsEditProvider);
+    final renaming = inline?.matchesRename(node.path, FsShortcutPane.tree) == true;
+    final renameEdit = renaming ? inline : null;
+    final createEdit = (inline != null &&
+            inline.matchesCreateUnder(node.path, FsShortcutPane.tree) &&
+            isExpanded)
+        ? inline
+        : null;
 
     return Column(
       mainAxisSize: MainAxisSize.min,
@@ -863,11 +902,12 @@ class _TreeNodeWidgetState extends ConsumerState<_TreeNodeWidget> {
               },
               child: DecoratedBox(
                 decoration: BoxDecoration(
-                  color: selected
+                  // 原地重命名时只留输入框描边，避免「选中框套编辑框」。
+                  color: selected && !renaming
                       ? scheme.primary.withValues(alpha: 0.15)
                       : null,
                   borderRadius: BorderRadius.circular(4),
-                  border: selected
+                  border: selected && !renaming
                       ? Border.all(
                           color: scheme.primary.withValues(alpha: 0.55),
                         )
@@ -878,16 +918,17 @@ class _TreeNodeWidgetState extends ConsumerState<_TreeNodeWidget> {
                     Expanded(
                       child: InkWell(
                         borderRadius: BorderRadius.circular(4),
-                        onTap: () => _onNodeTap(isFile: isFile),
-                        onDoubleTap: isFile
+                        onTap: renaming ? null : () => _onNodeTap(isFile: isFile),
+                        onDoubleTap: isFile || renaming
                             ? null
                             : () {
-                                // 双击名称：展开/折叠（与箭头一致）
                                 _toggleExpand();
                               },
-                        onSecondaryTapDown: (d) =>
-                            _menuPos = d.globalPosition,
-                        onSecondaryTap: () => _showMenu(context),
+                        onSecondaryTapDown: renaming
+                            ? null
+                            : (d) => _menuPos = d.globalPosition,
+                        onSecondaryTap:
+                            renaming ? null : () => _showMenu(context),
                         child: Padding(
                           padding: const EdgeInsets.symmetric(vertical: 4),
                           child: Row(
@@ -899,25 +940,37 @@ class _TreeNodeWidgetState extends ConsumerState<_TreeNodeWidget> {
                               ),
                               const SizedBox(width: 6),
                               Expanded(
-                                child: Text(
-                                  node.name,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: TextStyle(
-                                    fontSize: 13,
-                                    fontWeight: FontWeight.w400,
-                                    color: isExpanded
-                                        ? scheme.primary
-                                        : null,
-                                  ),
-                                ),
+                                child: renameEdit != null
+                                    ? InlineFsNameField(
+                                        key: ValueKey(
+                                            'rename-${renameEdit.nonce}'),
+                                        initialName: renameEdit.initialName,
+                                        isDir: !isFile,
+                                        onSubmit: (name) => unawaited(
+                                          _commitInline(renameEdit, name),
+                                        ),
+                                        onCancel: () =>
+                                            clearInlineFsEdit(ref),
+                                      )
+                                    : Text(
+                                        node.name,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(
+                                          fontSize: 13,
+                                          fontWeight: FontWeight.w400,
+                                          color: isExpanded
+                                              ? scheme.primary
+                                              : null,
+                                        ),
+                                      ),
                               ),
-                              _progressBubble(node),
+                              if (!renaming) _progressBubble(node),
                             ],
                           ),
                         ),
                       ),
                     ),
-                    if (canExpand)
+                    if (canExpand && !renaming)
                       InkWell(
                         borderRadius: BorderRadius.circular(4),
                         onTap: _toggleExpand,
@@ -944,6 +997,12 @@ class _TreeNodeWidgetState extends ConsumerState<_TreeNodeWidget> {
           ),
         ),
         if (isExpanded) ...[
+          if (createEdit != null)
+            _InlineCreateTreeRow(
+              level: level + 1,
+              edit: createEdit,
+              onTreeChanged: widget.onTreeChanged,
+            ),
           if (!node.isLoaded)
             const Padding(
               padding: EdgeInsets.only(left: 24, top: 2, bottom: 2),
@@ -971,6 +1030,25 @@ class _TreeNodeWidgetState extends ConsumerState<_TreeNodeWidget> {
     );
   }
 
+  Future<void> _commitInline(InlineFsEdit edit, String name) async {
+    final created = await commitInlineFsEdit(context, ref, edit, name);
+    if (!mounted || created == null) return;
+    widget.onTreeChanged(
+      edit.kind == InlineFsEditKind.rename
+          ? (edit.isDir ? created : Directory(created).parent.path)
+          : edit.parentDir,
+    );
+    if (edit.kind == InlineFsEditKind.rename) {
+      _setSingleTreeSelection(path: created, isDir: edit.isDir);
+      return;
+    }
+    if (edit.kind == InlineFsEditKind.newDocument) {
+      _openFile(created);
+    } else if (edit.kind == InlineFsEditKind.newFolder) {
+      _selectDir(created);
+    }
+  }
+
   IconData _iconFor(ScriptNode node) {
     switch (node.type) {
       case ScriptNodeType.script:
@@ -985,7 +1063,9 @@ class _TreeNodeWidgetState extends ConsumerState<_TreeNodeWidget> {
         if (node.name.endsWith('.md')) return Icons.description_outlined;
         if (node.name.endsWith('.png') ||
             node.name.endsWith('.jpg') ||
-            node.name.endsWith('.jpeg')) return Icons.image_outlined;
+            node.name.endsWith('.jpeg')) {
+          return Icons.image_outlined;
+        }
         if (node.name.endsWith('.mp4') || node.name.endsWith('.mov')) {
           return Icons.videocam_outlined;
         }
@@ -1010,7 +1090,9 @@ class _TreeNodeWidgetState extends ConsumerState<_TreeNodeWidget> {
         if (node.name.endsWith('.md')) return Colors.blueGrey;
         if (node.name.endsWith('.png') ||
             node.name.endsWith('.jpg') ||
-            node.name.endsWith('.jpeg')) return Colors.purple;
+            node.name.endsWith('.jpeg')) {
+          return Colors.purple;
+        }
         if (node.name.endsWith('.mp4') || node.name.endsWith('.mov')) {
           return Colors.red;
         }
@@ -1019,5 +1101,66 @@ class _TreeNodeWidgetState extends ConsumerState<_TreeNodeWidget> {
         }
         return Colors.blueGrey;
     }
+  }
+}
+
+/// 目录树中的「新建」占位行（原地输入）。
+class _InlineCreateTreeRow extends ConsumerWidget {
+  const _InlineCreateTreeRow({
+    required this.level,
+    required this.edit,
+    required this.onTreeChanged,
+  });
+
+  final int level;
+  final InlineFsEdit edit;
+  final ValueChanged<String> onTreeChanged;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final scheme = Theme.of(context).colorScheme;
+    final isFolder = edit.kind == InlineFsEditKind.newFolder;
+    return Padding(
+      padding: EdgeInsets.only(left: 8.0 + level * 12.0, right: 2, top: 2),
+      child: Row(
+        children: [
+          Icon(
+            isFolder ? Icons.folder_outlined : Icons.description_outlined,
+            size: 16,
+            color: isFolder ? Colors.grey : Colors.blueGrey,
+          ),
+          const SizedBox(width: 6),
+          Expanded(
+            child: InlineFsNameField(
+              key: ValueKey('create-${edit.nonce}'),
+              initialName: edit.initialName,
+              isDir: isFolder,
+              onSubmit: (name) async {
+                final created =
+                    await commitInlineFsEdit(context, ref, edit, name);
+                if (created == null) return;
+                onTreeChanged(edit.parentDir);
+                if (edit.kind == InlineFsEditKind.newDocument) {
+                  ref.read(selectedFileProvider.notifier).state = created;
+                  final tabs = ref.read(openTabsProvider);
+                  if (!tabs.contains(created)) {
+                    ref.read(openTabsProvider.notifier).state = [
+                      ...tabs,
+                      created
+                    ];
+                  }
+                  ref.read(contentModeProvider.notifier).state = 'editor';
+                } else {
+                  ref.read(selectedDirProvider.notifier).state = created;
+                }
+              },
+              onCancel: () => clearInlineFsEdit(ref),
+            ),
+          ),
+          Icon(Icons.edit_outlined, size: 14, color: scheme.primary),
+          const SizedBox(width: 4),
+        ],
+      ),
+    );
   }
 }
