@@ -2,6 +2,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import '../../core/comfy/comfy_models.dart';
 import '../../core/config.dart';
 import '../../core/key_chord.dart';
@@ -866,8 +867,15 @@ class _ShortcutsSectionState extends ConsumerState<_ShortcutsSection> {
   }
 }
 
-class _AboutSection extends StatelessWidget {
+class _AboutSection extends StatefulWidget {
   const _AboutSection();
+
+  @override
+  State<_AboutSection> createState() => _AboutSectionState();
+}
+
+class _AboutSectionState extends State<_AboutSection> {
+  late final Future<PackageInfo> _info = PackageInfo.fromPlatform();
 
   @override
   Widget build(BuildContext context) {
@@ -875,7 +883,19 @@ class _AboutSection extends StatelessWidget {
       children: [
         Text('AIReelStudio', style: Theme.of(context).textTheme.titleMedium),
         const SizedBox(height: 8),
-        const Text('版本 0.1.0'),
+        FutureBuilder<PackageInfo>(
+          future: _info,
+          builder: (context, snapshot) {
+            final version = snapshot.data?.version;
+            final build = snapshot.data?.buildNumber;
+            final label = version == null
+                ? '版本 …'
+                : (build == null || build.isEmpty)
+                    ? '版本 $version'
+                    : '版本 $version ($build)';
+            return Text(label);
+          },
+        ),
         const SizedBox(height: 8),
         Text(
           'AI 短视频创作工作台。文件系统为唯一事实来源。',
