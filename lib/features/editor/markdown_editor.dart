@@ -60,9 +60,10 @@ class MarkdownEditor extends ConsumerWidget {
 
   Widget _buildTabBar(
       BuildContext context, List<String> tabs, String? selected, WidgetRef ref) {
+    final scheme = Theme.of(context).colorScheme;
     return Container(
       height: 36,
-      color: Theme.of(context).colorScheme.surfaceContainerHigh,
+      color: scheme.surfaceContainerHighest.withValues(alpha: 0.55),
       child: ReorderableListView.builder(
         scrollDirection: Axis.horizontal,
         buildDefaultDragHandles: false,
@@ -80,8 +81,8 @@ class MarkdownEditor extends ConsumerWidget {
               final t = Curves.easeInOut.transform(animation.value);
               return Material(
                 elevation: 2 + 4 * t,
-                borderRadius: BorderRadius.circular(6),
-                color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                borderRadius: BorderRadius.circular(8),
+                color: scheme.surface,
                 child: child,
               );
             },
@@ -92,39 +93,16 @@ class MarkdownEditor extends ConsumerWidget {
         itemBuilder: (context, index) {
           final path = tabs[index];
           final isSelected = path == selected;
+          final name = path.split(Platform.pathSeparator).last;
           return ReorderableDragStartListener(
             key: ValueKey(path),
             index: index,
-            child: InkWell(
-              onTap: () =>
+            child: _EditorTabChip(
+              title: name,
+              selected: isSelected,
+              onSelect: () =>
                   ref.read(selectedFileProvider.notifier).state = path,
-              child: Container(
-                margin: const EdgeInsets.symmetric(vertical: 3, horizontal: 2),
-                padding: const EdgeInsets.symmetric(horizontal: 10),
-                decoration: BoxDecoration(
-                  color: isSelected
-                      ? Theme.of(context)
-                          .colorScheme
-                          .primary
-                          .withValues(alpha: 0.15)
-                      : null,
-                  borderRadius: BorderRadius.circular(6),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      path.split(Platform.pathSeparator).last,
-                      style: const TextStyle(fontSize: 12),
-                    ),
-                    const SizedBox(width: 4),
-                    GestureDetector(
-                      onTap: () => _closeTab(context, path, ref),
-                      child: const Icon(Icons.close, size: 14, color: Colors.grey),
-                    ),
-                  ],
-                ),
-              ),
+              onClose: () => _closeTab(context, path, ref),
             ),
           );
         },
@@ -247,6 +225,137 @@ class MarkdownEditor extends ConsumerWidget {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// Cursor / VS Code 风格文档标签：当前高亮，其余略暗；关闭钮悬停高亮。
+class _EditorTabChip extends StatefulWidget {
+  const _EditorTabChip({
+    required this.title,
+    required this.selected,
+    required this.onSelect,
+    required this.onClose,
+  });
+
+  final String title;
+  final bool selected;
+  final VoidCallback onSelect;
+  final VoidCallback onClose;
+
+  @override
+  State<_EditorTabChip> createState() => _EditorTabChipState();
+}
+
+class _EditorTabChipState extends State<_EditorTabChip> {
+  bool _hovering = false;
+  bool _closeHovering = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final selected = widget.selected;
+    final fg = selected
+        ? scheme.onSurface
+        : scheme.onSurfaceVariant.withValues(alpha: 0.72);
+    final closeFg = _closeHovering
+        ? scheme.onSurface
+        : (selected
+            ? scheme.onSurfaceVariant
+            : scheme.onSurfaceVariant.withValues(alpha: 0.55));
+
+    final Color fill;
+    final Border? border;
+    if (selected) {
+      fill = scheme.primary.withValues(alpha: 0.16);
+      border = Border.all(
+        color: scheme.primary.withValues(alpha: 0.55),
+        width: 1,
+      );
+    } else if (_hovering) {
+      fill = scheme.onSurface.withValues(alpha: 0.06);
+      border = Border.all(
+        color: scheme.outlineVariant.withValues(alpha: 0.35),
+      );
+    } else {
+      fill = Colors.transparent;
+      border = null;
+    }
+
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hovering = true),
+      onExit: (_) => setState(() {
+        _hovering = false;
+        _closeHovering = false;
+      }),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 4),
+        child: Material(
+          color: Colors.transparent,
+          child: InkWell(
+            onTap: widget.onSelect,
+            borderRadius: BorderRadius.circular(8),
+            hoverColor: Colors.transparent,
+            splashColor: scheme.primary.withValues(alpha: 0.08),
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 120),
+              curve: Curves.easeOut,
+              padding: const EdgeInsets.only(left: 10, right: 4),
+              decoration: BoxDecoration(
+                color: fill,
+                borderRadius: BorderRadius.circular(8),
+                border: border,
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 160),
+                    child: Text(
+                      widget.title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 12,
+                        height: 1.2,
+                        fontWeight:
+                            selected ? FontWeight.w600 : FontWeight.w400,
+                        color: fg,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 4),
+                  Tooltip(
+                    message: '关闭',
+                    waitDuration: const Duration(milliseconds: 400),
+                    child: MouseRegion(
+                      onEnter: (_) => setState(() => _closeHovering = true),
+                      onExit: (_) => setState(() => _closeHovering = false),
+                      child: GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onTap: widget.onClose,
+                        child: AnimatedContainer(
+                          duration: const Duration(milliseconds: 100),
+                          width: 18,
+                          height: 18,
+                          alignment: Alignment.center,
+                          decoration: BoxDecoration(
+                            color: _closeHovering
+                                ? scheme.onSurface.withValues(alpha: 0.12)
+                                : Colors.transparent,
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                          child: Icon(Icons.close, size: 13, color: closeFg),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
       ),
     );
   }
