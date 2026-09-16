@@ -451,6 +451,21 @@ String? parseOpenCodeSessionFlag(String? command) {
   return id;
 }
 
+/// 在命令上注入或替换 `-s <sessionId>`（保留其它参数）。
+String withOpenCodeSessionId(String command, String sessionId) {
+  final id = sessionId.trim();
+  if (id.isEmpty) return normalizeOpenCodeCoreCommand(command);
+  var core = normalizeOpenCodeCoreCommand(command).trim();
+  if (core.isEmpty) core = 'opencode';
+  if (RegExp(r'(^|\s)(-s|--session)(\s+|=)').hasMatch(core)) {
+    return core.replaceFirstMapped(
+      RegExp(r'(-s|--session)(?:\s+|=)\S+'),
+      (m) => '${m[1]} $id',
+    );
+  }
+  return '$core -s $id';
+}
+
 /// 准备可跳转的 TUI 启动命令：固定本机端口 +（可选）`-s`。
 ///
 /// 返回的 [command] 就是直接发给 PowerShell 的 `opencode …`。
@@ -464,14 +479,7 @@ Future<({String command, int port, String? sessionId})> prepareOpenCodeTuiLaunch
 
   var resolvedSessionId = sessionId?.trim();
   if (resolvedSessionId != null && resolvedSessionId.isNotEmpty) {
-    if (RegExp(r'(^|\s)(-s|--session)(\s+|=)').hasMatch(core)) {
-      core = core.replaceFirstMapped(
-        RegExp(r'(-s|--session)(?:\s+|=)\S+'),
-        (m) => '${m[1]} $resolvedSessionId',
-      );
-    } else {
-      core = '$core -s $resolvedSessionId';
-    }
+    core = withOpenCodeSessionId(core, resolvedSessionId);
   } else {
     resolvedSessionId = parseOpenCodeSessionFlag(core);
   }
@@ -506,10 +514,9 @@ String? _sessionIdFromJson(Object? raw) {
 
 /// 查询 TUI 当前正在看的会话。
 ///
-/// 优先 `GET /tui/active-session`（新版本）；否则 `GET /api/session/active`
-///（本机 1.18.x 已有：进程内前景 session）。
-///
-/// 注意：不要带 `?directory=`，OpenCode 会切实例且在 UNC 路径上极易超时。
+/// 只用 `GET /tui/active-session`（返回 Session.Info | null）。
+/// 不要用 `/session/active`：那是「进程内 busy drain」集合，不是 TUI 当前路由，
+/// 取 `keys.first` 会把「当前」标错，甚至覆盖本地已知会话。
 Future<String?> fetchOpenCodeActiveSessionId({
   required int port,
   String? directory,
@@ -519,59 +526,31 @@ Future<String?> fetchOpenCodeActiveSessionId({
   final client = HttpClient()
     ..connectionTimeout = const Duration(milliseconds: 800);
   try {
-    Future<HttpClientResponse?> get(String path) async {
-      final uri = Uri(
-        scheme: 'http',
-        host: '127.0.0.1',
-        port: port,
-        path: path,
-      );
-      final req = await client.getUrl(uri);
-      // 仅用 header，避免 ?directory= 触发慢路径。
-      if (directory != null && directory.isNotEmpty) {
-        req.headers.set('x-opencode-directory', directory);
-      }
-      final res = await req.close().timeout(const Duration(milliseconds: 900));
-      if (res.statusCode < 200 || res.statusCode >= 300) {
-        await res.drain<void>();
-        return null;
-      }
-      return res;
+    final uri = Uri(
+      scheme: 'http',
+      host: '127.0.0.1',
+      port: port,
+      path: '/tui/active-session',
+    );
+    final req = await client.getUrl(uri);
+    if (directory != null && directory.isNotEmpty) {
+      req.headers.set('x-opencode-directory', directory);
     }
-
-    // 1) 专用 TUI 当前会话（若已合入）
-    final activeTui = await get('/tui/active-session');
-    if (activeTui != null) {
-      final text = await _readHttpJsonBody(activeTui);
-      if (text != null) {
-        try {
-          final decoded = jsonDecode(text);
-          final id = _sessionIdFromJson(decoded) ??
-              (decoded is Map ? _sessionIdFromJson(decoded['data']) : null);
-          if (id != null) return id;
-        } catch (_) {}
-      }
+    final res = await req.close().timeout(const Duration(milliseconds: 900));
+    if (res.statusCode < 200 || res.statusCode >= 300) {
+      await res.drain<void>();
+      return null;
     }
-
-    // 2) 进程前景 active map
-    for (final path in const ['/api/session/active', '/session/active']) {
-      final res = await get(path);
-      if (res == null) continue;
-      final text = await _readHttpJsonBody(res);
-      if (text == null) continue;
-      try {
-        final decoded = jsonDecode(text);
-        Object? map = decoded;
-        if (decoded is Map && decoded['data'] is Map) {
-          map = decoded['data'];
-        }
-        if (map is Map && map.isNotEmpty) {
-          final key = map.keys.first.toString().trim();
-          if (key.isNotEmpty) return key;
-        }
-      } catch (_) {}
+    final text = await _readHttpJsonBody(res);
+    if (text == null) return null;
+    try {
+      final decoded = jsonDecode(text);
+      if (decoded == null) return null;
+      return _sessionIdFromJson(decoded) ??
+          (decoded is Map ? _sessionIdFromJson(decoded['data']) : null);
+    } catch (_) {
+      return null;
     }
-    return null;
   } catch (_) {
     return null;
   } finally {
@@ -835,6 +814,73 @@ Future<OpenCodeSessionInfo> renameOpenCodeSession({
     );
     invalidateOpenCodeSessionCache();
     return updated;
+  } finally {
+    proc.kill();
+  }
+}
+
+Future<void> _deleteOpenCodeSessionHttp({
+  required int port,
+  required String sessionId,
+}) async {
+  final uri = Uri(
+    scheme: 'http',
+    host: '127.0.0.1',
+    port: port,
+    pathSegments: ['session', sessionId],
+  );
+  final client = HttpClient()
+    ..connectionTimeout = const Duration(seconds: 2);
+  try {
+    final req = await client.deleteUrl(uri);
+    req.headers.set(HttpHeaders.acceptHeader, 'application/json');
+    final res = await req.close().timeout(const Duration(seconds: 5));
+    final text = await res.transform(utf8.decoder).join();
+    // 旧版 200 + true；新版可能 204 无正文。
+    if (res.statusCode == 204 || res.statusCode == 200) {
+      return;
+    }
+    if (res.statusCode < 200 || res.statusCode >= 300) {
+      throw StateError(
+        text.trim().isEmpty ? '删除失败 HTTP ${res.statusCode}' : text.trim(),
+      );
+    }
+  } finally {
+    client.close(force: true);
+  }
+}
+
+/// 删除会话：优先打当前 TUI 端口；否则临时起 `opencode serve` 再 DELETE。
+Future<void> deleteOpenCodeSession({
+  required String sessionId,
+  int? port,
+}) async {
+  if (sessionId.isEmpty) {
+    throw StateError('会话 ID 为空');
+  }
+
+  if (port != null && port > 0) {
+    final healthy = await _waitOpenCodeHealth(port, attempts: 8);
+    if (healthy) {
+      await _deleteOpenCodeSessionHttp(port: port, sessionId: sessionId);
+      invalidateOpenCodeSessionCache();
+      return;
+    }
+  }
+
+  final servePort = await allocateLocalTcpPort();
+  final proc = await Process.start(
+    'opencode',
+    ['serve', '--hostname', '127.0.0.1', '--port', '$servePort'],
+    runInShell: true,
+  );
+  try {
+    final ready = await _waitOpenCodeHealth(servePort);
+    if (!ready) {
+      throw StateError('临时 OpenCode 服务未就绪');
+    }
+    await _deleteOpenCodeSessionHttp(port: servePort, sessionId: sessionId);
+    invalidateOpenCodeSessionCache();
   } finally {
     proc.kill();
   }

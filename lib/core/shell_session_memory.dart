@@ -14,11 +14,15 @@ class ShellTabSnapshot {
   final String? launchCommand;
   final String? agentHint;
 
+  /// OpenCode 当前/上次会话 ID（`ses_…`），供重启后 `-s` 恢复。
+  final String? openCodeSessionId;
+
   const ShellTabSnapshot({
     this.kind = 'shell',
     this.cwd,
     this.launchCommand,
     this.agentHint,
+    this.openCodeSessionId,
   });
 
   bool get isAgent => kind == 'agent' || (agentHint != null && agentHint!.isNotEmpty);
@@ -28,6 +32,7 @@ class ShellTabSnapshot {
         if (cwd != null) 'cwd': cwd,
         if (launchCommand != null) 'launchCommand': launchCommand,
         if (agentHint != null) 'agentHint': agentHint,
+        if (openCodeSessionId != null) 'openCodeSessionId': openCodeSessionId,
       };
 
   factory ShellTabSnapshot.fromJson(Map<String, dynamic> json) {
@@ -36,6 +41,7 @@ class ShellTabSnapshot {
       cwd: json['cwd'] as String?,
       launchCommand: json['launchCommand'] as String?,
       agentHint: json['agentHint'] as String?,
+      openCodeSessionId: json['openCodeSessionId'] as String?,
     );
   }
 }
@@ -106,6 +112,7 @@ class ShellSessionSnapshot {
         cwd: cwd,
         launchCommand: t.launchCommand,
         agentHint: t.agentHint,
+        openCodeSessionId: t.openCodeSessionId,
       ));
     }
     if (cleaned.isEmpty) {

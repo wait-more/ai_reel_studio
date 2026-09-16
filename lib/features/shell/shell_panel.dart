@@ -91,7 +91,8 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
         launchCommand: t.launchCommand,
         launchedAgentHint: t.agentHint,
         opencodeServerPort: parseOpenCodeServerPort(t.launchCommand),
-        currentOpenCodeSessionId: parseOpenCodeSessionFlag(t.launchCommand),
+        currentOpenCodeSessionId: t.openCodeSessionId ??
+            parseOpenCodeSessionFlag(t.launchCommand),
       ));
     }
     _activeIndex = snap.activeIndex.clamp(0, _tabs.length - 1);
@@ -106,11 +107,14 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
     for (final tab in _tabs) {
       var cmd = tab.launchCommand?.trim();
       if (cmd == null || cmd.isEmpty) continue;
-      // OpenCode：恢复时重新占端口，直接 `opencode …` 发到 PowerShell。
+      // OpenCode：恢复时重新占端口，并带上上次会话 `-s`。
       if (containsAgentToken(cmd, 'opencode') ||
           (tab.launchedAgentHint?.toLowerCase().contains('opencode') ??
               false)) {
-        final prepared = await prepareOpenCodeTuiLaunch(cmd);
+        final prepared = await prepareOpenCodeTuiLaunch(
+          cmd,
+          sessionId: tab.currentOpenCodeSessionId,
+        );
         cmd = prepared.command;
         tab.launchCommand = prepared.command;
         tab.opencodeServerPort = prepared.port;
@@ -207,6 +211,8 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
             cwd: t.cwd ?? t.session.workingDirectory,
             launchCommand: t.launchCommand,
             agentHint: t.launchedAgentHint,
+            openCodeSessionId: t.currentOpenCodeSessionId ??
+                parseOpenCodeSessionFlag(t.launchCommand),
           ),
       ],
     );
@@ -274,6 +280,21 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
   bool _isAgentLaunchCmd(StartCmd cmd) =>
       commandLooksLikeAgent(cmd.command) || commandLooksLikeAgent(cmd.name);
 
+  /// 记住当前 OpenCode 会话：内存 + launchCommand 的 `-s` + 持久化。
+  void _rememberOpenCodeSession(_ShellTab tab, String sessionId) {
+    final id = sessionId.trim();
+    if (id.isEmpty) return;
+    tab.currentOpenCodeSessionId = id;
+    final base = tab.launchCommand ?? 'opencode';
+    final port = tab.opencodeServerPort ?? parseOpenCodeServerPort(base);
+    var cmd = withOpenCodeSessionId(base, id);
+    if (port != null && port > 0) {
+      cmd = withOpenCodeServerBind(cmd, port);
+    }
+    tab.launchCommand = cmd;
+    _schedulePersist();
+  }
+
   Future<void> _executeOnTab(
     _ShellTab tab,
     StartCmd cmd, {
@@ -287,8 +308,11 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
     if (_isAgentLaunchCmd(cmd) &&
         containsAgentToken(cmd.command, 'opencode')) {
       // 直接 `opencode --hostname/--port …`，与系统终端一致；退出靠软恢复。
+      // 若本 Tab 已有上次会话，带上 `-s` 以便回到同一会话。
       final prepared = await prepareOpenCodeTuiLaunch(
         cmd.command,
+        sessionId: tab.currentOpenCodeSessionId ??
+            parseOpenCodeSessionFlag(tab.launchCommand),
       );
       launchCmd = prepared.command;
       tab.opencodeServerPort = prepared.port;
@@ -538,6 +562,27 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
     }
   }
 
+  void _clearRememberedOpenCodeSession(_ShellTab tab, String sessionId) {
+    if (tab.currentOpenCodeSessionId != sessionId) return;
+    tab.currentOpenCodeSessionId = null;
+    final cmd = tab.launchCommand;
+    if (cmd != null && cmd.isNotEmpty) {
+      tab.launchCommand = normalizeOpenCodeCoreCommand(
+        cmd
+            .replaceAll(
+              RegExp(r'\s*(?:-s|--session)(?:\s+|=)\S+'),
+              '',
+            )
+            .trim(),
+      );
+      final port = tab.opencodeServerPort;
+      if (port != null && port > 0) {
+        tab.launchCommand = withOpenCodeServerBind(tab.launchCommand!, port);
+      }
+    }
+    _schedulePersist();
+  }
+
   Future<void> _openSessionMenu(BuildContext context) async {
     _dismissSessionMenu();
     final overlay = Overlay.maybeOf(context, rootOverlay: true);
@@ -560,13 +605,17 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
             if (!mounted || _tabs.isEmpty) return;
             final t = _tabs[_activeIndex];
             if (t.currentOpenCodeSessionId != id) {
-              t.currentOpenCodeSessionId = id;
+              _rememberOpenCodeSession(t, id);
             }
           },
           onDismiss: _dismissSessionMenu,
           onSelect: (session) {
             _dismissSessionMenu();
             unawaited(_switchToOpenCodeSession(session));
+          },
+          onSessionDeleted: (id) {
+            if (!mounted || _tabs.isEmpty) return;
+            _clearRememberedOpenCodeSession(_tabs[_activeIndex], id);
           },
           onMessage: (msg) {
             if (mounted) showGlobalToast(context, msg);
@@ -661,7 +710,7 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
           directory: info.directory ?? cwd,
         );
         if (result.ok) {
-          tab.currentOpenCodeSessionId = info.id;
+          _rememberOpenCodeSession(tab, info.id);
           invalidateOpenCodeSessionCache();
           if (mounted) {
             showGlobalToast(context, '已切换到「${info.title}」');
@@ -772,6 +821,7 @@ class _OpenCodeSessionMenuOverlay extends StatefulWidget {
     this.onActiveSessionResolved,
     required this.onDismiss,
     required this.onSelect,
+    this.onSessionDeleted,
     this.onMessage,
   });
 
@@ -782,6 +832,7 @@ class _OpenCodeSessionMenuOverlay extends StatefulWidget {
   final ValueChanged<String>? onActiveSessionResolved;
   final VoidCallback onDismiss;
   final ValueChanged<OpenCodeSessionInfo> onSelect;
+  final ValueChanged<String>? onSessionDeleted;
   final ValueChanged<String>? onMessage;
 
   @override
@@ -796,6 +847,8 @@ class _OpenCodeSessionMenuOverlayState extends State<_OpenCodeSessionMenuOverlay
   String? _currentSessionId;
   String? _editingId;
   bool _renaming = false;
+  String? _pendingDeleteId;
+  String? _deletingId;
   final TextEditingController _filter = TextEditingController();
   final TextEditingController _edit = TextEditingController();
   final FocusNode _editFocus = FocusNode();
@@ -834,7 +887,11 @@ class _OpenCodeSessionMenuOverlayState extends State<_OpenCodeSessionMenuOverlay
   }
 
   void _handleEscape() {
-    if (_renaming) return;
+    if (_renaming || _deletingId != null) return;
+    if (_pendingDeleteId != null) {
+      setState(() => _pendingDeleteId = null);
+      return;
+    }
     if (_editingId != null) {
       _cancelInlineRename();
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -847,8 +904,10 @@ class _OpenCodeSessionMenuOverlayState extends State<_OpenCodeSessionMenuOverlay
 
   void _toast(String msg) => widget.onMessage?.call(msg);
 
+  bool get _busy => _renaming || _deletingId != null;
+
   void _beginInlineRename(OpenCodeSessionInfo session) {
-    if (_renaming) return;
+    if (_busy || _pendingDeleteId != null) return;
     setState(() {
       _editingId = session.id;
       _edit.text = session.title;
@@ -863,14 +922,14 @@ class _OpenCodeSessionMenuOverlayState extends State<_OpenCodeSessionMenuOverlay
   }
 
   void _cancelInlineRename() {
-    if (_renaming) return;
+    if (_busy) return;
     if (_editingId == null) return;
     _editFocus.unfocus();
     setState(() => _editingId = null);
   }
 
   Future<void> _commitInlineRename(OpenCodeSessionInfo session) async {
-    if (_renaming) return;
+    if (_busy) return;
     final next = _edit.text.trim();
     if (next.isEmpty) {
       _toast('标题不能为空');
@@ -912,11 +971,49 @@ class _OpenCodeSessionMenuOverlayState extends State<_OpenCodeSessionMenuOverlay
     }
   }
 
+  Future<void> _confirmAndDelete(OpenCodeSessionInfo session) async {
+    if (_busy || _editingId != null) return;
+    if (_pendingDeleteId != session.id) return;
+    final isCurrent =
+        _currentSessionId != null && session.id == _currentSessionId;
+
+    setState(() => _deletingId = session.id);
+    try {
+      await deleteOpenCodeSession(
+        sessionId: session.id,
+        port: widget.serverPort,
+      );
+      if (!mounted) return;
+      widget.onSessionDeleted?.call(session.id);
+      setState(() {
+        _items = [
+          for (final e in _items ?? const <OpenCodeSessionInfo>[])
+            if (e.id != session.id) e,
+        ];
+        if (_currentSessionId == session.id) {
+          _currentSessionId = null;
+        }
+        _pendingDeleteId = null;
+        _deletingId = null;
+      });
+      _toast(isCurrent ? '已删除当前会话，请选择其它会话继续' : '已删除会话');
+      unawaited(_load(forceRefresh: true));
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _deletingId = null;
+        _pendingDeleteId = null;
+      });
+      _toast('删除失败：$e');
+    }
+  }
+
   Future<void> _load({bool forceRefresh = false}) async {
     setState(() {
       _loading = true;
       _error = null;
       _editingId = null;
+      _pendingDeleteId = null;
     });
     try {
       final port = widget.serverPort;
@@ -933,7 +1030,9 @@ class _OpenCodeSessionMenuOverlayState extends State<_OpenCodeSessionMenuOverlay
       if (!mounted) return;
       final list = results[0] as List<OpenCodeSessionInfo>;
       final liveId = results[1] as String?;
-      final current = liveId ?? widget.knownSessionId ?? _currentSessionId;
+      final known = widget.knownSessionId ?? _currentSessionId;
+      // live 仅来自 /tui/active-session；没有则退回本地已知（切会话/恢复写入）。
+      final current = liveId ?? known;
       if (liveId != null && liveId.isNotEmpty) {
         widget.onActiveSessionResolved?.call(liveId);
       }
@@ -989,6 +1088,7 @@ class _OpenCodeSessionMenuOverlayState extends State<_OpenCodeSessionMenuOverlay
   Widget build(BuildContext context) {
     final size = MediaQuery.sizeOf(context);
     final editing = _editingId != null;
+    final pendingDelete = _pendingDeleteId != null;
     return CallbackShortcuts(
       bindings: {
         const SingleActivator(LogicalKeyboardKey.escape): _handleEscape,
@@ -1004,6 +1104,10 @@ class _OpenCodeSessionMenuOverlayState extends State<_OpenCodeSessionMenuOverlay
                 onTap: () {
                   if (editing) {
                     _cancelInlineRename();
+                    return;
+                  }
+                  if (pendingDelete) {
+                    setState(() => _pendingDeleteId = null);
                     return;
                   }
                   widget.onDismiss();
@@ -1062,9 +1166,10 @@ class _OpenCodeSessionMenuOverlayState extends State<_OpenCodeSessionMenuOverlay
                             ),
                             IconButton(
                               tooltip: '刷新',
-                              onPressed: (_loading || _renaming || editing)
-                                  ? null
-                                  : () => _load(forceRefresh: true),
+                              onPressed:
+                                  (_loading || _busy || editing || pendingDelete)
+                                      ? null
+                                      : () => _load(forceRefresh: true),
                               icon: const Icon(Icons.refresh, size: 16),
                               color: Colors.white54,
                               padding: EdgeInsets.zero,
@@ -1080,7 +1185,7 @@ class _OpenCodeSessionMenuOverlayState extends State<_OpenCodeSessionMenuOverlay
                         padding: const EdgeInsets.fromLTRB(10, 0, 10, 8),
                         child: TextField(
                           controller: _filter,
-                          enabled: !editing && !_renaming,
+                          enabled: !editing && !_busy && !pendingDelete,
                           onChanged: (_) => setState(() {}),
                           style: const TextStyle(
                             fontSize: 12,
@@ -1155,7 +1260,7 @@ class _OpenCodeSessionMenuOverlayState extends State<_OpenCodeSessionMenuOverlay
     }
     return ListView.builder(
       controller: _scroll,
-      padding: const EdgeInsets.symmetric(vertical: 4),
+      padding: const EdgeInsets.fromLTRB(0, 4, 10, 4),
       itemCount: items.length,
       itemBuilder: (context, index) {
         final s = items[index];
@@ -1163,12 +1268,15 @@ class _OpenCodeSessionMenuOverlayState extends State<_OpenCodeSessionMenuOverlay
         final isCurrent =
             _currentSessionId != null && s.id == _currentSessionId;
         final isEditing = _editingId == s.id;
+        final isPendingDelete = _pendingDeleteId == s.id;
         return Material(
-          color: isCurrent || isEditing
-              ? Colors.lightGreenAccent.withValues(alpha: 0.12)
+          color: isCurrent || isEditing || isPendingDelete
+              ? (isPendingDelete
+                  ? Colors.redAccent.withValues(alpha: 0.12)
+                  : Colors.lightGreenAccent.withValues(alpha: 0.12))
               : Colors.transparent,
           child: InkWell(
-            onTap: _renaming
+            onTap: _busy
                 ? null
                 : () {
                     if (_editingId != null) {
@@ -1176,13 +1284,21 @@ class _OpenCodeSessionMenuOverlayState extends State<_OpenCodeSessionMenuOverlay
                       if (_editingId != s.id) _cancelInlineRename();
                       return;
                     }
+                    if (_pendingDeleteId != null) {
+                      if (_pendingDeleteId != s.id) {
+                        setState(() => _pendingDeleteId = null);
+                      }
+                      return;
+                    }
                     widget.onSelect(s);
                   },
-            onLongPress: (_renaming || _editingId != null)
+            onLongPress: (_busy ||
+                    _editingId != null ||
+                    _pendingDeleteId != null)
                 ? null
                 : () => _beginInlineRename(s),
             child: Padding(
-              padding: const EdgeInsets.fromLTRB(12, 8, 4, 8),
+              padding: const EdgeInsets.fromLTRB(12, 8, 6, 8),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -1194,7 +1310,7 @@ class _OpenCodeSessionMenuOverlayState extends State<_OpenCodeSessionMenuOverlay
                             ? TextField(
                                 controller: _edit,
                                 focusNode: _editFocus,
-                                enabled: !_renaming,
+                                enabled: !_busy,
                                 autofocus: true,
                                 maxLength: 120,
                                 style: const TextStyle(
@@ -1222,19 +1338,23 @@ class _OpenCodeSessionMenuOverlayState extends State<_OpenCodeSessionMenuOverlay
                                 onTapOutside: (_) => _cancelInlineRename(),
                               )
                             : Text(
-                                s.title,
+                                isPendingDelete
+                                    ? '确认删除「${s.title}」？'
+                                    : s.title,
                                 maxLines: 2,
                                 overflow: TextOverflow.ellipsis,
                                 style: TextStyle(
                                   fontSize: 13,
-                                  color: Colors.white,
-                                  fontWeight: isCurrent
+                                  color: isPendingDelete
+                                      ? Colors.redAccent.shade100
+                                      : Colors.white,
+                                  fontWeight: isCurrent || isPendingDelete
                                       ? FontWeight.w600
                                       : FontWeight.w400,
                                 ),
                               ),
                       ),
-                      if (isCurrent && !isEditing) ...[
+                      if (isCurrent && !isEditing && !isPendingDelete) ...[
                         const SizedBox(width: 6),
                         Container(
                           padding: const EdgeInsets.symmetric(
@@ -1262,7 +1382,7 @@ class _OpenCodeSessionMenuOverlayState extends State<_OpenCodeSessionMenuOverlay
                             mainAxisSize: MainAxisSize.min,
                             children: [
                               IconButton(
-                                onPressed: _renaming
+                                onPressed: _busy
                                     ? null
                                     : () => unawaited(_commitInlineRename(s)),
                                 icon: _renaming
@@ -1284,7 +1404,7 @@ class _OpenCodeSessionMenuOverlayState extends State<_OpenCodeSessionMenuOverlay
                               ),
                               IconButton(
                                 onPressed:
-                                    _renaming ? null : _cancelInlineRename,
+                                    _busy ? null : _cancelInlineRename,
                                 icon: const Icon(Icons.close, size: 16),
                                 color: Colors.white54,
                                 padding: EdgeInsets.zero,
@@ -1297,23 +1417,104 @@ class _OpenCodeSessionMenuOverlayState extends State<_OpenCodeSessionMenuOverlay
                             ],
                           ),
                         )
+                      else if (isPendingDelete)
+                        Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            TextButton(
+                              onPressed: _busy
+                                  ? null
+                                  : () => unawaited(_confirmAndDelete(s)),
+                              style: TextButton.styleFrom(
+                                foregroundColor: Colors.redAccent,
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 8,
+                                ),
+                                minimumSize: const Size(0, 28),
+                                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                                visualDensity: VisualDensity.compact,
+                              ),
+                              child: _deletingId == s.id
+                                  ? const SizedBox(
+                                      width: 14,
+                                      height: 14,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                      ),
+                                    )
+                                  : const Text(
+                                      '删除',
+                                      style: TextStyle(fontSize: 12),
+                                    ),
+                            ),
+                            TextButton(
+                              onPressed: _busy
+                                  ? null
+                                  : () => setState(
+                                        () => _pendingDeleteId = null,
+                                      ),
+                              style: TextButton.styleFrom(
+                                foregroundColor: Colors.white54,
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 8,
+                                ),
+                                minimumSize: const Size(0, 28),
+                                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                                visualDensity: VisualDensity.compact,
+                              ),
+                              child: const Text(
+                                '取消',
+                                style: TextStyle(fontSize: 12),
+                              ),
+                            ),
+                          ],
+                        )
                       else
-                        // 不用 Tooltip：Overlay 内 Tooltip 移出时会触发 layout 断言闪红屏。
-                        IconButton(
-                          onPressed:
-                              _renaming ? null : () => _beginInlineRename(s),
-                          icon: const Icon(Icons.edit_outlined, size: 14),
-                          color: Colors.white38,
-                          padding: EdgeInsets.zero,
-                          visualDensity: VisualDensity.compact,
-                          constraints: const BoxConstraints(
-                            minWidth: 28,
-                            minHeight: 28,
-                          ),
+                        Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            // 不用 Tooltip：Overlay 内 Tooltip 移出时会触发 layout 断言闪红屏。
+                            IconButton(
+                              onPressed: _busy
+                                  ? null
+                                  : () => _beginInlineRename(s),
+                              icon: const Icon(Icons.edit_outlined, size: 14),
+                              color: Colors.white38,
+                              padding: EdgeInsets.zero,
+                              visualDensity: VisualDensity.compact,
+                              constraints: const BoxConstraints(
+                                minWidth: 28,
+                                minHeight: 28,
+                              ),
+                            ),
+                            IconButton(
+                              onPressed: _busy
+                                  ? null
+                                  : () {
+                                      setState(() {
+                                        _editingId = null;
+                                        _pendingDeleteId = s.id;
+                                      });
+                                    },
+                              icon: const Icon(
+                                Icons.delete_outline,
+                                size: 14,
+                              ),
+                              color: Colors.redAccent.withValues(alpha: 0.75),
+                              padding: EdgeInsets.zero,
+                              visualDensity: VisualDensity.compact,
+                              constraints: const BoxConstraints(
+                                minWidth: 28,
+                                minHeight: 28,
+                              ),
+                            ),
+                          ],
                         ),
                     ],
                   ),
-                  if (!isEditing && time.isNotEmpty) ...[
+                  if (!isEditing &&
+                      !isPendingDelete &&
+                      time.isNotEmpty) ...[
                     const SizedBox(height: 2),
                     Text(
                       time,
@@ -1356,9 +1557,8 @@ class _ShellTab {
     this.currentOpenCodeSessionId,
   }) {
     session.onHostExited = () {
+      // 端口随进程失效；会话 ID / 启动命令保留，便于重启与列表标「当前」。
       opencodeServerPort = null;
-      currentOpenCodeSessionId = null;
-      launchedAgentHint = null;
     };
   }
 
