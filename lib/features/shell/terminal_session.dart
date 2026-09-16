@@ -7,6 +7,8 @@ import 'package:flterm/flterm.dart';
 import 'package:flutter/widgets.dart';
 import 'package:kyroon_pty/kyroon_pty.dart';
 
+import '../../core/opencode_sessions.dart';
+
 /// 单个终端会话：连接一个 Pty (ConPTY/forkpty) 与 flterm/Ghostty VT 引擎。
 class TerminalSession extends ChangeNotifier {
   TerminalSession({String? workingDirectory}) {
@@ -30,11 +32,13 @@ class TerminalSession extends ChangeNotifier {
   bool _usePowerShell = true;
   bool _respawning = false;
   String? _preferredExecutable;
-  /// 视口最近一次真实行列（来自 TerminalView onResize），软恢复必须用它。
   int _liveCols = 0;
   int _liveRows = 0;
+  int _ptyGen = 0;
 
-  /// 会话是否已启动（PTY 已 spawn）。
+  /// 宿主被带走并软恢复前回调（清 Tab 上的智能体标记）。
+  VoidCallback? onHostExited;
+
   bool get isRunning => _pty != null;
 
   String? _workingDirectory;
@@ -91,8 +95,6 @@ class TerminalSession extends ChangeNotifier {
     required int rows,
     required Map<String, String> env,
   }) {
-    // kyroon_pty on Windows used to widen UTF-8 byte-by-byte; non-ASCII
-    // cwd then broke CreateProcess. Prefer a safe cwd and always cd after.
     final ptyCwd = _windowsSafePtyCwd(targetDir);
 
     final attempts = <({String exe, bool powerShell})>[];
@@ -109,10 +111,13 @@ class TerminalSession extends ChangeNotifier {
 
     Object? lastError;
     for (final attempt in attempts) {
+      final args =
+          attempt.powerShell ? powerShellHostLaunchArguments() : const <String>[];
       try {
         _usePowerShell = attempt.powerShell;
         _pty = Pty.start(
           attempt.exe,
+          arguments: args,
           columns: cols,
           rows: rows,
           environment: env,
@@ -123,11 +128,11 @@ class TerminalSession extends ChangeNotifier {
       } catch (e) {
         lastError = e;
         _pty = null;
-        // 若带 cwd 失败，再试一次不带 cwd（仍用同一 shell）
         if (ptyCwd != null) {
           try {
             _pty = Pty.start(
               attempt.exe,
+              arguments: args,
               columns: cols,
               rows: rows,
               environment: env,
@@ -188,52 +193,47 @@ class TerminalSession extends ChangeNotifier {
   void _attachPtyStreams() {
     final pty = _pty;
     if (pty == null) return;
+    final gen = _ptyGen;
 
     _ptyOutputSub?.cancel();
     _ptyOutputSub = pty.output.listen(
       controller.write,
-      onDone: () {
-        if (!_disposed && !_respawning) {
-          writeText('\r\n[进程已退出]\r\n');
-        }
-      },
+      onDone: () {},
       onError: (Object e) {
         if (!_disposed) writeText('\r\n[终端输出错误: $e]\r\n');
       },
     );
 
     pty.exitCode.then((code) {
-      if (_disposed) return;
+      if (_disposed || gen != _ptyGen) return;
       _handleHostExit(code);
     });
   }
 
-  /// 宿主 shell 被带走时（例如 PowerShell 执行了 exit），在同一会话内软恢复。
+  /// OpenCode 退出常带走宿主：静默软恢复（不刷「进程已退出」）。
   void _handleHostExit(int code) {
     if (_disposed || _respawning) return;
+    final gen = ++_ptyGen;
     _ptyOutputSub?.cancel();
     _ptyOutputSub = null;
     _pty = null;
-    writeText('\r\n[进程已退出: $code]\r\n');
-    _respawnHostShell();
+    onHostExited?.call();
+    _respawnHostShell(expectedGen: gen);
   }
 
-  void _respawnHostShell() {
+  void _respawnHostShell({required int expectedGen}) {
     if (_disposed || _respawning) return;
     _respawning = true;
-    writeText('\x1b[90m[终端宿主已退出，正在同标签恢复…]\x1b[0m\r\n');
-    Future<void>.delayed(const Duration(milliseconds: 120), () {
-      if (_disposed) {
+    Future<void>.delayed(const Duration(milliseconds: 60), () {
+      if (_disposed || expectedGen != _ptyGen) {
         _respawning = false;
         return;
       }
       try {
         start(workingDirectory: _workingDirectory);
         if (_pty != null) {
-          // 软恢复后必须按当前视口重推行列，否则 TUI（如 OpenCode）会卡在初始 32 行。
           _applyPtySize();
           syncViewportSize();
-          writeText('\x1b[90m[终端已恢复，可继续操作]\x1b[0m\r\n');
         }
       } finally {
         _respawning = false;
@@ -248,8 +248,7 @@ class TerminalSession extends ChangeNotifier {
       if (_pty == null || _disposed) return;
       if (Platform.isWindows) {
         if (_usePowerShell) {
-          final literal = "'${targetDir.replaceAll("'", "''")}'";
-          sendCommand('Set-Location -LiteralPath $literal');
+          sendCommand(powershellSetLocationCommand(targetDir));
         } else {
           final escaped = targetDir.replaceAll('"', '""');
           if (targetDir.startsWith(r'\\')) {
@@ -265,7 +264,6 @@ class TerminalSession extends ChangeNotifier {
     });
   }
 
-  /// Only pass CreateProcess a cwd that survives the PTY layer.
   static String? _windowsSafePtyCwd(String? targetDir) {
     if (targetDir == null || targetDir.isEmpty) return null;
     if (targetDir.startsWith(r'\\')) return null;
@@ -345,7 +343,6 @@ class TerminalSession extends ChangeNotifier {
     } catch (_) {}
   }
 
-  /// 在布局稳定后再次把视口尺寸推给 PTY（软恢复 / 启动智能体后用）。
   void syncViewportSize({int attempts = 6}) {
     void poke(int left) {
       if (_disposed || left < 0) return;
@@ -359,33 +356,27 @@ class TerminalSession extends ChangeNotifier {
     poke(attempts);
   }
 
-  /// 向终端缓冲区写入纯文本（含 ANSI）。
   void writeText(String text) {
     if (text.isEmpty) return;
     controller.write(Uint8List.fromList(utf8.encode(text)));
   }
 
-  /// 向当前终端发送一段命令作为输入（常用于快捷启动）。
   void sendCommand(String command) {
     _pty?.write(Uint8List.fromList(utf8.encode('$command\r')));
   }
 
-  /// 向终端写入文本，不加回车（用于填入智能体输入区）。
   void sendInput(String text) {
     if (text.isEmpty) return;
     _pty?.write(Uint8List.fromList(utf8.encode(text)));
   }
 
-  /// 写入原始字节（如 Ctrl+C = 0x03），用于中断/退出子进程而不杀 PTY。
   void sendRaw(List<int> bytes) {
     if (bytes.isEmpty) return;
     _pty?.write(Uint8List.fromList(bytes));
   }
 
-  /// 发送 Ctrl+C。
   void sendInterrupt() => sendRaw(const [0x03]);
 
-  /// 读取终端活动屏纯文本（供智能体检测），取末尾若干行。
   String recentBufferText({int maxLines = 48}) {
     final formatter = controller.createFormatter(
       format: FormatterFormat.plain,
@@ -403,27 +394,23 @@ class TerminalSession extends ChangeNotifier {
     }
   }
 
-  /// 结束并清理底层 PTY。
   void kill() {
+    _ptyGen++;
     _ptyOutputSub?.cancel();
     _ptyOutputSub = null;
     final pty = _pty;
+    _pty = null;
     if (pty != null) {
       try {
-        pty.write(Uint8List.fromList(utf8.encode('exit\r')));
-      } catch (_) {
-        // 管道已关闭则直接强杀
-      }
-      _pty = null;
-      Future<void>.delayed(const Duration(milliseconds: 1500), () {
         pty.kill();
-      });
+      } catch (_) {}
     }
   }
 
   @override
   void dispose() {
     _disposed = true;
+    onHostExited = null;
     kill();
     controller.dispose();
     super.dispose();

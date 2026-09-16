@@ -221,32 +221,175 @@ String formatOpenCodeSessionTime(DateTime? time, {DateTime? now}) {
   return '$y-$m-$d';
 }
 
-/// Windows：用 cmd 包一层，避免 npm/ps1 shim 里的 `exit` 连带结束宿主 PowerShell。
-String wrapOpenCodeLaunchForHostShell(String command) {
-  final cmd = command.trim();
+/// 去掉历史包装，归一成以 `opencode` 开头的核心命令。
+String normalizeOpenCodeCoreCommand(String command) {
+  var cmd = command.trim();
   if (cmd.isEmpty) return cmd;
-  if (!Platform.isWindows) return cmd;
-  final lower = cmd.toLowerCase();
-  if (!lower.contains('opencode')) return cmd;
-  // 已包过则不再包。
-  if (lower.contains('cmd /c ') || lower.contains('cmd.exe /c ')) {
-    return cmd;
-  }
-  // /d 避免 UNC 工作目录下 cmd 报错；exit /b 确保只结束 cmd 子进程。
-  final escaped = cmd.replaceAll('"', '""');
-  return 'cmd /d /c "$escaped & exit /b %ERRORLEVEL%"';
-}
 
-/// 解开 [wrapOpenCodeLaunchForHostShell] 包装，得到原始 opencode 命令。
-String unwrapOpenCodeLaunchForHostShell(String command) {
-  final cmd = command.trim();
-  final m = RegExp(
+  // 旧版：cmd /d /c "..."
+  final wrapped = RegExp(
     r'^cmd(?:\.exe)?\s+/d\s+/c\s+"(.*)\s*&\s*exit\s+/b\s+%ERRORLEVEL%"\s*$',
     caseSensitive: false,
     dotAll: true,
   ).firstMatch(cmd);
-  if (m == null) return cmd;
-  return m.group(1)!.replaceAll('""', '"').trim();
+  if (wrapped != null) {
+    cmd = wrapped.group(1)!.replaceAll('""', '"').trim();
+  }
+
+  // 旧版 UNC：pushd ... && ... & popd
+  final pushd = RegExp(
+    r'^pushd\s+(?:"[^"]+"|\S+)\s*&&\s*(.*?)\s*&\s*popd\s*$',
+    caseSensitive: false,
+    dotAll: true,
+  ).firstMatch(cmd);
+  if (pushd != null) {
+    cmd = pushd.group(1)!.trim();
+  }
+
+  // 历史实验包装（持久化残留）
+  cmd = cmd.replaceFirst(
+    RegExp(
+      r'^\[Console\]::TreatControlCAsInput\s*=\s*\$?true\s*;\s*',
+      caseSensitive: false,
+    ),
+    '',
+  );
+  cmd = cmd.replaceAll(
+    RegExp(
+      r'try\s*\{[^}]*\}\s*catch\s*\{[^}]*\}\s*;?',
+      caseSensitive: false,
+    ),
+    ' ',
+  );
+  cmd = cmd.replaceAll(RegExp(r'\s+'), ' ').trim();
+
+  final sp = RegExp(
+    r"""Start-Process\s+-FilePath\s+(['"])(.+?[\\/]opencode(?:\.exe)?)\1(?:\s+-ArgumentList\s+@\(([^)]*)\))?""",
+    caseSensitive: false,
+  ).firstMatch(cmd);
+  if (sp != null) {
+    final rawArgs = (sp.group(3) ?? '')
+        .split(',')
+        .map((e) => e.trim().replaceAll(RegExp(r"^'|'$"), ''))
+        .where((e) => e.isNotEmpty)
+        .join(' ');
+    return _opencodeCoreFromFlags(rawArgs);
+  }
+
+  final amps = RegExp(
+    r"""&\s*(['"])(.+?[\\/]opencode(?:\.exe)?)\1\s*([^&]*)""",
+    caseSensitive: false,
+  ).allMatches(cmd).toList();
+  if (amps.isNotEmpty) {
+    return _opencodeCoreFromFlags(amps.last.group(3) ?? '');
+  }
+
+  final oc = RegExp(
+    r'(?:^|\s)(opencode(?:\.cmd)?)\b(.*)$',
+    caseSensitive: false,
+  ).firstMatch(cmd);
+  if (oc != null) {
+    return _opencodeCoreFromFlags(oc.group(2) ?? '');
+  }
+
+  if (cmd.toLowerCase().contains('opencode') ||
+      cmd.contains('--port') ||
+      cmd.contains('-s')) {
+    return _opencodeCoreFromFlags(cmd);
+  }
+
+  return cmd.trim();
+}
+
+String _opencodeCoreFromFlags(String raw) {
+  final rest = raw.trim();
+  final host = RegExp(r'--hostname(?:\s+|=)(\S+)')
+      .firstMatch(rest)
+      ?.group(1)
+      ?.replaceAll(RegExp(r'[;]+$'), '');
+  final port = RegExp(r'--port(?:\s+|=)(\d+)').firstMatch(rest)?.group(1);
+  final session = RegExp(r'(?:^|\s)(?:-s|--session)(?:\s+|=)(\S+)')
+      .firstMatch(rest)
+      ?.group(1)
+      ?.replaceAll(RegExp(r'[;]+$'), '');
+
+  if (host != null || port != null || session != null) {
+    final parts = <String>['opencode'];
+    if (host != null) parts.addAll(['--hostname', host]);
+    if (port != null) parts.addAll(['--port', port]);
+    if (session != null) parts.addAll(['-s', session]);
+    return parts.join(' ');
+  }
+
+  final cleaned = rest
+      .replaceAll(
+        RegExp(
+          r"""&\s*['"].+?[\\/]opencode(?:\.exe)?['"]""",
+          caseSensitive: false,
+        ),
+        '',
+      )
+      .replaceAll(RegExp(r'\bopencode(?:\.cmd)?\b', caseSensitive: false), '')
+      .trim();
+  return cleaned.isEmpty ? 'opencode' : 'opencode $cleaned';
+}
+
+/// PowerShell 宿主启动参数。
+List<String> powerShellHostLaunchArguments() {
+  return const ['-NoLogo'];
+}
+
+/// PowerShell 安全 `Set-Location`（单引号字面量，避免 UNC/中文在双引号里被吃掉 `\`）。
+String powershellSetLocationCommand(String directory) {
+  final literal = "'${directory.replaceAll("'", "''")}'";
+  return 'Set-Location -LiteralPath $literal';
+}
+
+/// `Set-Location` + 启动命令（同一行，供快捷启动 / Plan B）。
+String powershellCdAndCommand(String directory, String command) {
+  return '${powershellSetLocationCommand(directory)}; $command';
+}
+
+/// 结束监听 [port] 的 opencode 进程（不碰宿主 PowerShell）。
+Future<bool> killOpenCodeListeningOnPort(int port) async {
+  if (!Platform.isWindows || port <= 0) return false;
+  final script = '''
+\$ErrorActionPreference = 'SilentlyContinue'
+\$conns = @(Get-NetTCPConnection -LocalPort $port -State Listen)
+if (-not \$conns -or \$conns.Count -eq 0) {
+  \$conns = @(Get-NetTCPConnection -LocalPort $port)
+}
+\$killed = \$false
+foreach (\$c in \$conns) {
+  \$proc = Get-Process -Id \$c.OwningProcess
+  if (\$null -eq \$proc) { continue }
+  \$name = [string]\$proc.ProcessName
+  if (\$name -match '(?i)opencode') {
+    Stop-Process -Id \$proc.Id -Force
+    \$killed = \$true
+  }
+}
+if (-not \$killed) {
+  Get-CimInstance Win32_Process -Filter "Name='opencode.exe'" | ForEach-Object {
+    if (\$_.CommandLine -match ('--port(?:\\s+|=)$port(?:\\s|\$)')) {
+      Stop-Process -Id \$_.ProcessId -Force
+      \$killed = \$true
+    }
+  }
+}
+if (\$killed) { 'KILLED' } else { 'MISS' }
+''';
+  try {
+    final result = await Process.run(
+      'powershell.exe',
+      ['-NoProfile', '-NoLogo', '-Command', script],
+      runInShell: false,
+    );
+    final out = '${result.stdout}'.trim();
+    return out.contains('KILLED');
+  } catch (_) {
+    return false;
+  }
 }
 
 /// 占一个本机空闲端口（绑定后立刻释放），供 `opencode --port` 使用。
@@ -270,7 +413,7 @@ int? parseOpenCodeServerPort(String? command) {
 /// OpenCode 文档：跑 `opencode` 时本身就会起内嵌 HTTP；固定端口后即可
 /// `POST /tui/select-session` 驱动同进程 TUI 切会话。
 String withOpenCodeServerBind(String command, int port) {
-  var cmd = unwrapOpenCodeLaunchForHostShell(command).trim();
+  var cmd = normalizeOpenCodeCoreCommand(command).trim();
   if (cmd.isEmpty) cmd = 'opencode';
   cmd = cmd
       .replaceAll(RegExp(r'\s*--port(?:\s+|=)\d+'), '')
@@ -300,7 +443,7 @@ String withOpenCodeServerBind(String command, int port) {
 /// 从启动命令解析 `-s` / `--session`。
 String? parseOpenCodeSessionFlag(String? command) {
   if (command == null || command.isEmpty) return null;
-  final core = unwrapOpenCodeLaunchForHostShell(command);
+  final core = normalizeOpenCodeCoreCommand(command);
   final m =
       RegExp(r'(?:^|\s)(?:-s|--session)(?:\s+|=)(\S+)').firstMatch(core);
   final id = m?.group(1)?.trim();
@@ -308,12 +451,15 @@ String? parseOpenCodeSessionFlag(String? command) {
   return id;
 }
 
-/// 准备可跳转的 TUI 启动命令：固定本机端口 +（可选）`-s` + Windows host 包装。
+/// 准备可跳转的 TUI 启动命令：固定本机端口 +（可选）`-s`。
+///
+/// 返回的 [command] 就是直接发给 PowerShell 的 `opencode …`。
+/// OpenCode 退出若带走宿主，由终端会话静默软恢复。
 Future<({String command, int port, String? sessionId})> prepareOpenCodeTuiLaunch(
   String command, {
   String? sessionId,
 }) async {
-  var core = unwrapOpenCodeLaunchForHostShell(command).trim();
+  var core = normalizeOpenCodeCoreCommand(command).trim();
   if (core.isEmpty) core = 'opencode';
 
   var resolvedSessionId = sessionId?.trim();
@@ -333,7 +479,7 @@ Future<({String command, int port, String? sessionId})> prepareOpenCodeTuiLaunch
   final port = await allocateLocalTcpPort();
   core = withOpenCodeServerBind(core, port);
   return (
-    command: wrapOpenCodeLaunchForHostShell(core),
+    command: core,
     port: port,
     sessionId: resolvedSessionId,
   );

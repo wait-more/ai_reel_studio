@@ -106,7 +106,7 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
     for (final tab in _tabs) {
       var cmd = tab.launchCommand?.trim();
       if (cmd == null || cmd.isEmpty) continue;
-      // OpenCode：恢复时重新占端口，保证方案 A 的 /tui/select-session 可用。
+      // OpenCode：恢复时重新占端口，直接 `opencode …` 发到 PowerShell。
       if (containsAgentToken(cmd, 'opencode') ||
           (tab.launchedAgentHint?.toLowerCase().contains('opencode') ??
               false)) {
@@ -163,7 +163,6 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
     if (terminalTextLooksLikeAgent(recent)) return true;
     final hint = tab.launchedAgentHint;
     if (hint != null && hint.isNotEmpty) {
-      // 会话恢复后缓冲里可能还没刷出关键字，有启动命令则仍视为智能体 Tab
       if (tab.launchCommand != null && tab.launchCommand!.trim().isNotEmpty) {
         return true;
       }
@@ -287,13 +286,15 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
     late final String launchCmd;
     if (_isAgentLaunchCmd(cmd) &&
         containsAgentToken(cmd.command, 'opencode')) {
-      // 普通 TUI（非 serve）固定 --port，供后续 POST /tui/select-session。
-      final prepared = await prepareOpenCodeTuiLaunch(cmd.command);
+      // 直接 `opencode --hostname/--port …`，与系统终端一致；退出靠软恢复。
+      final prepared = await prepareOpenCodeTuiLaunch(
+        cmd.command,
+      );
       launchCmd = prepared.command;
       tab.opencodeServerPort = prepared.port;
       tab.currentOpenCodeSessionId = prepared.sessionId;
     } else if (_isAgentLaunchCmd(cmd)) {
-      launchCmd = wrapOpenCodeLaunchForHostShell(cmd.command);
+      launchCmd = cmd.command;
       tab.opencodeServerPort = null;
       tab.currentOpenCodeSessionId = null;
     } else {
@@ -305,7 +306,7 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
     tab.launchCommand = launchCmd;
     if (includeCd && cwd != null && cwd.isNotEmpty) {
       final line = Platform.isWindows
-          ? 'Set-Location -LiteralPath "$cwd"; $launchCmd'
+          ? powershellCdAndCommand(cwd, launchCmd)
           : 'cd "$cwd" && $launchCmd';
       session.sendCommand(line);
     } else {
@@ -598,13 +599,26 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
     return false;
   }
 
-  Future<void> _leaveOpenCodeToShell(TerminalSession session) async {
-    // 优雅退出 TUI，保留宿主 PowerShell / cmd（绝不 kill PTY）。
+  Future<void> _leaveOpenCodeToShell(TerminalSession session, {int? port}) async {
+    // 优先按端口结束 OpenCode；宿主若被带走由软恢复接手。
+    if (port != null && port > 0) {
+      final killed = await killOpenCodeListeningOnPort(port);
+      if (killed) {
+        for (var i = 0; i < 25; i++) {
+          await Future<void>.delayed(const Duration(milliseconds: 160));
+          if (!mounted) return;
+          if (_looksLikeShellPrompt(session.recentBufferText(maxLines: 12))) {
+            return;
+          }
+        }
+      }
+    }
+
     session.sendInterrupt();
     await Future<void>.delayed(const Duration(milliseconds: 180));
     session.sendInput('q');
     await Future<void>.delayed(const Duration(milliseconds: 120));
-    session.sendRaw(const [0x0d]); // Enter，兜底确认
+    session.sendRaw(const [0x0d]);
 
     for (var i = 0; i < 20; i++) {
       await Future<void>.delayed(const Duration(milliseconds: 200));
@@ -664,16 +678,18 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
         showGlobalToast(context, '当前 OpenCode 未绑定端口，正在重启…');
       }
 
-      // 方案 B：退出 TUI 后同标签用 -s 重启（仍带固定 --port 以便下次走 A）
-      await _leaveOpenCodeToShell(tab.session);
+      // 方案 B：结束 TUI 后同标签用 -s 再发 `opencode …`
+      await _leaveOpenCodeToShell(tab.session, port: port);
       if (!mounted) return;
 
-      final prepared =
-          await prepareOpenCodeTuiLaunch('opencode', sessionId: info.id);
+      final prepared = await prepareOpenCodeTuiLaunch(
+        'opencode',
+        sessionId: info.id,
+      );
       final launch = prepared.command;
       if (cwd != null && cwd.isNotEmpty) {
         final line = Platform.isWindows
-            ? 'Set-Location -LiteralPath "$cwd"; $launch'
+            ? powershellCdAndCommand(cwd, launch)
             : 'cd "$cwd" && $launch';
         tab.session.sendCommand(line);
       } else {
@@ -1338,7 +1354,13 @@ class _ShellTab {
     this.launchedAgentHint,
     this.opencodeServerPort,
     this.currentOpenCodeSessionId,
-  });
+  }) {
+    session.onHostExited = () {
+      opencodeServerPort = null;
+      currentOpenCodeSessionId = null;
+      launchedAgentHint = null;
+    };
+  }
 
   void dispose() {
     focusNode.dispose();

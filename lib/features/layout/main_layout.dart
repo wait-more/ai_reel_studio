@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flterm/flterm.dart';
 import 'package:path/path.dart' as p;
 import 'package:window_manager/window_manager.dart';
 import '../../core/agent_bridge.dart';
@@ -250,6 +251,14 @@ class _MainLayoutState extends ConsumerState<MainLayout> with WindowListener {
         ctx.findAncestorWidgetOfExactType<AlertDialog>() != null;
   }
 
+  /// 终端里的 Ctrl+C 必须进 PTY，不能被文件「复制」吃掉。
+  bool _isInTerminal() {
+    final ctx = FocusManager.instance.primaryFocus?.context;
+    if (ctx == null) return false;
+    if (ctx.widget is TerminalView) return true;
+    return ctx.findAncestorWidgetOfExactType<TerminalView>() != null;
+  }
+
   /// 文件操作快捷键：在 [Focus.onKeyEvent] 里处理。
   /// 打字/弹窗时必须返回 [KeyEventResult.ignored]，否则会吞掉事件，
   /// 导致文档编辑器的 Ctrl+C/V/A、Delete、Enter 等默认快捷键失效。
@@ -257,7 +266,7 @@ class _MainLayoutState extends ConsumerState<MainLayout> with WindowListener {
     if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
       return KeyEventResult.ignored;
     }
-    if (_isTypingInTextField() || _isInModalDialog()) {
+    if (_isTypingInTextField() || _isInModalDialog() || _isInTerminal()) {
       return KeyEventResult.ignored;
     }
 
