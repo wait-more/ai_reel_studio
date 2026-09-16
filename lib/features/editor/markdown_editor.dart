@@ -648,23 +648,23 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
     if (line != _activeLine) {
       setState(() => _activeLine = line);
     }
-    _updateActiveOutline(line);
+    // 顶部面包屑 / 大纲高亮跟视口滚动，不跟光标。
+  }
+
+  /// 用视口顶部附近行估算当前章节（滚动时动态更新）。
+  int _viewportLineApprox() {
+    final text = _controller.text;
+    final last = countLines(text) - 1;
+    if (last < 0) return 0;
+    final fontSize = ref.read(editorFontSizeProvider);
+    final lineHeight = fontSize * _lineHeightFactor;
+    if (lineHeight <= 0) return 0;
+    return (_scrollOffset / lineHeight).floor().clamp(0, last);
   }
 
   void _refreshActiveOutlineFromViewport() {
     if (!isMarkdownDoc || _outline.isEmpty) return;
-    if (_editorFocus.hasFocus) {
-      _updateActiveOutline(_activeLine);
-      return;
-    }
-    final fontSize = ref.read(editorFontSizeProvider);
-    final lineHeight = fontSize * _lineHeightFactor;
-    if (lineHeight <= 0) return;
-    final approx = (_scrollOffset / lineHeight).floor().clamp(
-          0,
-          countLines(_controller.text) - 1,
-        );
-    _updateActiveOutline(approx);
+    _updateActiveOutline(_viewportLineApprox());
   }
 
   void _updateActiveOutline(int line) {
@@ -680,7 +680,7 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
     _outlineDebounce = Timer(const Duration(milliseconds: 200), () {
       if (!mounted) return;
       final next = parseMarkdownOutline(_controller.text);
-      final idx = activeOutlineIndex(next, _activeLine);
+      final idx = activeOutlineIndex(next, _viewportLineApprox());
       _outline = next;
       _activeOutline = idx;
       if (mounted) setState(() {});
@@ -892,7 +892,7 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
         );
         _outline = isMarkdownDoc ? parseMarkdownOutline(content) : const [];
         _activeLine = lineIndexOfOffset(content, caretFlat);
-        _activeOutline = activeOutlineIndex(_outline, _activeLine);
+        _activeOutline = activeOutlineIndex(_outline, _viewportLineApprox());
         _isDirty = false;
       });
       _freezeSelection = false;
@@ -910,6 +910,7 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
           if ((scroller.offset - target).abs() > 0.5) scroller.jumpTo(target);
           _scrollOffset = target;
         }
+        _refreshActiveOutlineFromViewport();
       });
 
       if (mounted) showGlobalToast(context, '已从磁盘重新加载');
@@ -1000,7 +1001,7 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
         _scrollOffset = target;
         setState(() {
           _activeLine = lineIndexOfOffset(text, caret);
-          _activeOutline = activeOutlineIndex(_outline, _activeLine);
+          _activeOutline = activeOutlineIndex(_outline, _viewportLineApprox());
         });
       }
 
@@ -1120,7 +1121,7 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
         );
         _outline = isMarkdownDoc ? parseMarkdownOutline(content) : const [];
         _activeLine = lineIndexOfOffset(content, caretFlat);
-        _activeOutline = activeOutlineIndex(_outline, _activeLine);
+        _activeOutline = activeOutlineIndex(_outline, _viewportLineApprox());
         _isDirty = false;
         _cleanText = content;
         _rememberedRange = null;

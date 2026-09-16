@@ -61,7 +61,7 @@ List<OutlineHeading> parseMarkdownOutline(String src) {
   return out;
 }
 
-/// 当前应高亮的大纲项：光标/可见行所在章节（最后一个 lineIndex ≤ [line] 的标题）。
+/// 当前应高亮的大纲项：视口/指定行所在章节（最后一个 lineIndex ≤ [line] 的标题）。
 int activeOutlineIndex(List<OutlineHeading> items, int line) {
   if (items.isEmpty) return -1;
   var best = -1;
