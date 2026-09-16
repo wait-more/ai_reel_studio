@@ -28,6 +28,11 @@ class TerminalSession extends ChangeNotifier {
   bool _disposed = false;
   bool _wired = false;
   bool _usePowerShell = true;
+  bool _respawning = false;
+  String? _preferredExecutable;
+  /// 视口最近一次真实行列（来自 TerminalView onResize），软恢复必须用它。
+  int _liveCols = 0;
+  int _liveRows = 0;
 
   /// 会话是否已启动（PTY 已 spawn）。
   bool get isRunning => _pty != null;
@@ -35,19 +40,29 @@ class TerminalSession extends ChangeNotifier {
   String? _workingDirectory;
   String? get workingDirectory => _workingDirectory;
 
+  (int cols, int rows) get _spawnSize {
+    final cols = _liveCols > 0 ? _liveCols : controller.config.cols;
+    final rows = _liveRows > 0 ? _liveRows : controller.config.rows;
+    return (cols < 2 ? 80 : cols, rows < 2 ? 24 : rows);
+  }
+
   /// 启动底层 shell（Windows：优先 PowerShell，失败则回退 cmd）。
   void start({String? executable, String? workingDirectory}) {
     if (_pty != null || _disposed) return;
     _workingDirectory = workingDirectory ?? _workingDirectory;
+    if (executable != null && executable.isNotEmpty) {
+      _preferredExecutable = executable;
+    }
     final targetDir = _workingDirectory;
 
-    final cols = controller.config.cols;
-    final rows = controller.config.rows;
+    final size = _spawnSize;
+    final cols = size.$1;
+    final rows = size.$2;
     final env = Map<String, String>.from(Platform.environment);
 
     if (Platform.isWindows) {
       _startWindows(
-        preferredExecutable: executable,
+        preferredExecutable: executable ?? _preferredExecutable,
         targetDir: targetDir,
         cols: cols,
         rows: rows,
@@ -140,6 +155,7 @@ class TerminalSession extends ChangeNotifier {
 
     _wireController();
     _attachPtyStreams();
+    _applyPtySize();
     _scheduleEnterDirectory(targetDir);
     notifyListeners();
   }
@@ -165,6 +181,7 @@ class TerminalSession extends ChangeNotifier {
     }
     _wireController();
     _attachPtyStreams();
+    _applyPtySize();
     notifyListeners();
   }
 
@@ -172,10 +189,13 @@ class TerminalSession extends ChangeNotifier {
     final pty = _pty;
     if (pty == null) return;
 
+    _ptyOutputSub?.cancel();
     _ptyOutputSub = pty.output.listen(
       controller.write,
       onDone: () {
-        if (!_disposed) writeText('\r\n[进程已退出]\r\n');
+        if (!_disposed && !_respawning) {
+          writeText('\r\n[进程已退出]\r\n');
+        }
       },
       onError: (Object e) {
         if (!_disposed) writeText('\r\n[终端输出错误: $e]\r\n');
@@ -183,7 +203,42 @@ class TerminalSession extends ChangeNotifier {
     );
 
     pty.exitCode.then((code) {
-      if (!_disposed) writeText('\r\n[进程已退出: $code]\r\n');
+      if (_disposed) return;
+      _handleHostExit(code);
+    });
+  }
+
+  /// 宿主 shell 被带走时（例如 PowerShell 执行了 exit），在同一会话内软恢复。
+  void _handleHostExit(int code) {
+    if (_disposed || _respawning) return;
+    _ptyOutputSub?.cancel();
+    _ptyOutputSub = null;
+    _pty = null;
+    writeText('\r\n[进程已退出: $code]\r\n');
+    _respawnHostShell();
+  }
+
+  void _respawnHostShell() {
+    if (_disposed || _respawning) return;
+    _respawning = true;
+    writeText('\x1b[90m[终端宿主已退出，正在同标签恢复…]\x1b[0m\r\n');
+    Future<void>.delayed(const Duration(milliseconds: 120), () {
+      if (_disposed) {
+        _respawning = false;
+        return;
+      }
+      try {
+        start(workingDirectory: _workingDirectory);
+        if (_pty != null) {
+          // 软恢复后必须按当前视口重推行列，否则 TUI（如 OpenCode）会卡在初始 32 行。
+          _applyPtySize();
+          syncViewportSize();
+          writeText('\x1b[90m[终端已恢复，可继续操作]\x1b[0m\r\n');
+        }
+      } finally {
+        _respawning = false;
+        notifyListeners();
+      }
     });
   }
 
@@ -271,8 +326,37 @@ class TerminalSession extends ChangeNotifier {
       _pty?.write(bytes);
     };
     controller.onResize = (cols, rows) {
-      _pty?.resize(rows, cols);
+      if (cols > 0 && rows > 0) {
+        _liveCols = cols;
+        _liveRows = rows;
+      }
+      _applyPtySize();
     };
+  }
+
+  void _applyPtySize() {
+    final pty = _pty;
+    if (pty == null) return;
+    final cols = _liveCols > 0 ? _liveCols : controller.config.cols;
+    final rows = _liveRows > 0 ? _liveRows : controller.config.rows;
+    if (cols < 2 || rows < 2) return;
+    try {
+      pty.resize(rows, cols);
+    } catch (_) {}
+  }
+
+  /// 在布局稳定后再次把视口尺寸推给 PTY（软恢复 / 启动智能体后用）。
+  void syncViewportSize({int attempts = 6}) {
+    void poke(int left) {
+      if (_disposed || left < 0) return;
+      _applyPtySize();
+      if (left == 0) return;
+      Future<void>.delayed(const Duration(milliseconds: 80), () {
+        poke(left - 1);
+      });
+    }
+
+    poke(attempts);
   }
 
   /// 向终端缓冲区写入纯文本（含 ANSI）。
@@ -291,6 +375,15 @@ class TerminalSession extends ChangeNotifier {
     if (text.isEmpty) return;
     _pty?.write(Uint8List.fromList(utf8.encode(text)));
   }
+
+  /// 写入原始字节（如 Ctrl+C = 0x03），用于中断/退出子进程而不杀 PTY。
+  void sendRaw(List<int> bytes) {
+    if (bytes.isEmpty) return;
+    _pty?.write(Uint8List.fromList(bytes));
+  }
+
+  /// 发送 Ctrl+C。
+  void sendInterrupt() => sendRaw(const [0x03]);
 
   /// 读取终端活动屏纯文本（供智能体检测），取末尾若干行。
   String recentBufferText({int maxLines = 48}) {
