@@ -5,7 +5,7 @@
 
 #define MyAppName "AIReelStudio"
 #ifndef MyAppVersion
-  #define MyAppVersion "0.1.0"
+  #define MyAppVersion "0.1.1"
 #endif
 #define MyAppPublisher "AIReelStudio"
 #define MyAppExeName "ai_reel_studio.exe"

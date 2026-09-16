@@ -2,8 +2,8 @@
 
 面向 **AI 短剧 / 短视频** 的本地创作工作台：在真实项目目录上，把「看目录、改剧本、预览素材、跟 Agent 协作、调 ComfyUI」收进同一个三栏窗口。
 
-> 版本 **v0.1.0** · Windows 优先 · 可用预览  
-> 最后更新：2026-09-10
+> 版本 **v0.1.1** · Windows 优先 · 可用预览  
+> 最后更新：2026-09-16
 
 ---
 
@@ -78,8 +78,8 @@
 
 **用安装包（推荐）**
 
-- 安装程序：`dist/AIReelStudio-0.1.0-Setup.exe`  
-- 绿色包：`dist/AIReelStudio-0.1.0-windows-x64.zip`（解压即用）
+- 安装程序：`dist/AIReelStudio-0.1.1-Setup.exe`  
+- 绿色包：`dist/AIReelStudio-0.1.1-windows-x64.zip`（解压即用）
 
 **从源码跑**
 
