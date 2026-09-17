@@ -64,6 +64,7 @@ Future<String?> showEditorTabMenu({
   required Offset globalPosition,
   required bool canCloseOthers,
   required bool canCloseRight,
+  bool isPreview = false,
 }) async {
   registerPeerOverlayMenuDismisser(dismissEditorTabMenu);
   dismissFsContextMenu();
@@ -172,6 +173,14 @@ Future<String?> showEditorTabMenu({
           icon: Icons.cancel_outlined,
           label: '关闭全部',
         ),
+        if (isPreview) ...[
+          divider(),
+          item(
+            value: 'pin',
+            icon: Icons.push_pin_outlined,
+            label: '固定',
+          ),
+        ],
         divider(),
         item(
           value: 'reveal',

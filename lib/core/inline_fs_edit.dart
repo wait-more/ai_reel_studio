@@ -285,6 +285,14 @@ void _retargetOpenDocs(
       for (final e in drafts.entries) mapPath(e.key): e.value,
     };
   }
+
+  final preview = ref.read(previewTabPathProvider);
+  if (preview != null) {
+    final mapped = mapPath(preview);
+    if (mapped != preview) {
+      ref.read(previewTabPathProvider.notifier).state = mapped;
+    }
+  }
 }
 
 /// 原地文件名输入：描边方框，文件默认只选中主名。

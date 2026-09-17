@@ -29,6 +29,10 @@ void main() async {
   if (workspace.openTabs.isNotEmpty) {
     container.read(openTabsProvider.notifier).state = workspace.openTabs;
   }
+  if (workspace.previewTabPath != null) {
+    container.read(previewTabPathProvider.notifier).state =
+        workspace.previewTabPath;
+  }
   if (workspace.selectedFile != null) {
     container.read(selectedFileProvider.notifier).state = workspace.selectedFile;
   }

@@ -20,6 +20,9 @@ final assetsRevealFilesProvider = StateProvider<List<String>?>((ref) => null);
 /// 已打开的 Tab 文件路径列表
 final openTabsProvider = StateProvider<List<String>>((ref) => []);
 
+/// 当前预览标签（斜体、可被下一次预览打开替换）；须属于 [openTabsProvider]。
+final previewTabPathProvider = StateProvider<String?>((ref) => null);
+
 /// 删除文件或目录后，关闭受影响的编辑器 Tab，并清理脏标记 / 视图状态。
 void closeOpenDocumentsAffectedBy(
   ProviderContainer container, {
@@ -41,6 +44,11 @@ void closeOpenDocumentsAffectedBy(
   final newTabs = tabs.where((t) => !affected(t)).toList();
   if (newTabs.length != tabs.length) {
     container.read(openTabsProvider.notifier).state = newTabs;
+  }
+
+  final preview = container.read(previewTabPathProvider);
+  if (preview != null && affected(preview)) {
+    container.read(previewTabPathProvider.notifier).state = null;
   }
 
   final dirty = container.read(dirtyFilesProvider);

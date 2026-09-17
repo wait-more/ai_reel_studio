@@ -10,6 +10,7 @@ import 'package:path/path.dart' as p;
 
 import '../../core/asset_panel_prefs.dart';
 import '../../core/config.dart';
+import '../../core/editor_tabs.dart';
 import '../../core/file_actions.dart';
 import '../../core/fs_context_menu.dart';
 import '../../core/fs_drag.dart';
@@ -644,7 +645,7 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
         if (target.isDir) {
           _enterDir(target.path);
         } else {
-          _openFileEntry(target.path);
+          _openFileEntry(target.path, pin: true);
         }
       },
       onChanged: () {
@@ -1285,15 +1286,7 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
             onCommitted: (created) {
               _reloadAndSyncTree();
               if (createEdit.kind == InlineFsEditKind.newDocument) {
-                ref.read(selectedFileProvider.notifier).state = created;
-                final tabs = ref.read(openTabsProvider);
-                if (!tabs.contains(created)) {
-                  ref.read(openTabsProvider.notifier).state = [
-                    ...tabs,
-                    created
-                  ];
-                }
-                ref.read(contentModeProvider.notifier).state = 'editor';
+                openEditorTabRef(ref, path: created, pin: true);
               }
             },
           );
@@ -1409,7 +1402,7 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
         selectedItems: _selectedItems(),
         onSelect: (toggle) => _selectPath(entity.path, toggle: toggle),
         onEnterDir: _enterDir,
-        onOpenFile: _openFileEntry,
+        onOpenFile: (p) => _openFileEntry(p, pin: true),
         onChanged: () {
           _clearSelection();
           _reloadAndSyncTree();
@@ -1564,17 +1557,11 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
   }
 
   
-/// 软件内打开文件：.md 用编辑器，图片弹预览，其余走系统默认程序。
-  void _openFileEntry(String path) {
+  /// 软件内打开文件：.md 用编辑器，图片弹预览，其余走系统默认程序。
+  void _openFileEntry(String path, {bool pin = false}) {
     switch (classifyMedia(path)) {
       case MediaKind.markdown:
-        // 软件内用 Markdown 编辑器打开（文档 Tab 并存，素材视图保留）
-        ref.read(selectedFileProvider.notifier).state = path;
-        final tabs = ref.read(openTabsProvider);
-        if (!tabs.contains(path)) {
-          ref.read(openTabsProvider.notifier).state = [...tabs, path];
-        }
-        ref.read(contentModeProvider.notifier).state = 'editor';
+        openEditorTabRef(ref, path: path, pin: pin);
         return;
       case MediaKind.image:
         showImageViewerDialog(context, path);

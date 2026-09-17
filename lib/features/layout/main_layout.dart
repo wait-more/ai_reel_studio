@@ -210,6 +210,7 @@ class _MainLayoutState extends ConsumerState<MainLayout> with WindowListener {
     final snap = WorkspaceSnapshot(
       expandedPaths: ref.read(expandedTreePathsProvider),
       openTabs: ref.read(openTabsProvider),
+      previewTabPath: ref.read(previewTabPathProvider),
       selectedFile: ref.read(selectedFileProvider),
       selectedDir: ref.read(selectedDirProvider),
       contentMode: ref.read(contentModeProvider),
@@ -346,6 +347,7 @@ class _MainLayoutState extends ConsumerState<MainLayout> with WindowListener {
 
     // 中间栏 + 目录树展开状态变更 → 去抖持久化
     ref.listen(openTabsProvider, (_, __) => _persistWorkspace());
+    ref.listen(previewTabPathProvider, (_, __) => _persistWorkspace());
     ref.listen(selectedFileProvider, (_, __) => _persistWorkspace());
     ref.listen(selectedDirProvider, (_, __) => _persistWorkspace());
     ref.listen(contentModeProvider, (_, __) => _persistWorkspace());

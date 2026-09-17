@@ -6,8 +6,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/config.dart';
+import '../../core/editor_tabs.dart';
 import '../../core/media_types.dart';
-import '../../core/providers.dart';
 import '../../core/search_utils.dart';
 import '../media/media_preview.dart';
 
@@ -234,12 +234,7 @@ class _GlobalSearchDialogState extends ConsumerState<_GlobalSearchDialog> {
           return;
         case MediaKind.markdown:
         case MediaKind.other:
-          ref.read(selectedFileProvider.notifier).state = path;
-          final tabs = ref.read(openTabsProvider);
-          if (!tabs.contains(path)) {
-            ref.read(openTabsProvider.notifier).state = [...tabs, path];
-          }
-          ref.read(contentModeProvider.notifier).state = 'editor';
+          openEditorTabRef(ref, path: path, pin: false);
       }
     });
   }

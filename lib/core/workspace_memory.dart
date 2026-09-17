@@ -48,6 +48,8 @@ class EditorViewState {
 class WorkspaceSnapshot {
   final List<String> expandedPaths;
   final List<String> openTabs;
+  /// Cursor 风格预览标签（斜体、可被替换）；须属于 [openTabs]。
+  final String? previewTabPath;
   final String? selectedFile;
   final String? selectedDir;
   final String contentMode;
@@ -57,6 +59,7 @@ class WorkspaceSnapshot {
   const WorkspaceSnapshot({
     this.expandedPaths = const [],
     this.openTabs = const [],
+    this.previewTabPath,
     this.selectedFile,
     this.selectedDir,
     this.contentMode = 'editor',
@@ -66,6 +69,7 @@ class WorkspaceSnapshot {
   Map<String, dynamic> toJson() => {
         'expandedPaths': expandedPaths,
         'openTabs': openTabs,
+        if (previewTabPath != null) 'previewTabPath': previewTabPath,
         'selectedFile': selectedFile,
         'selectedDir': selectedDir,
         'contentMode': contentMode,
@@ -101,6 +105,7 @@ class WorkspaceSnapshot {
     return WorkspaceSnapshot(
       expandedPaths: asStringList(json['expandedPaths']),
       openTabs: asStringList(json['openTabs']),
+      previewTabPath: json['previewTabPath'] as String?,
       selectedFile: json['selectedFile'] as String?,
       selectedDir: json['selectedDir'] as String?,
       contentMode: (mode == 'assets' || mode == 'editor' || mode == 'comfy')
@@ -130,6 +135,11 @@ class WorkspaceSnapshot {
     }
 
     final tabs = openTabs.where(alive).toList();
+    final preview = (previewTabPath != null &&
+            tabs.contains(previewTabPath) &&
+            alive(previewTabPath!))
+        ? previewTabPath
+        : null;
     final file = (selectedFile != null && alive(selectedFile!))
         ? selectedFile
         : (tabs.isNotEmpty ? tabs.last : null);
@@ -142,6 +152,7 @@ class WorkspaceSnapshot {
     return WorkspaceSnapshot(
       expandedPaths: expandedPaths.where(alive).toList(),
       openTabs: tabs,
+      previewTabPath: preview,
       selectedFile: file,
       selectedDir: dir,
       contentMode: contentMode,

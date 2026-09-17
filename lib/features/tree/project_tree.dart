@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/config.dart';
 import '../../core/directory_parser.dart';
 import '../../core/directory_watcher.dart';
+import '../../core/editor_tabs.dart';
 import '../../core/fs_context_menu.dart';
 import '../../core/fs_drag.dart';
 import '../../core/inline_fs_edit.dart';
@@ -479,12 +480,7 @@ class _ProjectTreeState extends ConsumerState<ProjectTree> {
         return;
       case MediaKind.markdown:
       case MediaKind.other:
-        ref.read(selectedFileProvider.notifier).state = item.path;
-        final tabs = ref.read(openTabsProvider);
-        if (!tabs.contains(item.path)) {
-          ref.read(openTabsProvider.notifier).state = [...tabs, item.path];
-        }
-        ref.read(contentModeProvider.notifier).state = 'editor';
+        openEditorTabRef(ref, path: item.path, pin: true);
         _setTreeSelection([item]);
     }
   }
@@ -797,9 +793,9 @@ class _TreeNodeWidgetState extends ConsumerState<_TreeNodeWidget> {
   }
 
   
-/// 打开文件：与中间物料栏行为一致——图片弹查看、视频/音频内嵌预览。
-/// 其余（含 .md）进入编辑器。
-  void _openFile(String path) {
+  /// 打开文件：与中间物料栏行为一致——图片弹查看、视频/音频内嵌预览。
+  /// 其余（含 .md）进入编辑器。[pin] 为 true 时固定标签（双击 / 显式打开）。
+  void _openFile(String path, {bool pin = false}) {
     switch (classifyMedia(path)) {
       case MediaKind.image:
         showImageViewerDialog(context, path);
@@ -812,12 +808,7 @@ class _TreeNodeWidgetState extends ConsumerState<_TreeNodeWidget> {
         return;
       case MediaKind.markdown:
       case MediaKind.other:
-        ref.read(selectedFileProvider.notifier).state = path;
-        final tabs = ref.read(openTabsProvider);
-        if (!tabs.contains(path)) {
-          ref.read(openTabsProvider.notifier).state = [...tabs, path];
-        }
-        ref.read(contentModeProvider.notifier).state = 'editor';
+        openEditorTabRef(ref, path: path, pin: pin);
     }
   }
 
@@ -844,7 +835,7 @@ class _TreeNodeWidgetState extends ConsumerState<_TreeNodeWidget> {
       surface: FsShortcutPane.tree,
       onOpen: () async {
         if (isFile) {
-          _openFile(node.path);
+          _openFile(node.path, pin: true);
         } else {
           _selectDir(node.path, forceAssets: true);
         }
@@ -1011,7 +1002,7 @@ class _TreeNodeWidgetState extends ConsumerState<_TreeNodeWidget> {
             displayName: node.name,
             onOpen: () async {
               if (isFile) {
-                _openFile(node.path);
+                _openFile(node.path, pin: true);
               } else {
                 _selectDir(node.path, forceAssets: true);
               }
@@ -1055,10 +1046,18 @@ class _TreeNodeWidgetState extends ConsumerState<_TreeNodeWidget> {
                       child: InkWell(
                         borderRadius: BorderRadius.circular(4),
                         onTap: renaming ? null : () => _onNodeTap(isFile: isFile),
-                        onDoubleTap: isFile || renaming
+                        onDoubleTap: renaming
                             ? null
                             : () {
-                                _toggleExpand();
+                                if (isFile) {
+                                  _setSingleTreeSelection(
+                                    path: node.path,
+                                    isDir: false,
+                                  );
+                                  _openFile(node.path, pin: true);
+                                } else {
+                                  _toggleExpand();
+                                }
                               },
                         onSecondaryTapDown: renaming
                             ? null
@@ -1179,7 +1178,7 @@ class _TreeNodeWidgetState extends ConsumerState<_TreeNodeWidget> {
       return;
     }
     if (edit.kind == InlineFsEditKind.newDocument) {
-      _openFile(created);
+      _openFile(created, pin: true);
     } else if (edit.kind == InlineFsEditKind.newFolder) {
       _selectDir(created);
     }
@@ -1277,15 +1276,7 @@ class _InlineCreateTreeRow extends ConsumerWidget {
                 if (created == null) return;
                 onTreeChanged(edit.parentDir);
                 if (edit.kind == InlineFsEditKind.newDocument) {
-                  ref.read(selectedFileProvider.notifier).state = created;
-                  final tabs = ref.read(openTabsProvider);
-                  if (!tabs.contains(created)) {
-                    ref.read(openTabsProvider.notifier).state = [
-                      ...tabs,
-                      created
-                    ];
-                  }
-                  ref.read(contentModeProvider.notifier).state = 'editor';
+                  openEditorTabRef(ref, path: created, pin: true);
                 } else {
                   ref.read(selectedDirProvider.notifier).state = created;
                 }

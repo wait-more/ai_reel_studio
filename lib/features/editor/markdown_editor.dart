@@ -8,6 +8,7 @@ import 'package:re_editor/re_editor.dart';
 import '../../core/agent_bridge.dart';
 import '../../core/comfy_prompt_bridge.dart';
 import '../../core/editor_tab_menu.dart';
+import '../../core/editor_tabs.dart';
 import '../../core/file_actions.dart';
 import '../../core/providers.dart';
 import '../../core/toast.dart';
@@ -50,13 +51,22 @@ class MarkdownEditor extends ConsumerWidget {
       return _emptyState(context);
     }
 
+    final selectedIndex = selectedFile != null ? tabs.indexOf(selectedFile) : -1;
+    final stackIndex = selectedIndex >= 0 ? selectedIndex : tabs.length - 1;
+
     return Column(
       children: [
         _buildTabBar(context, tabs, selectedFile, ref),
         Expanded(
-          child: selectedFile != null && tabs.contains(selectedFile)
-              ? _FileEditor(key: ValueKey(selectedFile), path: selectedFile)
-              : _emptyState(context),
+          // 每个已开标签各留一个编辑器实例，切换只改 index，避免反复读盘转圈。
+          child: IndexedStack(
+            index: stackIndex,
+            sizing: StackFit.expand,
+            children: [
+              for (final path in tabs)
+                _FileEditor(key: ValueKey(path), path: path),
+            ],
+          ),
         ),
       ],
     );
@@ -65,6 +75,7 @@ class MarkdownEditor extends ConsumerWidget {
   Widget _buildTabBar(
       BuildContext context, List<String> tabs, String? selected, WidgetRef ref) {
     final scheme = Theme.of(context).colorScheme;
+    final preview = ref.watch(previewTabPathProvider);
     return Container(
       height: 36,
       color: scheme.surfaceContainerHighest.withValues(alpha: 0.55),
@@ -97,6 +108,7 @@ class MarkdownEditor extends ConsumerWidget {
         itemBuilder: (context, index) {
           final path = tabs[index];
           final isSelected = path == selected;
+          final isPreview = path == preview;
           final name = path.split(Platform.pathSeparator).last;
           return ReorderableDragStartListener(
             key: ValueKey(path),
@@ -104,8 +116,10 @@ class MarkdownEditor extends ConsumerWidget {
             child: _EditorTabChip(
               title: name,
               selected: isSelected,
+              preview: isPreview,
               onSelect: () =>
                   ref.read(selectedFileProvider.notifier).state = path,
+              onPin: () => pinEditorTabRef(ref, path),
               onClose: () => unawaited(_closeTab(context, path, ref)),
               onContextMenu: (pos) => unawaited(
                 _showTabMenu(context, ref, path: path, index: index, pos: pos),
@@ -122,6 +136,9 @@ class MarkdownEditor extends ConsumerWidget {
     final selected = ref.read(selectedFileProvider);
     final newTabs = tabs.where((t) => t != path).toList();
     ref.read(openTabsProvider.notifier).state = newTabs;
+    if (ref.read(previewTabPathProvider) == path) {
+      ref.read(previewTabPathProvider.notifier).state = null;
+    }
     ref.read(dirtyFilesProvider.notifier).update((s) {
       if (!s.contains(path)) return s;
       return {...s}..remove(path);
@@ -228,6 +245,7 @@ class MarkdownEditor extends ConsumerWidget {
       globalPosition: pos,
       canCloseOthers: tabs.length > 1,
       canCloseRight: index < tabs.length - 1,
+      isPreview: ref.read(previewTabPathProvider) == path,
     );
     if (action == null || !context.mounted) return;
 
@@ -240,6 +258,8 @@ class MarkdownEditor extends ConsumerWidget {
         await _closeTabsToTheRight(context, ref, fromIndex: index);
       case 'closeAll':
         await _closeAllTabs(context, ref);
+      case 'pin':
+        pinEditorTabRef(ref, path);
       case 'reveal':
         await revealInExplorer(path);
       case 'revealTree':
@@ -263,6 +283,7 @@ class MarkdownEditor extends ConsumerWidget {
     required String keep,
   }) async {
     ref.read(selectedFileProvider.notifier).state = keep;
+    pinEditorTabRef(ref, keep);
     final targets =
         ref.read(openTabsProvider).where((t) => t != keep).toList();
     for (final path in targets) {
@@ -285,6 +306,7 @@ class MarkdownEditor extends ConsumerWidget {
     if (fromIndex < 0 || fromIndex >= tabs.length) return;
     final keep = tabs[fromIndex];
     ref.read(selectedFileProvider.notifier).state = keep;
+    pinEditorTabRef(ref, keep);
     final targets = tabs.sublist(fromIndex + 1);
     for (final path in targets) {
       if (!context.mounted) return;
@@ -337,14 +359,18 @@ class _EditorTabChip extends StatefulWidget {
   const _EditorTabChip({
     required this.title,
     required this.selected,
+    required this.preview,
     required this.onSelect,
+    required this.onPin,
     required this.onClose,
     required this.onContextMenu,
   });
 
   final String title;
   final bool selected;
+  final bool preview;
   final VoidCallback onSelect;
+  final VoidCallback onPin;
   final VoidCallback onClose;
   final ValueChanged<Offset> onContextMenu;
 
@@ -400,6 +426,7 @@ class _EditorTabChipState extends State<_EditorTabChip> {
           color: Colors.transparent,
           child: InkWell(
             onTap: widget.onSelect,
+            onDoubleTap: widget.preview ? widget.onPin : null,
             onSecondaryTapDown: (d) => _menuPos = d.globalPosition,
             onSecondaryTap: () => widget.onContextMenu(_menuPos),
             borderRadius: BorderRadius.circular(8),
@@ -428,6 +455,9 @@ class _EditorTabChipState extends State<_EditorTabChip> {
                         height: 1.2,
                         fontWeight:
                             selected ? FontWeight.w600 : FontWeight.w400,
+                        fontStyle: widget.preview
+                            ? FontStyle.italic
+                            : FontStyle.normal,
                         color: fg,
                       ),
                     ),
@@ -960,6 +990,7 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
           if (s.contains(widget.path)) return s;
           return {...s, widget.path};
         });
+        pinEditorTabRef(ref, widget.path);
       }
       await _captureDiskFingerprint();
       _registerAgentRef();
@@ -1151,6 +1182,8 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
       if (s.contains(widget.path)) return s;
       return {...s, widget.path};
     });
+    // 一改就固定，与 Cursor 预览标签升格一致。
+    pinEditorTabRef(ref, widget.path);
   }
 
   void _clearDirtyLocal() {
@@ -1572,23 +1605,11 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
                       ),
                       onTap: () {
                         if (isDir) {
-                          ref.read(selectedFileProvider.notifier).state =
-                              entry.path;
-                          final tabs = ref.read(openTabsProvider);
-                          if (!tabs.contains(entry.path)) {
-                            ref.read(openTabsProvider.notifier).state =
-                                [...tabs, entry.path];
-                          }
+                          // 目录不进文档标签
                         } else if (isMedia) {
                           _showMediaPreview(context, entry.path, name);
                         } else if (name.endsWith('.md')) {
-                          ref.read(selectedFileProvider.notifier).state =
-                              entry.path;
-                          final tabs = ref.read(openTabsProvider);
-                          if (!tabs.contains(entry.path)) {
-                            ref.read(openTabsProvider.notifier).state =
-                                [...tabs, entry.path];
-                          }
+                          openEditorTabRef(ref, path: entry.path, pin: false);
                         }
                       },
                     );
