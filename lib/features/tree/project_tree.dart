@@ -15,6 +15,23 @@ import '../../core/progress.dart';
 import '../../core/providers.dart';
 import '../media/media_preview.dart';
 
+/// 目录树行定位用：按路径相等匹配，避免 [GlobalObjectKey] 对临时字符串用 identical。
+class _TreeRowKey extends GlobalKey {
+  const _TreeRowKey(this.path) : super.constructor();
+
+  final String path;
+
+  @override
+  bool operator ==(Object other) =>
+      other is _TreeRowKey && other.path == path;
+
+  @override
+  int get hashCode => path.hashCode;
+
+  @override
+  String toString() => '[_TreeRowKey $path]';
+}
+
 class ProjectTree extends ConsumerStatefulWidget {
   const ProjectTree({super.key});
 
@@ -25,7 +42,11 @@ class ProjectTree extends ConsumerStatefulWidget {
 class _ProjectTreeState extends ConsumerState<ProjectTree> {
   final _searchController = TextEditingController();
   final FocusNode _panelFocus = FocusNode(debugLabel: 'projectTree');
+  final ScrollController _treeScrollController = ScrollController();
   String _searchText = '';
+
+  /// 目录树单行大约高度（图标 16 + 上下 padding 4*2），用于估算滚动偏移。
+  static const double _kTreeRowExtent = 28.0;
 
   @override
   void initState() {
@@ -52,7 +73,7 @@ class _ProjectTreeState extends ConsumerState<ProjectTree> {
         final anchor = ref.read(selectedFileProvider) ??
             ref.read(selectedDirProvider);
         if (anchor != null && anchor.isNotEmpty) {
-          _expandTo(anchor);
+          unawaited(_expandTo(anchor));
         }
         _seedTreeSelectionFromWorkspace();
         _publishExpandedPaths();
@@ -139,7 +160,7 @@ class _ProjectTreeState extends ConsumerState<ProjectTree> {
       setState(() {});
       _publishExpandedPaths();
       // 3. 锚定到触发变更的位置
-      _expandTo(anchorPath);
+      unawaited(_expandTo(anchorPath));
     });
   }
 
@@ -178,9 +199,8 @@ class _ProjectTreeState extends ConsumerState<ProjectTree> {
 
   String? _lastSyncedPath;
 
-  
-/// 根据目标路径，把左侧树的祖先节点逐级展开（含懒加载子节点）。
-  void _expandTo(String? targetPath) {
+  /// 根据目标路径，把左侧树的祖先节点逐级展开（含懒加载子节点）。
+  Future<void> _expandTo(String? targetPath) async {
     if (targetPath == null || targetPath.isEmpty) return;
     if (targetPath == _lastSyncedPath) return;
     _lastSyncedPath = targetPath;
@@ -199,14 +219,13 @@ class _ProjectTreeState extends ConsumerState<ProjectTree> {
         .where((s) => s.isNotEmpty)
         .toList();
 
-    _expandInto(root, segments, 0, sep);
+    await _expandInto(root, segments, 0, sep);
   }
 
-  
-/// 递归展开：在 [node].children 中找匹配 [segments[index]] 的子节点。
-/// 展开它并继续深入；必要时异步加载懒加载壳。
-  void _expandInto(
-      ScriptNode node, List<String> segments, int index, String sep) {
+  /// 递归展开：在 [node].children 中找匹配 [segments[index]] 的子节点。
+  /// 展开它并继续深入；必要时异步加载懒加载壳。
+  Future<void> _expandInto(
+      ScriptNode node, List<String> segments, int index, String sep) async {
     if (index >= segments.length) return;
 
     final want = segments[index];
@@ -227,19 +246,123 @@ class _ProjectTreeState extends ConsumerState<ProjectTree> {
       // 懒加载壳：异步加载后再继续展开
       final nodeToExpand = match;
       final shouldExpand = !isFinal;
-      DirectoryParser.loadChildrenAsync(nodeToExpand).then((_) {
-        if (!mounted) return;
-        if (shouldExpand) nodeToExpand.isExpanded = true;
-        setState(() {});
-        _expandInto(nodeToExpand, segments, index + 1, sep);
-        _publishExpandedPaths();
-      });
+      await DirectoryParser.loadChildrenAsync(nodeToExpand);
+      if (!mounted) return;
+      if (shouldExpand) nodeToExpand.isExpanded = true;
+      setState(() {});
+      await _expandInto(nodeToExpand, segments, index + 1, sep);
+      _publishExpandedPaths();
       return;
     }
     match.isExpanded = !isFinal ? true : match.isExpanded;
     setState(() {});
-    _expandInto(match, segments, index + 1, sep);
+    await _expandInto(match, segments, index + 1, sep);
     if (isFinal) _publishExpandedPaths();
+  }
+
+  /// 标签「在目录树中定位」：展开后把目标滚进视窗并尽量居中。
+  Future<void> _revealTreePath(String path) async {
+    if (path.isEmpty) return;
+    _lastSyncedPath = null;
+    await _expandTo(path);
+    if (!mounted) return;
+    final node = _findNodeByPath(ref.read(treeRootProvider), path);
+    final isDir = node != null && node.type != ScriptNodeType.file;
+    _setTreeSelection([FsClipboardItem(path: path, isDir: isDir)]);
+    await _scrollTreePathIntoView(path);
+  }
+
+  Future<void> _scrollTreePathIntoView(String path) async {
+    await WidgetsBinding.instance.endOfFrame;
+    if (!mounted) return;
+
+    for (var attempt = 0; attempt < 12; attempt++) {
+      final ctx = _TreeRowKey(path).currentContext;
+      if (ctx != null && ctx.mounted) {
+        if (_isTreeRowFullyVisible(ctx)) return;
+        await Scrollable.ensureVisible(
+          ctx,
+          alignment: 0.5,
+          duration: attempt == 0
+              ? const Duration(milliseconds: 220)
+              : Duration.zero,
+          curve: Curves.easeOutCubic,
+        );
+        return;
+      }
+
+      // 目标所在根节点尚未被 ListView.builder 构建：先按估算偏移跳转。
+      if (_treeScrollController.hasClients) {
+        final estimated = _estimateOffsetForPath(path);
+        if (estimated != null) {
+          final pos = _treeScrollController.position;
+          final view = pos.viewportDimension;
+          final target = (estimated - (view - _kTreeRowExtent) / 2)
+              .clamp(0.0, pos.maxScrollExtent);
+          if ((target - pos.pixels).abs() > 1) {
+            _treeScrollController.jumpTo(target);
+          }
+        }
+      }
+
+      await WidgetsBinding.instance.endOfFrame;
+      if (!mounted) return;
+    }
+  }
+
+  bool _isTreeRowFullyVisible(BuildContext rowContext) {
+    final rowBox = rowContext.findRenderObject();
+    if (rowBox is! RenderBox || !rowBox.hasSize) return false;
+    final scrollable = Scrollable.maybeOf(rowContext);
+    if (scrollable == null) return true;
+    final viewportBox = scrollable.context.findRenderObject();
+    if (viewportBox is! RenderBox || !viewportBox.hasSize) return false;
+
+    final topLeft = rowBox.localToGlobal(Offset.zero, ancestor: viewportBox);
+    final bottom = topLeft.dy + rowBox.size.height;
+    return topLeft.dy >= -0.5 && bottom <= viewportBox.size.height + 0.5;
+  }
+
+  bool _isSameOrUnder(String path, String ancestor) {
+    if (path == ancestor) return true;
+    final sep = Platform.pathSeparator;
+    final prefix = ancestor.endsWith(sep) ? ancestor : '$ancestor$sep';
+    return path.startsWith(prefix);
+  }
+
+  /// 估算目标行相对 ListView 内容顶部的偏移（嵌套 Column 树）。
+  double? _estimateOffsetForPath(String path) {
+    final root = ref.read(treeRootProvider);
+    if (root == null) return null;
+    final visibleRoots = _searchText.isEmpty
+        ? root.children
+        : _filterNodes(root.children);
+    var offset = 4.0; // ListView vertical padding
+
+    bool walk(List<ScriptNode> nodes) {
+      for (final n in nodes) {
+        if (n.path == path) return true;
+        if (_isSameOrUnder(path, n.path)) {
+          offset += _kTreeRowExtent;
+          if (n.isExpanded && walk(n.children)) return true;
+          return false;
+        }
+        offset += _estimateSubtreeExtent(n);
+      }
+      return false;
+    }
+
+    if (!walk(visibleRoots)) return null;
+    return offset;
+  }
+
+  double _estimateSubtreeExtent(ScriptNode node) {
+    var h = _kTreeRowExtent;
+    if (!node.isExpanded) return h;
+    for (final c in node.children) {
+      h += _estimateSubtreeExtent(c);
+    }
+    return h;
   }
 
   Future<void> _ensureInlineAnchorVisible(
@@ -248,7 +371,7 @@ class _ProjectTreeState extends ConsumerState<ProjectTree> {
   }) async {
     if (!mounted || anchor.isEmpty) return;
     _lastSyncedPath = null;
-    _expandTo(anchor);
+    await _expandTo(anchor);
     if (!expandLeaf) return;
     final root = ref.read(treeRootProvider);
     final node = _findNodeByPath(root, anchor);
@@ -267,6 +390,7 @@ class _ProjectTreeState extends ConsumerState<ProjectTree> {
     DirectoryWatcher.instance.stop();
     _searchController.dispose();
     _panelFocus.dispose();
+    _treeScrollController.dispose();
     super.dispose();
   }
 
@@ -429,15 +553,17 @@ class _ProjectTreeState extends ConsumerState<ProjectTree> {
     final root = ref.watch(treeRootProvider);
 
     // 中间视图导航时，左侧树同步展开定位到对应路径。
-    ref.listen(selectedDirProvider, (_, next) => _expandTo(next));
-    ref.listen(selectedFileProvider, (_, next) => _expandTo(next));
+    ref.listen(selectedDirProvider, (_, next) {
+      unawaited(_expandTo(next));
+    });
+    ref.listen(selectedFileProvider, (_, next) {
+      unawaited(_expandTo(next));
+    });
 
-    // 标签「在目录树中定位」：强制展开，即使已是当前文件。
+    // 标签「在目录树中定位」：强制展开并滚进视窗（尽量居中）。
     ref.listen(treeRevealRequestProvider, (prev, next) {
       if (next == null || prev?.nonce == next.nonce) return;
-      _lastSyncedPath = null;
-      _expandTo(next.path);
-      _setTreeSelection([FsClipboardItem(path: next.path, isDir: false)]);
+      unawaited(_revealTreePath(next.path));
     });
 
     // 物料网格发生结构变更时，重建树以保持两边同步
@@ -559,6 +685,7 @@ class _ProjectTreeState extends ConsumerState<ProjectTree> {
     }
 
     return ListView.builder(
+      controller: _treeScrollController,
       padding: const EdgeInsets.symmetric(vertical: 4),
       itemCount: visibleRoots.length + (rootCreateEdit != null ? 1 : 0),
       itemBuilder: (context, index) {
@@ -876,6 +1003,7 @@ class _TreeNodeWidgetState extends ConsumerState<_TreeNodeWidget> {
       mainAxisSize: MainAxisSize.min,
       children: [
         Padding(
+          key: _TreeRowKey(node.path),
           padding: EdgeInsets.only(left: 8.0 + level * 12.0, right: 2),
           child: FsContextMenuTarget(
             path: node.path,
