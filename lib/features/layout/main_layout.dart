@@ -423,51 +423,138 @@ class _MainLayoutState extends ConsumerState<MainLayout> with WindowListener {
   }
 
   Widget _buildModeBar(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
     final mode = ref.watch(contentModeProvider);
     final tabCount = ref.watch(openTabsProvider).length;
     return Container(
-      height: 34,
-      color: Theme.of(context).colorScheme.surfaceContainerLow,
-      padding: const EdgeInsets.symmetric(horizontal: 8),
+      height: 46,
+      color: scheme.surfaceContainerLow,
+      padding: const EdgeInsets.fromLTRB(10, 6, 10, 6),
       child: Row(
         children: [
-          _modeChip(context, 'assets', '素材', mode, ''),
-          const SizedBox(width: 8),
-          _modeChip(context, 'editor', '文档', mode, tabCount > 0 ? ' $tabCount' : ''),
-          const SizedBox(width: 8),
-          _modeChip(context, 'comfy', '生成', mode, ''),
+          DecoratedBox(
+            decoration: BoxDecoration(
+              color: scheme.surface.withValues(alpha: 0.55),
+              borderRadius: BorderRadius.circular(11),
+              border: Border.all(
+                color: scheme.outlineVariant.withValues(alpha: 0.7),
+              ),
+            ),
+            child: Padding(
+              padding: const EdgeInsets.all(3),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  _modeSegment(
+                    context,
+                    value: 'assets',
+                    label: '素材',
+                    icon: Icons.photo_library_outlined,
+                    current: mode,
+                  ),
+                  _modeSegment(
+                    context,
+                    value: 'editor',
+                    label: '文档',
+                    icon: Icons.article_outlined,
+                    current: mode,
+                    count: tabCount > 0 ? tabCount : null,
+                  ),
+                  _modeSegment(
+                    context,
+                    value: 'comfy',
+                    label: '生成',
+                    icon: Icons.auto_awesome_outlined,
+                    current: mode,
+                  ),
+                ],
+              ),
+            ),
+          ),
           const Spacer(),
         ],
       ),
     );
   }
 
-  Widget _modeChip(BuildContext context, String value, String label,
-      String current, String badge) {
+  Widget _modeSegment(
+    BuildContext context, {
+    required String value,
+    required String label,
+    required IconData icon,
+    required String current,
+    int? count,
+  }) {
+    final scheme = Theme.of(context).colorScheme;
     final active = current == value;
-    return InkWell(
-      onTap: () {
-        ref.read(contentModeProvider.notifier).state = value;
-        if (value == 'editor') {
-          final tabs = ref.read(openTabsProvider);
-          final sel = ref.read(selectedFileProvider);
-          if (tabs.isNotEmpty && (sel == null || !tabs.contains(sel))) {
-            ref.read(selectedFileProvider.notifier).state = tabs.last;
+    final fg = active ? scheme.onPrimary : scheme.onSurfaceVariant;
+    final badgeBg = active
+        ? scheme.onPrimary.withValues(alpha: 0.22)
+        : scheme.surfaceContainerHighest;
+    final badgeFg = active ? scheme.onPrimary : scheme.onSurfaceVariant;
+
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: () {
+          ref.read(contentModeProvider.notifier).state = value;
+          if (value == 'editor') {
+            final tabs = ref.read(openTabsProvider);
+            final sel = ref.read(selectedFileProvider);
+            if (tabs.isNotEmpty && (sel == null || !tabs.contains(sel))) {
+              ref.read(selectedFileProvider.notifier).state = tabs.last;
+            }
           }
-        }
-      },
-      borderRadius: BorderRadius.circular(6),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-        decoration: BoxDecoration(
-          color: active ? Theme.of(context).colorScheme.primaryContainer : null,
-          borderRadius: BorderRadius.circular(6),
-        ),
-        child: Text(
-          '$label$badge',
-          style: TextStyle(
-            fontSize: 12,
-            fontWeight: active ? FontWeight.w600 : FontWeight.w400,
+        },
+        borderRadius: BorderRadius.circular(8),
+        hoverColor: active
+            ? scheme.onPrimary.withValues(alpha: 0.08)
+            : scheme.onSurface.withValues(alpha: 0.06),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 160),
+          curve: Curves.easeOutCubic,
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+          decoration: BoxDecoration(
+            color: active ? scheme.primary : Colors.transparent,
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, size: 15, color: fg),
+              const SizedBox(width: 6),
+              Text(
+                label,
+                style: TextStyle(
+                  fontSize: 13,
+                  height: 1.1,
+                  fontWeight: active ? FontWeight.w700 : FontWeight.w500,
+                  color: fg,
+                  letterSpacing: active ? 0.2 : 0,
+                ),
+              ),
+              if (count != null) ...[
+                const SizedBox(width: 6),
+                Container(
+                  constraints: const BoxConstraints(minWidth: 18),
+                  padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                  decoration: BoxDecoration(
+                    color: badgeBg,
+                    borderRadius: BorderRadius.circular(9),
+                  ),
+                  child: Text(
+                    '$count',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      fontSize: 11,
+                      height: 1.15,
+                      fontWeight: FontWeight.w700,
+                      color: badgeFg,
+                    ),
+                  ),
+                ),
+              ],
+            ],
           ),
         ),
       ),
@@ -548,7 +635,7 @@ class _MainLayoutState extends ConsumerState<MainLayout> with WindowListener {
         cursor: SystemMouseCursors.resizeColumn,
         child: Container(
           width: 3,
-          color: Theme.of(context).dividerColor.withOpacity(0.2),
+          color: Theme.of(context).dividerColor.withValues(alpha: 0.2),
         ),
       ),
     );
