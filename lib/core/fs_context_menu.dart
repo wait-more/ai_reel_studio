@@ -258,6 +258,12 @@ Future<void> showFsContextMenu({
             icon: Icons.open_in_new,
             label: isDir ? '在当前目录查看' : '打开',
           ),
+          if (surface == FsShortcutPane.tree)
+            item(
+              value: 'viewInAssets',
+              icon: Icons.photo_library_outlined,
+              label: '在素材栏里查看',
+            ),
           item(
             value: 'reveal',
             icon: Icons.folder_open,
@@ -507,6 +513,18 @@ Future<void> runFsAction({
   switch (action) {
     case 'open':
       await onOpen();
+      break;
+    case 'viewInAssets':
+      {
+        final targetDir = isDir ? path : File(path).parent.path;
+        if (!isDir) {
+          container.read(assetsRevealFilesProvider.notifier).state = [path];
+        } else {
+          container.read(assetsRevealFilesProvider.notifier).state = null;
+        }
+        container.read(selectedDirProvider.notifier).state = targetDir;
+        container.read(contentModeProvider.notifier).state = 'assets';
+      }
       break;
     case 'reveal':
       await revealInExplorer(path);
