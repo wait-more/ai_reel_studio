@@ -69,8 +69,6 @@ class OpenCodeSessionInfo {
   }
 }
 
-String? _cachedDbPath;
-DateTime? _cachedDbPathAt;
 List<OpenCodeSessionInfo>? _cachedSessions;
 String? _cachedSessionsKey;
 DateTime? _cachedSessionsAt;
@@ -99,37 +97,8 @@ bool openCodePathsEqual(String? a, String? b) {
   return na == nb;
 }
 
-Future<String> _openCodeDbPath() async {
-  final now = DateTime.now();
-  if (_cachedDbPath != null &&
-      _cachedDbPathAt != null &&
-      now.difference(_cachedDbPathAt!) < const Duration(minutes: 10)) {
-    return _cachedDbPath!;
-  }
-  final result = await Process.run(
-    'opencode',
-    ['db', 'path'],
-    runInShell: true,
-    stdoutEncoding: utf8,
-    stderrEncoding: utf8,
-  );
-  if (result.exitCode != 0) {
-    throw StateError(
-      'opencode db path 失败 (${result.exitCode}): ${result.stderr}'.trim(),
-    );
-  }
-  final path = (result.stdout as String).trim();
-  if (path.isEmpty) {
-    throw StateError('opencode db path 为空');
-  }
-  _cachedDbPath = path;
-  _cachedDbPathAt = now;
-  return path;
-}
-
 Future<List<Map<String, dynamic>>> _runOpenCodeDbJson(String sql) async {
-  // 先确保 db 可解析（顺带暖缓存）；查询仍走官方 CLI，避免自己链 SQLite。
-  await _openCodeDbPath();
+  // 直接 `opencode db <sql>`，由 CLI 自己找库；不再先跑一次 db path。
   final result = await Process.run(
     'opencode',
     ['db', sql, '--format', 'json'],
@@ -150,6 +119,14 @@ Future<List<Map<String, dynamic>>> _runOpenCodeDbJson(String sql) async {
     for (final item in decoded)
       if (item is Map) Map<String, dynamic>.from(item),
   ];
+}
+
+/// 取出内存中的会话列表快照（忽略 20s TTL），供 UI 先渲染再后台刷新。
+List<OpenCodeSessionInfo>? peekOpenCodeSessionCache(String cwd) {
+  final dir = cwd.trim();
+  if (dir.isEmpty || _cachedSessions == null) return null;
+  if (_cachedSessionsKey != normalizeOpenCodePath(dir)) return null;
+  return List<OpenCodeSessionInfo>.of(_cachedSessions!);
 }
 
 /// 列出 [cwd] 对应项目目录下的根会话（按更新时间倒序）。

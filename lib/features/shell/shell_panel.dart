@@ -914,6 +914,7 @@ class _OpenCodeSessionMenuOverlayState extends State<_OpenCodeSessionMenuOverlay
   List<OpenCodeSessionInfo>? _items;
   String? _error;
   bool _loading = true;
+  bool _refreshing = false;
   String? _currentSessionId;
   String? _editingId;
   bool _renaming = false;
@@ -930,6 +931,11 @@ class _OpenCodeSessionMenuOverlayState extends State<_OpenCodeSessionMenuOverlay
     super.initState();
     _currentSessionId = widget.knownSessionId;
     _editFocus.onKeyEvent = _onEditKeyEvent;
+    final peeked = peekOpenCodeSessionCache(widget.cwd);
+    if (peeked != null) {
+      _items = peeked;
+      _loading = false;
+    }
     _load();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) _panelFocus.requestFocus();
@@ -1079,12 +1085,21 @@ class _OpenCodeSessionMenuOverlayState extends State<_OpenCodeSessionMenuOverlay
   }
 
   Future<void> _load({bool forceRefresh = false}) async {
+    final peeked = peekOpenCodeSessionCache(widget.cwd);
+    final hasStale = _items != null || peeked != null;
+
     setState(() {
-      _loading = true;
+      if (_items == null && peeked != null) {
+        _items = peeked;
+      }
+      // 有旧数据：先展示，后台刷新；无数据：全屏转圈。
+      _loading = !hasStale;
+      _refreshing = true;
       _error = null;
       _editingId = null;
       _pendingDeleteId = null;
     });
+
     try {
       final port = widget.serverPort;
       final liveFuture = (port != null && port > 0)
@@ -1101,7 +1116,6 @@ class _OpenCodeSessionMenuOverlayState extends State<_OpenCodeSessionMenuOverlay
       final list = results[0] as List<OpenCodeSessionInfo>;
       final liveId = results[1] as String?;
       final known = widget.knownSessionId ?? _currentSessionId;
-      // live 仅来自 /tui/active-session；没有则退回本地已知（切会话/恢复写入）。
       final current = liveId ?? known;
       if (liveId != null && liveId.isNotEmpty) {
         widget.onActiveSessionResolved?.call(liveId);
@@ -1110,13 +1124,21 @@ class _OpenCodeSessionMenuOverlayState extends State<_OpenCodeSessionMenuOverlay
         _items = list;
         _currentSessionId = current;
         _loading = false;
+        _refreshing = false;
+        _error = null;
       });
       _scrollCurrentIntoView();
     } catch (e) {
       if (!mounted) return;
       setState(() {
-        _error = '$e';
+        // 后台刷新失败时保留已显示的旧列表。
+        if (_items == null) {
+          _error = '$e';
+        } else {
+          _toast('刷新会话列表失败：$e');
+        }
         _loading = false;
+        _refreshing = false;
       });
     }
   }
@@ -1159,6 +1181,7 @@ class _OpenCodeSessionMenuOverlayState extends State<_OpenCodeSessionMenuOverlay
     final size = MediaQuery.sizeOf(context);
     final editing = _editingId != null;
     final pendingDelete = _pendingDeleteId != null;
+    final refreshBusy = _loading || _refreshing;
     return CallbackShortcuts(
       bindings: {
         const SingleActivator(LogicalKeyboardKey.escape): _handleEscape,
@@ -1238,13 +1261,21 @@ class _OpenCodeSessionMenuOverlayState extends State<_OpenCodeSessionMenuOverlay
                             _OverlayHoverTip(
                               message: '刷新',
                               child: IconButton(
-                                onPressed: (_loading ||
+                                onPressed: (refreshBusy ||
                                         _busy ||
                                         editing ||
                                         pendingDelete)
                                     ? null
                                     : () => _load(forceRefresh: true),
-                                icon: const Icon(Icons.refresh, size: 16),
+                                icon: _refreshing
+                                    ? const SizedBox(
+                                        width: 14,
+                                        height: 14,
+                                        child: CircularProgressIndicator(
+                                          strokeWidth: 2,
+                                        ),
+                                      )
+                                    : const Icon(Icons.refresh, size: 16),
                                 color: Colors.white54,
                                 padding: EdgeInsets.zero,
                                 constraints: const BoxConstraints(
