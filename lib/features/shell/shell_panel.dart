@@ -547,8 +547,7 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         if (agentish) ...[
-                          const Icon(Icons.smart_toy_outlined,
-                              size: 12, color: Colors.lightGreenAccent),
+                          _agentBrandIcon(tab.launchedAgentHint),
                           const SizedBox(width: 4),
                         ],
                         Text(
@@ -859,8 +858,7 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
                       children: [
                         for (final cmd in commands) ...[
                           ActionChip(
-                            avatar: const Icon(Icons.play_arrow,
-                                size: 14, color: Colors.white70),
+                            avatar: _startCmdAvatar(cmd),
                             label: Text(cmd.name,
                                 style: const TextStyle(fontSize: 11)),
                             backgroundColor: const Color(0xFF3D3D3D),
@@ -1857,6 +1855,50 @@ class _OverlayHoverTipState extends State<_OverlayHoverTip> {
       ),
     );
   }
+}
+
+/// 按智能体 hint 选品牌图标；未知自定义命令回退默认机器人图标。
+Widget _agentBrandIcon(String? hint, {double size = 14}) {
+  final h = (hint ?? '').trim().toLowerCase();
+  String? asset;
+  if (h.contains('opencode')) {
+    asset = 'assets/agents/opencode.png';
+  } else if (h.contains('dsh-tui') ||
+      h.contains('dsh_tui') ||
+      h.contains('deepseek')) {
+    asset = 'assets/agents/deepseek.png';
+  }
+  if (asset != null) {
+    return Image.asset(
+      asset,
+      width: size,
+      height: size,
+      filterQuality: FilterQuality.medium,
+      errorBuilder: (_, __, ___) => Icon(
+        Icons.smart_toy_outlined,
+        size: size - 2,
+        color: Colors.lightGreenAccent,
+      ),
+    );
+  }
+  return Icon(
+    Icons.smart_toy_outlined,
+    size: size - 2,
+    color: Colors.lightGreenAccent,
+  );
+}
+
+Widget _startCmdAvatar(StartCmd cmd) {
+  final blob = '${cmd.name} ${cmd.command}'.toLowerCase();
+  if (blob.contains('opencode')) {
+    return _agentBrandIcon('opencode', size: 14);
+  }
+  if (blob.contains('dsh-tui') ||
+      blob.contains('dsh_tui') ||
+      blob.contains('deepseek')) {
+    return _agentBrandIcon('dsh-tui', size: 14);
+  }
+  return const Icon(Icons.play_arrow, size: 14, color: Colors.white70);
 }
 
 /// 单个终端页签。
