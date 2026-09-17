@@ -25,7 +25,7 @@ class ShellTabSnapshot {
     this.openCodeSessionId,
   });
 
-  bool get isAgent => kind == 'agent' || (agentHint != null && agentHint!.isNotEmpty);
+  bool get isAgent => kind == 'agent';
 
   Map<String, dynamic> toJson() => {
         'kind': kind,
@@ -108,10 +108,11 @@ class ShellSessionSnapshot {
         cwd = root;
       }
       cleaned.add(ShellTabSnapshot(
-        kind: t.isAgent ? 'agent' : 'shell',
+        kind: t.kind == 'agent' ? 'agent' : 'shell',
         cwd: cwd,
         launchCommand: t.launchCommand,
-        agentHint: t.agentHint,
+        // 仅 agent 存活时带 hint；已退回 Shell 的 Tab 保留 launchCommand / sessionId 供手动再启。
+        agentHint: t.kind == 'agent' ? t.agentHint : null,
         openCodeSessionId: t.openCodeSessionId,
       ));
     }

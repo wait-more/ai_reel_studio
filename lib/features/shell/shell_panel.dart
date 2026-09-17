@@ -40,16 +40,59 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
     return root.isNotEmpty ? root : null;
   }
 
-  bool _isOpencodeTab(_ShellTab tab) {
+  bool _isOpenCodeRelated(_ShellTab tab) {
     final hint = tab.launchedAgentHint?.toLowerCase() ?? '';
     if (hint.contains('opencode')) return true;
-    final cmd = tab.launchCommand?.toLowerCase() ?? '';
-    return containsAgentToken(cmd, 'opencode');
+    return containsAgentToken(tab.launchCommand ?? '', 'opencode');
+  }
+
+  /// OpenCode「会话」入口：仅当前 Tab 的 TUI 仍存活时显示。
+  bool _isOpencodeTab(_ShellTab tab) {
+    if (!_isOpenCodeRelated(tab)) return false;
+    final port = tab.opencodeServerPort;
+    return port != null && port > 0 && tab.launchedAgentHint != null;
   }
 
   bool get _showSessionEntry {
     if (_tabs.isEmpty) return false;
     return _isOpencodeTab(_tabs[_activeIndex]);
+  }
+
+  /// 该 Tab 此刻是否仍在跑智能体（决定标签样式、是否写入 kind=agent）。
+  bool _tabAgentLive(_ShellTab tab) {
+    final hint = tab.launchedAgentHint;
+    if (hint == null || hint.isEmpty) return false;
+    if (_isOpenCodeRelated(tab)) {
+      final port = tab.opencodeServerPort;
+      return port != null && port > 0;
+    }
+    return true;
+  }
+
+  void _onTabBecameShell() {
+    if (!mounted) return;
+    _dismissSessionMenu();
+    setState(() {});
+    _registerHost();
+    _schedulePersist();
+  }
+
+  _ShellTab _createTab({
+    String? cwd,
+    String? launchCommand,
+    String? launchedAgentHint,
+    int? opencodeServerPort,
+    String? currentOpenCodeSessionId,
+  }) {
+    return _ShellTab(
+      session: TerminalSession()..start(workingDirectory: cwd),
+      cwd: cwd,
+      launchCommand: launchCommand,
+      launchedAgentHint: launchedAgentHint,
+      opencodeServerPort: opencodeServerPort,
+      currentOpenCodeSessionId: currentOpenCodeSessionId,
+      onBecameShell: _onTabBecameShell,
+    );
   }
 
   @override
@@ -66,10 +109,7 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
     ref.read(shellVisibleProvider.notifier).state = snap.shellVisible;
 
     if (snap.tabs.isEmpty) {
-      _tabs.add(_ShellTab(
-        session: TerminalSession()..start(workingDirectory: _projectRoot),
-        cwd: _projectRoot,
-      ));
+      _tabs.add(_createTab(cwd: _projectRoot));
       _activeIndex = 0;
       setState(() => _bootstrapped = true);
       _registerHost();
@@ -85,12 +125,24 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
 
     for (final t in snap.tabs) {
       final cwd = (t.cwd != null && t.cwd!.isNotEmpty) ? t.cwd : _projectRoot;
-      _tabs.add(_ShellTab(
-        session: TerminalSession()..start(workingDirectory: cwd),
+      // 仅关应用时仍在智能体中的 Tab 才恢复 agent 外观并自动重拉；
+      // 已退回 Shell 的保留 launchCommand / sessionId，供手动再启。
+      final wasLiveAgent = t.kind == 'agent';
+      var hint = wasLiveAgent ? t.agentHint : null;
+      if (wasLiveAgent && (hint == null || hint.isEmpty)) {
+        final cmd = t.launchCommand?.trim() ?? '';
+        if (cmd.isNotEmpty) {
+          hint = cmd.split(RegExp(r'\s+')).first;
+        } else {
+          hint = 'Agent';
+        }
+      }
+      _tabs.add(_createTab(
         cwd: cwd,
         launchCommand: t.launchCommand,
-        launchedAgentHint: t.agentHint,
-        opencodeServerPort: parseOpenCodeServerPort(t.launchCommand),
+        launchedAgentHint: hint,
+        // 旧端口已失效；自动重拉时再写入新端口。
+        opencodeServerPort: null,
         currentOpenCodeSessionId: t.openCodeSessionId ??
             parseOpenCodeSessionFlag(t.launchCommand),
       ));
@@ -105,12 +157,15 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
 
     var relaunched = 0;
     for (final tab in _tabs) {
+      // 关应用前已退回 Shell：不自动再跑智能体。
+      if (tab.launchedAgentHint == null || tab.launchedAgentHint!.isEmpty) {
+        continue;
+      }
       var cmd = tab.launchCommand?.trim();
       if (cmd == null || cmd.isEmpty) continue;
       // OpenCode：恢复时重新占端口，并带上上次会话 `-s`。
       if (containsAgentToken(cmd, 'opencode') ||
-          (tab.launchedAgentHint?.toLowerCase().contains('opencode') ??
-              false)) {
+          tab.launchedAgentHint!.toLowerCase().contains('opencode')) {
         final prepared = await prepareOpenCodeTuiLaunch(
           cmd,
           sessionId: tab.currentOpenCodeSessionId,
@@ -130,6 +185,11 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
       relaunched++;
     }
     _restoring = false;
+    if (mounted) {
+      // 恢复里写入了 port / hint，需刷新左下角「会话」入口等。
+      setState(() {});
+      _registerHost();
+    }
     _schedulePersist();
 
     if (relaunched > 0 && mounted) {
@@ -163,13 +223,22 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
   bool _isActiveTabAgent() {
     if (_tabs.isEmpty) return false;
     final tab = _tabs[_activeIndex];
+    final launch = tab.launchCommand ?? '';
+    final hint = tab.launchedAgentHint ?? '';
+    final isOpenCode = hint.toLowerCase().contains('opencode') ||
+        containsAgentToken(launch, 'opencode');
+
+    // OpenCode：退出后软恢复会清掉端口。此时应允许同标签再启，
+    // 不能被滚动缓冲里残留的「opencode」或 launchCommand 记忆误判。
+    if (isOpenCode) {
+      final port = tab.opencodeServerPort;
+      return port != null && port > 0;
+    }
+
     final recent = tab.session.recentBufferText();
     if (terminalTextLooksLikeAgent(recent)) return true;
-    final hint = tab.launchedAgentHint;
-    if (hint != null && hint.isNotEmpty) {
-      if (tab.launchCommand != null && tab.launchCommand!.trim().isNotEmpty) {
-        return true;
-      }
+    if (hint.isNotEmpty) {
+      if (launch.trim().isNotEmpty) return true;
       if (recent.toLowerCase().contains(hint.toLowerCase())) return true;
     }
     return false;
@@ -204,13 +273,10 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
       tabs: [
         for (final t in _tabs)
           ShellTabSnapshot(
-            kind: (t.launchedAgentHint != null &&
-                    t.launchedAgentHint!.isNotEmpty)
-                ? 'agent'
-                : 'shell',
+            kind: _tabAgentLive(t) ? 'agent' : 'shell',
             cwd: t.cwd ?? t.session.workingDirectory,
             launchCommand: t.launchCommand,
-            agentHint: t.launchedAgentHint,
+            agentHint: _tabAgentLive(t) ? t.launchedAgentHint : null,
             openCodeSessionId: t.currentOpenCodeSessionId ??
                 parseOpenCodeSessionFlag(t.launchCommand),
           ),
@@ -232,10 +298,7 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
     _dismissSessionMenu();
     final cwd = workingDirectory ?? _projectRoot;
     setState(() {
-      _tabs.add(_ShellTab(
-        session: TerminalSession()..start(workingDirectory: cwd),
-        cwd: cwd,
-      ));
+      _tabs.add(_createTab(cwd: cwd));
       _activeIndex = _tabs.length - 1;
     });
     _registerHost();
@@ -328,7 +391,13 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
     }
 
     tab.launchCommand = launchCmd;
-    if (includeCd && cwd != null && cwd.isNotEmpty) {
+    // 智能体：PTY 启动/软恢复已在项目根，不必每次再 Set-Location。
+    // 仅当快捷项明确要求「当前选中目录」时才切过去。
+    final needCd = includeCd &&
+        cwd != null &&
+        cwd.isNotEmpty &&
+        (!_isAgentLaunchCmd(cmd) || cmd.cwd == CwdStrategy.selectedDir);
+    if (needCd) {
       final line = Platform.isWindows
           ? powershellCdAndCommand(cwd, launchCmd)
           : 'cd "$cwd" && $launchCmd';
@@ -455,7 +524,8 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
               itemBuilder: (context, index) {
                 final isActive = index == _activeIndex;
                 final tab = _tabs[index];
-                final agentish = tab.launchedAgentHint != null;
+                final agentish = tab.launchedAgentHint != null &&
+                    tab.launchedAgentHint!.isNotEmpty;
                 return InkWell(
                   onTap: () {
                     _dismissSessionMenu();
@@ -1125,7 +1195,8 @@ class _OpenCodeSessionMenuOverlayState extends State<_OpenCodeSessionMenuOverlay
                 elevation: 10,
                 color: const Color(0xFF2B2B2B),
                 borderRadius: BorderRadius.circular(8),
-                clipBehavior: Clip.antiAlias,
+                // 允许行内悬停提示画出 item 边界；不用系统 Tooltip（会二级 Overlay 闪红屏）。
+                clipBehavior: Clip.none,
                 child: ConstrainedBox(
                   constraints: BoxConstraints(
                     minWidth: 280,
@@ -1164,18 +1235,22 @@ class _OpenCodeSessionMenuOverlayState extends State<_OpenCodeSessionMenuOverlay
                                 ],
                               ),
                             ),
-                            IconButton(
-                              tooltip: '刷新',
-                              onPressed:
-                                  (_loading || _busy || editing || pendingDelete)
-                                      ? null
-                                      : () => _load(forceRefresh: true),
-                              icon: const Icon(Icons.refresh, size: 16),
-                              color: Colors.white54,
-                              padding: EdgeInsets.zero,
-                              constraints: const BoxConstraints(
-                                minWidth: 28,
-                                minHeight: 28,
+                            _OverlayHoverTip(
+                              message: '刷新',
+                              child: IconButton(
+                                onPressed: (_loading ||
+                                        _busy ||
+                                        editing ||
+                                        pendingDelete)
+                                    ? null
+                                    : () => _load(forceRefresh: true),
+                                icon: const Icon(Icons.refresh, size: 16),
+                                color: Colors.white54,
+                                padding: EdgeInsets.zero,
+                                constraints: const BoxConstraints(
+                                  minWidth: 28,
+                                  minHeight: 28,
+                                ),
                               ),
                             ),
                           ],
@@ -1260,27 +1335,49 @@ class _OpenCodeSessionMenuOverlayState extends State<_OpenCodeSessionMenuOverlay
     }
     return ListView.builder(
       controller: _scroll,
+      clipBehavior: Clip.none,
       padding: const EdgeInsets.fromLTRB(0, 4, 10, 4),
       itemCount: items.length,
       itemBuilder: (context, index) {
-        final s = items[index];
-        final time = formatOpenCodeSessionTime(s.updated);
-        final isCurrent =
-            _currentSessionId != null && s.id == _currentSessionId;
-        final isEditing = _editingId == s.id;
-        final isPendingDelete = _pendingDeleteId == s.id;
-        return Material(
-          color: isCurrent || isEditing || isPendingDelete
-              ? (isPendingDelete
-                  ? Colors.redAccent.withValues(alpha: 0.12)
-                  : Colors.lightGreenAccent.withValues(alpha: 0.12))
-              : Colors.transparent,
+        return _buildSessionTile(
+          items[index],
+          index: index,
+        );
+      },
+    );
+  }
+
+  Widget _buildSessionTile(OpenCodeSessionInfo s, {required int index}) {
+    final time = formatOpenCodeSessionTime(s.updated);
+    final isCurrent =
+        _currentSessionId != null && s.id == _currentSessionId;
+    final isEditing = _editingId == s.id;
+    final isPendingDelete = _pendingDeleteId == s.id;
+    final accent = _sessionAccentColor(s);
+    final initial = _sessionInitial(s.title);
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (index > 0)
+          const Divider(
+            height: 1,
+            thickness: 1,
+            indent: 44,
+            endIndent: 8,
+            color: Colors.white10,
+          ),
+        Material(
+          color: isPendingDelete
+              ? Colors.redAccent.withValues(alpha: 0.12)
+              : isCurrent || isEditing
+                  ? Colors.lightGreenAccent.withValues(alpha: 0.12)
+                  : Colors.transparent,
           child: InkWell(
             onTap: _busy
                 ? null
                 : () {
                     if (_editingId != null) {
-                      // 编辑中点其它行：只取消编辑，不立刻切换会话。
                       if (_editingId != s.id) _cancelInlineRename();
                       return;
                     }
@@ -1297,239 +1394,436 @@ class _OpenCodeSessionMenuOverlayState extends State<_OpenCodeSessionMenuOverlay
                     _pendingDeleteId != null)
                 ? null
                 : () => _beginInlineRename(s),
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(12, 8, 6, 8),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
+            child: IntrinsicHeight(
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  Row(
-                    crossAxisAlignment: CrossAxisAlignment.center,
-                    children: [
-                      Expanded(
-                        child: isEditing
-                            ? TextField(
-                                controller: _edit,
-                                focusNode: _editFocus,
-                                enabled: !_busy,
-                                autofocus: true,
-                                maxLength: 120,
-                                style: const TextStyle(
-                                  fontSize: 13,
-                                  color: Colors.white,
-                                ),
-                                decoration: const InputDecoration(
-                                  isDense: true,
-                                  counterText: '',
-                                  hintText: '会话标题',
-                                  hintStyle: TextStyle(color: Colors.white38),
-                                  filled: true,
-                                  fillColor: Colors.black38,
-                                  contentPadding: EdgeInsets.symmetric(
-                                    horizontal: 8,
-                                    vertical: 8,
-                                  ),
-                                  border: OutlineInputBorder(
-                                    borderSide: BorderSide.none,
-                                  ),
-                                ),
-                                textInputAction: TextInputAction.done,
-                                onSubmitted: (_) =>
-                                    unawaited(_commitInlineRename(s)),
-                                onTapOutside: (_) => _cancelInlineRename(),
-                              )
-                            : Text(
-                                isPendingDelete
-                                    ? '确认删除「${s.title}」？'
-                                    : s.title,
-                                maxLines: 2,
-                                overflow: TextOverflow.ellipsis,
-                                style: TextStyle(
-                                  fontSize: 13,
-                                  color: isPendingDelete
-                                      ? Colors.redAccent.shade100
-                                      : Colors.white,
-                                  fontWeight: isCurrent || isPendingDelete
-                                      ? FontWeight.w600
-                                      : FontWeight.w400,
-                                ),
-                              ),
-                      ),
-                      if (isCurrent && !isEditing && !isPendingDelete) ...[
-                        const SizedBox(width: 6),
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 6,
-                            vertical: 2,
-                          ),
-                          decoration: BoxDecoration(
-                            color: Colors.lightGreenAccent
-                                .withValues(alpha: 0.22),
-                            borderRadius: BorderRadius.circular(4),
-                          ),
-                          child: const Text(
-                            '当前',
-                            style: TextStyle(
-                              fontSize: 10,
-                              color: Colors.lightGreenAccent,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                        ),
-                      ],
-                      if (isEditing)
-                        TextFieldTapRegion(
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
+                  Container(
+                    width: 3,
+                    color: isCurrent && !isPendingDelete
+                        ? Colors.lightGreenAccent
+                        : Colors.transparent,
+                  ),
+                  Expanded(
+                    child: Padding(
+                      padding: const EdgeInsets.fromLTRB(9, 8, 6, 8),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            crossAxisAlignment: CrossAxisAlignment.center,
                             children: [
-                              IconButton(
-                                onPressed: _busy
-                                    ? null
-                                    : () => unawaited(_commitInlineRename(s)),
-                                icon: _renaming
-                                    ? const SizedBox(
-                                        width: 14,
-                                        height: 14,
-                                        child: CircularProgressIndicator(
-                                          strokeWidth: 2,
+                              if (!isEditing) ...[
+                                Container(
+                                  width: 26,
+                                  height: 26,
+                                  alignment: Alignment.center,
+                                  decoration: BoxDecoration(
+                                    color: isPendingDelete
+                                        ? Colors.redAccent
+                                            .withValues(alpha: 0.35)
+                                        : accent.withValues(alpha: 0.35),
+                                    borderRadius: BorderRadius.circular(6),
+                                    border: isCurrent && !isPendingDelete
+                                        ? Border.all(
+                                            color: Colors.lightGreenAccent
+                                                .withValues(alpha: 0.7),
+                                            width: 1.2,
+                                          )
+                                        : null,
+                                  ),
+                                  child: Text(
+                                    initial,
+                                    style: TextStyle(
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w700,
+                                      color: isPendingDelete
+                                          ? Colors.redAccent.shade100
+                                          : Colors.white,
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                              ],
+                              Expanded(
+                                child: isEditing
+                                    ? TextField(
+                                        controller: _edit,
+                                        focusNode: _editFocus,
+                                        enabled: !_busy,
+                                        autofocus: true,
+                                        maxLength: 120,
+                                        style: const TextStyle(
+                                          fontSize: 13,
+                                          color: Colors.white,
                                         ),
+                                        decoration: const InputDecoration(
+                                          isDense: true,
+                                          counterText: '',
+                                          hintText: '会话标题',
+                                          hintStyle: TextStyle(
+                                            color: Colors.white38,
+                                          ),
+                                          filled: true,
+                                          fillColor: Colors.black38,
+                                          contentPadding: EdgeInsets.symmetric(
+                                            horizontal: 8,
+                                            vertical: 8,
+                                          ),
+                                          border: OutlineInputBorder(
+                                            borderSide: BorderSide.none,
+                                          ),
+                                        ),
+                                        textInputAction: TextInputAction.done,
+                                        onSubmitted: (_) =>
+                                            unawaited(_commitInlineRename(s)),
+                                        onTapOutside: (_) =>
+                                            _cancelInlineRename(),
                                       )
-                                    : const Icon(Icons.check, size: 16),
-                                color: Colors.lightGreenAccent,
-                                padding: EdgeInsets.zero,
-                                visualDensity: VisualDensity.compact,
-                                constraints: const BoxConstraints(
-                                  minWidth: 28,
-                                  minHeight: 28,
-                                ),
+                                    : Text(
+                                        isPendingDelete
+                                            ? '确认删除「${s.title}」？'
+                                            : s.title,
+                                        maxLines: 2,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(
+                                          fontSize: 13,
+                                          color: isPendingDelete
+                                              ? Colors.redAccent.shade100
+                                              : isCurrent
+                                                  ? Colors.white
+                                                  : Colors.white70,
+                                          fontWeight: isCurrent ||
+                                                  isPendingDelete
+                                              ? FontWeight.w600
+                                              : FontWeight.w400,
+                                        ),
+                                      ),
                               ),
-                              IconButton(
-                                onPressed:
-                                    _busy ? null : _cancelInlineRename,
-                                icon: const Icon(Icons.close, size: 16),
-                                color: Colors.white54,
-                                padding: EdgeInsets.zero,
-                                visualDensity: VisualDensity.compact,
-                                constraints: const BoxConstraints(
-                                  minWidth: 28,
-                                  minHeight: 28,
+                              if (isCurrent &&
+                                  !isEditing &&
+                                  !isPendingDelete) ...[
+                                const SizedBox(width: 6),
+                                Container(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 6,
+                                    vertical: 2,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    color: Colors.lightGreenAccent
+                                        .withValues(alpha: 0.22),
+                                    borderRadius: BorderRadius.circular(4),
+                                  ),
+                                  child: const Text(
+                                    '当前',
+                                    style: TextStyle(
+                                      fontSize: 10,
+                                      color: Colors.lightGreenAccent,
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
                                 ),
-                              ),
+                              ],
+                              if (isEditing)
+                                TextFieldTapRegion(
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      IconButton(
+                                        onPressed: _busy
+                                            ? null
+                                            : () => unawaited(
+                                                  _commitInlineRename(s),
+                                                ),
+                                        icon: _renaming
+                                            ? const SizedBox(
+                                                width: 14,
+                                                height: 14,
+                                                child:
+                                                    CircularProgressIndicator(
+                                                  strokeWidth: 2,
+                                                ),
+                                              )
+                                            : const Icon(
+                                                Icons.check,
+                                                size: 16,
+                                              ),
+                                        color: Colors.lightGreenAccent,
+                                        padding: EdgeInsets.zero,
+                                        visualDensity: VisualDensity.compact,
+                                        constraints: const BoxConstraints(
+                                          minWidth: 28,
+                                          minHeight: 28,
+                                        ),
+                                      ),
+                                      IconButton(
+                                        onPressed: _busy
+                                            ? null
+                                            : _cancelInlineRename,
+                                        icon: const Icon(
+                                          Icons.close,
+                                          size: 16,
+                                        ),
+                                        color: Colors.white54,
+                                        padding: EdgeInsets.zero,
+                                        visualDensity: VisualDensity.compact,
+                                        constraints: const BoxConstraints(
+                                          minWidth: 28,
+                                          minHeight: 28,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                )
+                              else if (isPendingDelete)
+                                Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    TextButton(
+                                      onPressed: _busy
+                                          ? null
+                                          : () => unawaited(
+                                                _confirmAndDelete(s),
+                                              ),
+                                      style: TextButton.styleFrom(
+                                        foregroundColor: Colors.redAccent,
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 8,
+                                        ),
+                                        minimumSize: const Size(0, 28),
+                                        tapTargetSize:
+                                            MaterialTapTargetSize.shrinkWrap,
+                                        visualDensity: VisualDensity.compact,
+                                      ),
+                                      child: _deletingId == s.id
+                                          ? const SizedBox(
+                                              width: 14,
+                                              height: 14,
+                                              child: CircularProgressIndicator(
+                                                strokeWidth: 2,
+                                              ),
+                                            )
+                                          : const Text(
+                                              '删除',
+                                              style: TextStyle(fontSize: 12),
+                                            ),
+                                    ),
+                                    TextButton(
+                                      onPressed: _busy
+                                          ? null
+                                          : () => setState(
+                                                () => _pendingDeleteId = null,
+                                              ),
+                                      style: TextButton.styleFrom(
+                                        foregroundColor: Colors.white54,
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 8,
+                                        ),
+                                        minimumSize: const Size(0, 28),
+                                        tapTargetSize:
+                                            MaterialTapTargetSize.shrinkWrap,
+                                        visualDensity: VisualDensity.compact,
+                                      ),
+                                      child: const Text(
+                                        '取消',
+                                        style: TextStyle(fontSize: 12),
+                                      ),
+                                    ),
+                                  ],
+                                )
+                              else
+                                Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    _OverlayHoverTip(
+                                      message: '重命名',
+                                      preferAbove: true,
+                                      child: IconButton(
+                                        onPressed: _busy
+                                            ? null
+                                            : () => _beginInlineRename(s),
+                                        icon: const Icon(
+                                          Icons.edit_outlined,
+                                          size: 14,
+                                        ),
+                                        color: Colors.white38,
+                                        padding: EdgeInsets.zero,
+                                        visualDensity: VisualDensity.compact,
+                                        constraints: const BoxConstraints(
+                                          minWidth: 28,
+                                          minHeight: 28,
+                                        ),
+                                      ),
+                                    ),
+                                    _OverlayHoverTip(
+                                      message: '删除',
+                                      preferAbove: true,
+                                      child: IconButton(
+                                        onPressed: _busy
+                                            ? null
+                                            : () {
+                                                setState(() {
+                                                  _editingId = null;
+                                                  _pendingDeleteId = s.id;
+                                                });
+                                              },
+                                        icon: const Icon(
+                                          Icons.delete_outline,
+                                          size: 14,
+                                        ),
+                                        color: Colors.redAccent
+                                            .withValues(alpha: 0.75),
+                                        padding: EdgeInsets.zero,
+                                        visualDensity: VisualDensity.compact,
+                                        constraints: const BoxConstraints(
+                                          minWidth: 28,
+                                          minHeight: 28,
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
                             ],
                           ),
-                        )
-                      else if (isPendingDelete)
-                        Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            TextButton(
-                              onPressed: _busy
-                                  ? null
-                                  : () => unawaited(_confirmAndDelete(s)),
-                              style: TextButton.styleFrom(
-                                foregroundColor: Colors.redAccent,
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 8,
+                          if (!isEditing &&
+                              !isPendingDelete &&
+                              time.isNotEmpty) ...[
+                            const SizedBox(height: 2),
+                            Padding(
+                              padding: const EdgeInsets.only(left: 34),
+                              child: Text(
+                                time,
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  color: isCurrent
+                                      ? Colors.white54
+                                      : Colors.white38,
                                 ),
-                                minimumSize: const Size(0, 28),
-                                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                                visualDensity: VisualDensity.compact,
-                              ),
-                              child: _deletingId == s.id
-                                  ? const SizedBox(
-                                      width: 14,
-                                      height: 14,
-                                      child: CircularProgressIndicator(
-                                        strokeWidth: 2,
-                                      ),
-                                    )
-                                  : const Text(
-                                      '删除',
-                                      style: TextStyle(fontSize: 12),
-                                    ),
-                            ),
-                            TextButton(
-                              onPressed: _busy
-                                  ? null
-                                  : () => setState(
-                                        () => _pendingDeleteId = null,
-                                      ),
-                              style: TextButton.styleFrom(
-                                foregroundColor: Colors.white54,
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 8,
-                                ),
-                                minimumSize: const Size(0, 28),
-                                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                                visualDensity: VisualDensity.compact,
-                              ),
-                              child: const Text(
-                                '取消',
-                                style: TextStyle(fontSize: 12),
                               ),
                             ),
                           ],
-                        )
-                      else
-                        Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            // 不用 Tooltip：Overlay 内 Tooltip 移出时会触发 layout 断言闪红屏。
-                            IconButton(
-                              onPressed: _busy
-                                  ? null
-                                  : () => _beginInlineRename(s),
-                              icon: const Icon(Icons.edit_outlined, size: 14),
-                              color: Colors.white38,
-                              padding: EdgeInsets.zero,
-                              visualDensity: VisualDensity.compact,
-                              constraints: const BoxConstraints(
-                                minWidth: 28,
-                                minHeight: 28,
-                              ),
-                            ),
-                            IconButton(
-                              onPressed: _busy
-                                  ? null
-                                  : () {
-                                      setState(() {
-                                        _editingId = null;
-                                        _pendingDeleteId = s.id;
-                                      });
-                                    },
-                              icon: const Icon(
-                                Icons.delete_outline,
-                                size: 14,
-                              ),
-                              color: Colors.redAccent.withValues(alpha: 0.75),
-                              padding: EdgeInsets.zero,
-                              visualDensity: VisualDensity.compact,
-                              constraints: const BoxConstraints(
-                                minWidth: 28,
-                                minHeight: 28,
-                              ),
-                            ),
-                          ],
-                        ),
-                    ],
-                  ),
-                  if (!isEditing &&
-                      !isPendingDelete &&
-                      time.isNotEmpty) ...[
-                    const SizedBox(height: 2),
-                    Text(
-                      time,
-                      style: const TextStyle(
-                        fontSize: 11,
-                        color: Colors.white38,
+                        ],
                       ),
                     ),
-                  ],
+                  ),
                 ],
               ),
             ),
           ),
-        );
-      },
+        ),
+      ],
+    );
+  }
+}
+
+String _sessionInitial(String title) {
+  final t = title.trim();
+  if (t.isEmpty) return '?';
+  final iter = t.runes.iterator;
+  if (!iter.moveNext()) return '?';
+  return String.fromCharCode(iter.current).toUpperCase();
+}
+
+Color _sessionAccentColor(OpenCodeSessionInfo session) {
+  const palette = <Color>[
+    Color(0xFF5B8DEF),
+    Color(0xFF6BCB77),
+    Color(0xFFFFB347),
+    Color(0xFFC77DFF),
+    Color(0xFF4ECDC4),
+    Color(0xFFFF6B6B),
+    Color(0xFF45B7D1),
+    Color(0xFFF7B267),
+  ];
+  final h = session.id.hashCode ^ session.title.hashCode;
+  return palette[h.abs() % palette.length];
+}
+
+/// Overlay 菜单内的悬停提示：在本组件树里画气泡，不插入系统 [Tooltip] Overlay，
+/// 避免鼠标移出时 `!debugNeedsLayout` 闪红屏。
+class _OverlayHoverTip extends StatefulWidget {
+  const _OverlayHoverTip({
+    required this.message,
+    required this.child,
+    this.preferAbove = false,
+  });
+
+  final String message;
+  final Widget child;
+  final bool preferAbove;
+
+  @override
+  State<_OverlayHoverTip> createState() => _OverlayHoverTipState();
+}
+
+class _OverlayHoverTipState extends State<_OverlayHoverTip> {
+  bool _hovering = false;
+  bool _visible = false;
+  Timer? _showTimer;
+
+  static const _wait = Duration(milliseconds: 400);
+
+  @override
+  void dispose() {
+    _showTimer?.cancel();
+    super.dispose();
+  }
+
+  void _scheduleShow() {
+    _hovering = true;
+    _showTimer?.cancel();
+    _showTimer = Timer(_wait, () {
+      if (mounted && _hovering) {
+        setState(() => _visible = true);
+      }
+    });
+  }
+
+  void _hide() {
+    _hovering = false;
+    _showTimer?.cancel();
+    if (_visible && mounted) {
+      setState(() => _visible = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return MouseRegion(
+      onEnter: (_) => _scheduleShow(),
+      onExit: (_) => _hide(),
+      child: Stack(
+        clipBehavior: Clip.none,
+        alignment: Alignment.center,
+        children: [
+          widget.child,
+          if (_visible)
+            Positioned(
+              top: widget.preferAbove ? null : 30,
+              bottom: widget.preferAbove ? 30 : null,
+              child: IgnorePointer(
+                child: Material(
+                  elevation: 4,
+                  color: const Color(0xFF111111),
+                  borderRadius: BorderRadius.circular(4),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 4,
+                    ),
+                    child: Text(
+                      widget.message,
+                      style: const TextStyle(
+                        fontSize: 11,
+                        color: Colors.white70,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
     );
   }
 }
@@ -1555,10 +1849,14 @@ class _ShellTab {
     this.launchedAgentHint,
     this.opencodeServerPort,
     this.currentOpenCodeSessionId,
+    VoidCallback? onBecameShell,
   }) {
     session.onHostExited = () {
-      // 端口随进程失效；会话 ID / 启动命令保留，便于重启与列表标「当前」。
+      // 端口随进程失效；清 hint 让标签回到「终端 N」。
+      // launchCommand / sessionId 保留，便于手动再启与重启时按存活策略恢复。
       opencodeServerPort = null;
+      launchedAgentHint = null;
+      onBecameShell?.call();
     };
   }
 
