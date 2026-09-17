@@ -568,6 +568,7 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
 
   void _onEditorFocusChanged() {
     if (_editorFocus.hasFocus) {
+      _registerAgentRef();
       final pin = _rememberedValidSelection();
       if (pin != null) {
         _freezeSelection = true;
@@ -783,6 +784,9 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
 
   void _registerAgentRef() {
     if (_isDir) return;
+    // IndexedStack 会保活所有标签；只能让「当前选中」标签占用引用回调，
+    // 否则后台预览页加载/磁盘刷新会盖住固定标签的路径。
+    if (ref.read(selectedFileProvider) != widget.path) return;
     ref.read(agentRefBuilderProvider.notifier).state = () {
       final sel = _effectiveSelection();
       final a = sel.base < sel.extent ? sel.base : sel.extent;
@@ -1213,6 +1217,11 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
     ref.listen<int>(discardUnsavedEditsTickProvider, (prev, next) {
       if (prev == next) return;
       unawaited(_discardUnsavedEdits());
+    });
+    ref.listen<String?>(selectedFileProvider, (prev, next) {
+      if (next == widget.path) {
+        _registerAgentRef();
+      }
     });
 
     if (_loading) {
