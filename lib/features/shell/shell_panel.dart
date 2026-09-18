@@ -10,8 +10,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/agent_bridge.dart';
 import '../../core/config.dart';
+import '../../core/dsh_profile_heal.dart';
 import '../../core/opencode_sessions.dart';
 import '../../core/providers.dart';
+import '../../core/shell_env.dart';
 import '../../core/shell_session_memory.dart';
 import '../../core/toast.dart';
 import 'terminal_session.dart';
@@ -102,6 +104,9 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
   }
 
   Future<void> _bootstrap() async {
+    // 尽早拉注册表 PATH，后续新建 PTY 与系统终端更一致。
+    unawaited(WindowsPathCache.instance.refresh());
+
     final root = _projectRoot ?? '';
     final snap = await ShellSessionMemory.instance.loadFor(root);
     if (!mounted) return;
@@ -174,6 +179,9 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
         tab.launchCommand = prepared.command;
         tab.opencodeServerPort = prepared.port;
         tab.currentOpenCodeSessionId = prepared.sessionId;
+      } else if (shouldHealDshProfileForCommand(cmd) ||
+          shouldHealDshProfileForCommand(tab.launchedAgentHint ?? '')) {
+        await ensureDshTuiLaunchReady();
       }
       final label = tab.launchedAgentHint ?? cmd.split(RegExp(r'\s+')).first;
       tab.session.writeText(
@@ -366,6 +374,12 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
     final session = tab.session;
     final cwd = _resolveCwd(cmd.cwd);
     tab.cwd = cwd;
+
+    // dsh-tui：启动前自动补齐 profile peer 链接，避免用户手修 ~/.dsh。
+    if (shouldHealDshProfileForCommand(cmd.command) ||
+        shouldHealDshProfileForCommand(cmd.name)) {
+      await ensureDshTuiLaunchReady();
+    }
 
     late final String launchCmd;
     if (_isAgentLaunchCmd(cmd) &&

@@ -8,6 +8,7 @@ import 'package:flutter/widgets.dart';
 import 'package:kyroon_pty/kyroon_pty.dart';
 
 import '../../core/opencode_sessions.dart';
+import '../../core/shell_env.dart';
 
 /// 单个终端会话：连接一个 Pty (ConPTY/forkpty) 与 flterm/Ghostty VT 引擎。
 class TerminalSession extends ChangeNotifier {
@@ -62,7 +63,10 @@ class TerminalSession extends ChangeNotifier {
     final size = _spawnSize;
     final cols = size.$1;
     final rows = size.$2;
-    final env = Map<String, String>.from(Platform.environment);
+    // 对齐系统终端：去重 Path/PATH、补 HOME/DSH_HOME，并优先用注册表合并 PATH。
+    final env = buildPtyEnvironment(
+      preferredPath: WindowsPathCache.instance.cached,
+    );
 
     if (Platform.isWindows) {
       _startWindows(
