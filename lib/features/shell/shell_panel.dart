@@ -104,8 +104,9 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
   }
 
   Future<void> _bootstrap() async {
-    // 尽早拉注册表 PATH，后续新建 PTY 与系统终端更一致。
+    // 尽早拉注册表 PATH / 网络盘 UNC，后续新建 PTY 与会话列表更贴近系统终端。
     unawaited(WindowsPathCache.instance.refresh());
+    unawaited(WindowsDriveUncCache.instance.refresh());
 
     final root = _projectRoot ?? '';
     final snap = await ShellSessionMemory.instance.loadFor(root);

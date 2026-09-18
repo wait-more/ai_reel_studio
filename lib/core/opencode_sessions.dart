@@ -89,12 +89,153 @@ String normalizeOpenCodePath(String path) {
   return p.toLowerCase();
 }
 
-bool openCodePathsEqual(String? a, String? b) {
+/// UNC `//host/share/rest` → `share/rest`（忽略主机名/IP 差异）。
+String? openCodeUncSharePath(String normalized) {
+  if (!normalized.startsWith('//')) return null;
+  final rest = normalized.substring(2);
+  final slash = rest.indexOf('/');
+  if (slash < 0 || slash + 1 >= rest.length) return null;
+  return rest.substring(slash + 1);
+}
+
+/// Windows 网络盘符 → UNC 根（如 `z:` → `//nas/share`）。
+class WindowsDriveUncCache {
+  WindowsDriveUncCache._();
+  static final WindowsDriveUncCache instance = WindowsDriveUncCache._();
+
+  final Map<String, String> _driveToUncRoot = {};
+  Future<void>? _loading;
+  DateTime? _loadedAt;
+
+  Map<String, String> get snapshot => Map.unmodifiable(_driveToUncRoot);
+
+  /// 测试或手动注入映射：`drive` 为 `z:`（小写，带冒号）。
+  void debugSetMappings(Map<String, String> mappings) {
+    _driveToUncRoot
+      ..clear()
+      ..addAll({
+        for (final e in mappings.entries)
+          e.key.trim().toLowerCase(): normalizeOpenCodePath(e.value),
+      });
+    _loadedAt = DateTime.now();
+  }
+
+  void clear() {
+    _driveToUncRoot.clear();
+    _loadedAt = null;
+  }
+
+  Future<void> refresh({bool force = false}) {
+    if (!Platform.isWindows) return Future.value();
+    final loadedAt = _loadedAt;
+    if (!force &&
+        loadedAt != null &&
+        DateTime.now().difference(loadedAt) < const Duration(minutes: 2) &&
+        _driveToUncRoot.isNotEmpty) {
+      return Future.value();
+    }
+    return _loading ??= _load().whenComplete(() => _loading = null);
+  }
+
+  Future<void> _load() async {
+    try {
+      final result = await Process.run(
+        'powershell.exe',
+        [
+          '-NoProfile',
+          '-NoLogo',
+          '-Command',
+          r'''
+Get-CimInstance Win32_LogicalDisk |
+  Where-Object { $_.DriveType -eq 4 -and $_.ProviderName } |
+  ForEach-Object { "$($_.DeviceID)=$($_.ProviderName)" }
+''',
+        ],
+        runInShell: false,
+        stdoutEncoding: utf8,
+        stderrEncoding: utf8,
+      );
+      if (result.exitCode != 0) return;
+      final next = <String, String>{};
+      for (final line in '${result.stdout}'.split(RegExp(r'\r?\n'))) {
+        final t = line.trim();
+        if (t.isEmpty) continue;
+        final eq = t.indexOf('=');
+        if (eq <= 0) continue;
+        final drive = t.substring(0, eq).trim().toLowerCase();
+        final unc = normalizeOpenCodePath(t.substring(eq + 1));
+        if (RegExp(r'^[a-z]:$').hasMatch(drive) &&
+            unc.startsWith('//') &&
+            unc.length > 3) {
+          next[drive] = unc;
+        }
+      }
+      _driveToUncRoot
+        ..clear()
+        ..addAll(next);
+      _loadedAt = DateTime.now();
+    } catch (_) {
+      // best-effort
+    }
+  }
+
+  /// 把 `z:/foo` 展开为 `//server/share/foo`；非盘符路径原样返回 null。
+  String? expandMappedDrive(String normalized) {
+    final m = RegExp(r'^([a-z]):(/.*)?$').firstMatch(normalized);
+    if (m == null) return null;
+    final root = _driveToUncRoot['${m.group(1)}:'];
+    if (root == null || root.isEmpty) return null;
+    final rest = m.group(2) ?? '';
+    return normalizeOpenCodePath('$root$rest');
+  }
+}
+
+/// 生成用于会话目录匹配的路径别名集合。
+Set<String> openCodePathAliases(
+  String path, {
+  Map<String, String>? driveUncMappings,
+}) {
+  final out = <String>{};
+  final n = normalizeOpenCodePath(path);
+  if (n.isEmpty) return out;
+  out.add(n);
+
+  final expanded = driveUncMappings == null
+      ? WindowsDriveUncCache.instance.expandMappedDrive(n)
+      : _expandWithMappings(n, driveUncMappings);
+  if (expanded != null && expanded.isNotEmpty) {
+    out.add(expanded);
+  }
+
+  for (final alias in List<String>.of(out)) {
+    final share = openCodeUncSharePath(alias);
+    if (share != null && share.isNotEmpty) {
+      // 专用前缀，避免与本地盘路径混淆。
+      out.add('share:$share');
+    }
+  }
+  return out;
+}
+
+String? _expandWithMappings(String normalized, Map<String, String> mappings) {
+  final m = RegExp(r'^([a-z]):(/.*)?$').firstMatch(normalized);
+  if (m == null) return null;
+  final root = mappings['${m.group(1)}:'];
+  if (root == null || root.isEmpty) return null;
+  final rest = m.group(2) ?? '';
+  return normalizeOpenCodePath('$root$rest');
+}
+
+bool openCodePathsEqual(
+  String? a,
+  String? b, {
+  Map<String, String>? driveUncMappings,
+}) {
   if (a == null || b == null) return false;
-  final na = normalizeOpenCodePath(a);
-  final nb = normalizeOpenCodePath(b);
-  if (na.isEmpty || nb.isEmpty) return false;
-  return na == nb;
+  final aliasesA = openCodePathAliases(a, driveUncMappings: driveUncMappings);
+  final aliasesB = openCodePathAliases(b, driveUncMappings: driveUncMappings);
+  if (aliasesA.isEmpty || aliasesB.isEmpty) return false;
+  return aliasesA.any(aliasesB.contains);
 }
 
 Future<List<Map<String, dynamic>>> _runOpenCodeDbJson(String sql) async {
@@ -151,6 +292,10 @@ Future<List<OpenCodeSessionInfo>> listOpenCodeSessions({
     return _cachedSessions!;
   }
 
+  // 网络盘 Z: ↔ UNC（IP/主机名）形态不一致时，先刷新盘符映射再过滤。
+  await WindowsDriveUncCache.instance.refresh();
+  final cwdAliases = openCodePathAliases(dir);
+
   // 多取一些再本地过滤，避免 SQL 路径形态不一致漏数。
   final fetchLimit = (maxCount * 6).clamp(80, 400);
   final rows = await _runOpenCodeDbJson(
@@ -165,7 +310,10 @@ Future<List<OpenCodeSessionInfo>> listOpenCodeSessions({
   for (final row in rows) {
     final info = OpenCodeSessionInfo.fromJson(row);
     if (info.id.isEmpty) continue;
-    if (!openCodePathsEqual(info.directory, dir)) continue;
+    final sessionDir = info.directory;
+    if (sessionDir == null || sessionDir.isEmpty) continue;
+    final sessionAliases = openCodePathAliases(sessionDir);
+    if (!cwdAliases.any(sessionAliases.contains)) continue;
     matched.add(info);
     if (matched.length >= maxCount) break;
   }
