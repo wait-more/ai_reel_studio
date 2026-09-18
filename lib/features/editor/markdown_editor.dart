@@ -467,6 +467,7 @@ class _EditorTabChipState extends State<_EditorTabChip> {
                     message: '关闭',
                     waitDuration: const Duration(milliseconds: 400),
                     child: MouseRegion(
+                      cursor: SystemMouseCursors.click,
                       onEnter: (_) => setState(() => _closeHovering = true),
                       onExit: (_) => setState(() => _closeHovering = false),
                       child: GestureDetector(

@@ -653,10 +653,8 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
                               fontSize: 12, color: Colors.white),
                         ),
                         const SizedBox(width: 6),
-                        GestureDetector(
+                        _TerminalTabCloseButton(
                           onTap: () => _closeTab(index),
-                          child: const Icon(Icons.close,
-                              size: 13, color: Colors.white38),
                         ),
                       ],
                     ),
@@ -2039,6 +2037,55 @@ class _ShellTab {
   void dispose() {
     focusNode.dispose();
     session.dispose();
+  }
+}
+
+/// 终端标签上的关闭按钮：悬停时显示可点击底色、手型光标和「关闭」提示。
+class _TerminalTabCloseButton extends StatefulWidget {
+  const _TerminalTabCloseButton({required this.onTap});
+
+  final VoidCallback onTap;
+
+  @override
+  State<_TerminalTabCloseButton> createState() =>
+      _TerminalTabCloseButtonState();
+}
+
+class _TerminalTabCloseButtonState extends State<_TerminalTabCloseButton> {
+  bool _hovering = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: '关闭',
+      waitDuration: const Duration(milliseconds: 400),
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        onEnter: (_) => setState(() => _hovering = true),
+        onExit: (_) => setState(() => _hovering = false),
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: widget.onTap,
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 100),
+            width: 18,
+            height: 18,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: _hovering
+                  ? Colors.white.withValues(alpha: 0.14)
+                  : Colors.transparent,
+              borderRadius: BorderRadius.circular(4),
+            ),
+            child: Icon(
+              Icons.close,
+              size: 13,
+              color: _hovering ? Colors.white : Colors.white38,
+            ),
+          ),
+        ),
+      ),
+    );
   }
 }
 
