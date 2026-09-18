@@ -35,6 +35,7 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
   final LayerLink _sessionMenuLink = LayerLink();
   OverlayEntry? _sessionMenuEntry;
   bool _sessionMenuOpen = false;
+  Timer? _agentExitWatch;
 
   /// 新终端默认 cwd：项目 scripts 根目录。
   String? get _projectRoot {
@@ -79,6 +80,49 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
     _schedulePersist();
   }
 
+  /// Ctrl+C 只结束智能体、宿主 PowerShell 还在时，PTY 不会退出，软恢复不会触发。
+  /// 看到 Shell 提示符就清掉智能体标记，标签和会话入口回到普通终端。
+  void _detectAgentReturnedToShell() {
+    if (!mounted || !_bootstrapped || _restoring || _switchingSession) return;
+    final now = DateTime.now();
+    var changed = false;
+    _ShellTab? returned;
+    for (final tab in _tabs) {
+      final hint = tab.launchedAgentHint;
+      if (hint == null || hint.isEmpty) continue;
+      final until = tab.ignoreShellPromptUntil;
+      if (until != null && now.isBefore(until)) continue;
+      if (!_looksLikeShellPrompt(tab.session.recentBufferText(maxLines: 6))) {
+        continue;
+      }
+      tab.launchedAgentHint = null;
+      tab.opencodeServerPort = null;
+      changed = true;
+      returned = tab;
+    }
+    if (!changed) return;
+    _onTabBecameShell();
+    if (returned != null && _tabs.contains(returned)) _ownIme(returned);
+  }
+
+  /// 等本帧 [ExcludeFocus] 放开后，把焦点和输入法交给 [active]。
+  void _ownIme(_ShellTab active) {
+    WidgetsBinding.instance.addPostFrameCallback((_) => _ownImeNow(active));
+  }
+
+  void _ownImeNow(_ShellTab active) {
+    if (!mounted || _tabs.isEmpty || !identical(_tabs[_activeIndex], active)) {
+      return;
+    }
+    for (final tab in _tabs) {
+      if (identical(tab, active)) continue;
+      tab.session.controller.disableKeyboard();
+    }
+    active.focusNode.requestFocus();
+    FocusManager.instance.applyFocusChangesIfNeeded();
+    active.session.controller.showKeyboard();
+  }
+
   _ShellTab _createTab({
     String? cwd,
     String? launchCommand,
@@ -86,20 +130,29 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
     int? opencodeServerPort,
     String? currentOpenCodeSessionId,
   }) {
-    return _ShellTab(
+    late final _ShellTab tab;
+    tab = _ShellTab(
       session: TerminalSession()..start(workingDirectory: cwd),
       cwd: cwd,
       launchCommand: launchCommand,
       launchedAgentHint: launchedAgentHint,
       opencodeServerPort: opencodeServerPort,
       currentOpenCodeSessionId: currentOpenCodeSessionId,
-      onBecameShell: _onTabBecameShell,
+      onBecameShell: () {
+        _onTabBecameShell();
+        _ownIme(tab);
+      },
     );
+    return tab;
   }
 
   @override
   void initState() {
     super.initState();
+    _agentExitWatch = Timer.periodic(
+      const Duration(milliseconds: 700),
+      (_) => _detectAgentReturnedToShell(),
+    );
     _bootstrap();
   }
 
@@ -191,6 +244,8 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
         '\x1b[0m\r\n',
       );
       tab.session.sendCommand(cmd);
+      tab.ignoreShellPromptUntil =
+          DateTime.now().add(const Duration(seconds: 3));
       relaunched++;
     }
     _restoring = false;
@@ -210,6 +265,7 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
 
   @override
   void dispose() {
+    _agentExitWatch?.cancel();
     _dismissSessionMenu();
     _persistNow();
     ref.read(shellAgentHostProvider.notifier).state = null;
@@ -306,10 +362,12 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
   void _newTab({String? workingDirectory}) {
     _dismissSessionMenu();
     final cwd = workingDirectory ?? _projectRoot;
+    final tab = _createTab(cwd: cwd);
     setState(() {
-      _tabs.add(_createTab(cwd: cwd));
+      _tabs.add(tab);
       _activeIndex = _tabs.length - 1;
     });
+    _ownIme(tab);
     _registerHost();
     _schedulePersist();
   }
@@ -317,7 +375,8 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
   void _closeTab(int index) {
     if (_tabs.length == 1) return;
     _dismissSessionMenu();
-    final closed = _tabs.removeAt(index);
+    final closed = _tabs[index];
+    _tabs.removeAt(index);
     setState(() {
       if (_activeIndex >= _tabs.length) {
         _activeIndex = _tabs.length - 1;
@@ -325,10 +384,12 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
         _activeIndex--;
       }
     });
+    if (_tabs.isNotEmpty) {
+      _ownIme(_tabs[_activeIndex]);
+    }
     _registerHost();
     _schedulePersist();
-    // 等本帧树上的 TerminalView 先卸下 FocusNode，再 dispose，避免
-    // IndexedStack 无 Key 复用 Element 时访问已 dispose 的节点。
+    // 等被关标签的 TerminalView 先从树上卸下（detach），再 dispose 会话。
     WidgetsBinding.instance.addPostFrameCallback((_) {
       closed.dispose();
     });
@@ -421,9 +482,13 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
       session.sendCommand(launchCmd);
     }
     session.syncViewportSize();
+    _ownIme(tab);
     if (_isAgentLaunchCmd(cmd)) {
       final token = cmd.command.trim().split(RegExp(r'\s+')).first;
       tab.launchedAgentHint = token.isNotEmpty ? token : cmd.name;
+      // 启动瞬间会闪过 PowerShell 提示符，这段时间不要当成「已退出」。
+      tab.ignoreShellPromptUntil =
+          DateTime.now().add(const Duration(seconds: 3));
       setState(() {});
       final warmCwd = cwd ?? _projectRoot;
       if (warmCwd != null &&
@@ -505,24 +570,37 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
           Expanded(
             child: _tabs.isEmpty
                 ? const SizedBox.shrink()
-                : IndexedStack(
-                    index: _activeIndex,
-                    children: [
-                      for (final tab in _tabs)
-                        _TerminalViewClient(
-                          key: ObjectKey(tab),
-                          tab.session,
-                          focusNode: tab.focusNode,
-                          fontSize: terminalFontSize,
-                          autofocus: identical(tab, _tabs[_activeIndex]),
-                        ),
-                    ],
-                  ),
+                : _buildTerminalStack(terminalFontSize),
           ),
           if (_showSessionEntry || startCmds.isNotEmpty)
             _buildBottomBar(context, startCmds),
         ],
       ),
+    );
+  }
+
+  /// 按标签 key 保活。不能用 [IndexedStack]：它外层的 [ExcludeFocus] 没有 key，
+  /// 关掉靠前的标签时，后面的 [TerminalView] 会被拆掉重建，输入法连接跟着没了。
+  Widget _buildTerminalStack(double terminalFontSize) {
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        for (var i = 0; i < _tabs.length; i++)
+          Offstage(
+            key: ObjectKey(_tabs[i]),
+            offstage: i != _activeIndex,
+            child: ExcludeFocus(
+              excluding: i != _activeIndex,
+              child: _TerminalViewClient(
+                _tabs[i].session,
+                focusNode: _tabs[i].focusNode,
+                fontSize: terminalFontSize,
+                autofocus: i == _activeIndex,
+                showKeyboard: i == _activeIndex,
+              ),
+            ),
+          ),
+      ],
     );
   }
 
@@ -544,7 +622,9 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
                 return InkWell(
                   onTap: () {
                     _dismissSessionMenu();
+                    final tab = _tabs[index];
                     setState(() => _activeIndex = index);
+                    _ownIme(tab);
                     _registerHost();
                     _schedulePersist();
                   },
@@ -720,7 +800,12 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
     if (lines.isEmpty) return false;
     final last = lines.last.trim();
     // PowerShell / cmd 常见提示符；避免把 opencode 的 `>` 输入行当成 shell。
+    // UNC 工作区会变成 `PS Microsoft.PowerShell.Core\FileSystem::\\host\...>`.
     if (RegExp(r'^PS [^\n]*>\s*$').hasMatch(last)) return true;
+    if (last.contains(r'Microsoft.PowerShell.Core\FileSystem::') &&
+        last.endsWith('>')) {
+      return true;
+    }
     if (RegExp(r'^[A-Za-z]:\\[^>]*>\s*$').hasMatch(last)) return true;
     if (last == '>' || last.endsWith('\$') || last.endsWith('%')) {
       // 过宽，仅当近期出现 Set-Location / Windows PowerShell 横幅等时才信
@@ -1927,6 +2012,9 @@ class _ShellTab {
   /// 当前 OpenCode TUI 内嵌 HTTP 端口（`opencode --port`，非 serve）。
   int? opencodeServerPort;
 
+  /// 刚发出启动命令后，提示符会闪一下，这段时间内不当成已退回 Shell。
+  DateTime? ignoreShellPromptUntil;
+
   /// 我们已知的当前会话（启动 `-s` / 切换成功 / HTTP 探活回写）。
   String? currentOpenCodeSessionId;
 
@@ -1960,12 +2048,13 @@ class _TerminalViewClient extends StatefulWidget {
   final FocusNode focusNode;
   final double fontSize;
   final bool autofocus;
+  final bool showKeyboard;
   const _TerminalViewClient(
     this.session, {
-    super.key,
     required this.focusNode,
     required this.fontSize,
     this.autofocus = false,
+    this.showKeyboard = false,
   });
 
   @override
@@ -2051,7 +2140,7 @@ class _TerminalViewClientState extends State<_TerminalViewClient> {
             controller: widget.session.controller,
             focusNode: widget.focusNode,
             autofocus: widget.autofocus,
-            showKeyboard: false,
+            showKeyboard: widget.showKeyboard,
             scrollController: _scrollController,
             padding: const EdgeInsets.all(4),
             theme: theme,
