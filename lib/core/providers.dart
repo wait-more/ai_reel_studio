@@ -11,6 +11,13 @@ import 'workspace_memory.dart';
 /// 左 / 中 / 右三栏最顶栏统一高度（以中间栏顶栏为准）。
 const double kColumnTopBarHeight = 40;
 
+/// 中间栏最小宽度：素材「筛选 chips」与右侧「操作按钮」两块刚好挨齐。
+/// 筛选 6 项（全部/目录/图片/视频/音频/文档）约 56px/项；操作 6 个 32px 图标键。
+const double kAssetToolbarFiltersWidth = 6 * 56;
+const double kAssetToolbarActionsWidth = 6 * 32;
+const double kCenterPanelMinWidth =
+    kAssetToolbarFiltersWidth + kAssetToolbarActionsWidth; // 528
+
 /// 当前选中的文件路径（在编辑区打开）
 final selectedFileProvider = StateProvider<String?>((ref) => null);
 

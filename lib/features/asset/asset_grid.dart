@@ -154,6 +154,10 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
   final Set<String> _selected = {};
   final Map<String, GlobalKey> _itemKeys = {};
   final GlobalKey _gridStackKey = GlobalKey();
+  final GlobalKey _pathBarKey = GlobalKey();
+  bool _pathEditing = false;
+  final TextEditingController _pathEditCtrl = TextEditingController();
+  final FocusNode _pathEditFocus = FocusNode(debugLabel: 'pathEdit');
 
   Offset? _marqueeOrigin;
   Offset? _marqueeCurrent;
@@ -297,8 +301,15 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
     super.didChangeDependencies();
     if (_initialized) return;
     _initialized = true;
-    final dir = ref.read(selectedDirProvider);
+    final dir = ref.read(selectedDirProvider) ??
+        (ref.read(contentModeProvider) == 'assets' &&
+                AppConfig.instance.projectRoot.isNotEmpty
+            ? AppConfig.instance.projectRoot
+            : null);
     if (dir != null) {
+      if (ref.read(selectedDirProvider) == null) {
+        ref.read(selectedDirProvider.notifier).state = dir;
+      }
       _initTo(dir);
     }
   }
@@ -308,6 +319,8 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
     _colWidthSaveTimer?.cancel();
     _listHScroll.dispose();
     _searchCtrl.dispose();
+    _pathEditCtrl.dispose();
+    _pathEditFocus.dispose();
     _panelFocus.dispose();
     super.dispose();
   }
@@ -383,6 +396,10 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
     ref.listen(fsShortcutRequestProvider, (prev, next) {
       if (next == null || next.pane != FsShortcutPane.assets) return;
       if (prev?.nonce == next.nonce) return;
+      if (next.action == 'escape' && _pathEditing) {
+        _cancelPathEdit();
+        return;
+      }
       _whenNotTyping(() {
         switch (next.action) {
           case 'escape':
@@ -410,7 +427,6 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
       child: Column(
         children: [
           _buildToolbar(context, dir),
-          const Divider(height: 1, color: Colors.white12),
           Expanded(child: _buildBody(context)),
         ],
       ),
@@ -844,167 +860,171 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
   }
 
   Widget _buildToolbar(BuildContext context, String currentDir) {
+    final scheme = Theme.of(context).colorScheme;
+    final line = const BorderSide(color: Colors.white24);
     return Container(
-      color: Theme.of(context).colorScheme.surfaceContainerHigh,
+      color: scheme.surfaceContainerHigh,
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          SizedBox(
-            height: 40,
-            child: Row(
-              children: [
-                IconButton(
-                  icon: const Icon(Icons.arrow_back, size: 18),
-                  onPressed: _canBack ? _back : null,
-                  tooltip: '后退',
-                  padding: EdgeInsets.zero,
-                  constraints:
-                      const BoxConstraints(minWidth: 32, minHeight: 32),
-                ),
-                IconButton(
-                  icon: const Icon(Icons.arrow_forward, size: 18),
-                  onPressed: _canForward ? _forward : null,
-                  tooltip: '前进',
-                  padding: EdgeInsets.zero,
-                  constraints:
-                      const BoxConstraints(minWidth: 32, minHeight: 32),
-                ),
-                IconButton(
-                  icon: const Icon(Icons.arrow_upward, size: 18),
-                  onPressed: _up,
-                  tooltip: '上一级',
-                  padding: EdgeInsets.zero,
-                  constraints:
-                      const BoxConstraints(minWidth: 32, minHeight: 32),
-                ),
-                PopupMenuButton<String>(
-                  initialValue: currentDir,
-                  itemBuilder: (_) {
-                    final crumbs = _breadcrumbs(currentDir);
-                    return [
-                      for (final c in crumbs)
-                        PopupMenuItem<String>(
-                          value: c.path,
-                          child: Text(c.label),
+          // 路径行：导航 + 路径 + 搜索（顶线与上方功能栏分隔）
+          DecoratedBox(
+            decoration: BoxDecoration(
+              border: Border(top: line, bottom: line),
+            ),
+            child: SizedBox(
+              height: 36,
+              child: Row(
+                children: [
+                  IconButton(
+                    icon: const Icon(Icons.arrow_back, size: 18),
+                    onPressed: _canBack ? _back : null,
+                    tooltip: '后退',
+                    padding: EdgeInsets.zero,
+                    constraints:
+                        const BoxConstraints(minWidth: 32, minHeight: 32),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.arrow_forward, size: 18),
+                    onPressed: _canForward ? _forward : null,
+                    tooltip: '前进',
+                    padding: EdgeInsets.zero,
+                    constraints:
+                        const BoxConstraints(minWidth: 32, minHeight: 32),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.arrow_upward, size: 18),
+                    onPressed: _up,
+                    tooltip: '上一级',
+                    padding: EdgeInsets.zero,
+                    constraints:
+                        const BoxConstraints(minWidth: 32, minHeight: 32),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: _buildPathAddressBar(context, currentDir),
+                  ),
+                  SizedBox(
+                    width: 168,
+                    height: 28,
+                    child: TextField(
+                      controller: _searchCtrl,
+                      onChanged: (v) => setState(() => _query = v),
+                      style: const TextStyle(fontSize: 12),
+                      decoration: InputDecoration(
+                        hintText: '搜索',
+                        hintStyle: TextStyle(
+                          fontSize: 12,
+                          color: Colors.grey[600],
                         ),
-                    ];
-                  },
-                  onSelected: (p) => _enterDir(p),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 8),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        const Icon(Icons.folder,
-                            size: 16, color: Colors.orange),
-                        const SizedBox(width: 6),
-                        Flexible(
-                          child: Text(
-                            _displayPath(currentDir),
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(fontSize: 12),
-                          ),
+                        isDense: true,
+                        prefixIcon: const Icon(Icons.search, size: 16),
+                        prefixIconConstraints: const BoxConstraints(
+                          minWidth: 28,
+                          minHeight: 28,
                         ),
-                        const Icon(Icons.arrow_drop_down, size: 16),
-                      ],
+                        suffixIcon: _query.isEmpty
+                            ? null
+                            : IconButton(
+                                icon: const Icon(Icons.clear, size: 14),
+                                onPressed: () {
+                                  _searchCtrl.clear();
+                                  setState(() => _query = '');
+                                },
+                                padding: EdgeInsets.zero,
+                                constraints: const BoxConstraints(
+                                  minWidth: 24,
+                                  minHeight: 24,
+                                ),
+                              ),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(6),
+                          borderSide: BorderSide.none,
+                        ),
+                        filled: true,
+                        fillColor: scheme.surfaceContainerLowest,
+                        contentPadding:
+                            const EdgeInsets.symmetric(vertical: 4),
+                      ),
                     ),
                   ),
-                ),
-                const Spacer(),
-                _buildFilterChips(),
-                const Spacer(),
-                IconButton(
-                  icon: Icon(
-                    _viewMode == _AssetViewMode.grid
-                        ? Icons.view_list_outlined
-                        : Icons.grid_view_outlined,
-                    size: 18,
-                  ),
-                  onPressed: () => _setViewMode(
-                    _viewMode == _AssetViewMode.grid
-                        ? _AssetViewMode.list
-                        : _AssetViewMode.grid,
-                  ),
-                  tooltip:
-                      _viewMode == _AssetViewMode.grid ? '列表展示' : '网格展示',
-                  padding: EdgeInsets.zero,
-                  constraints:
-                      const BoxConstraints(minWidth: 32, minHeight: 32),
-                ),
-                IconButton(
-                  icon: const Icon(Icons.note_add_outlined, size: 18),
-                  onPressed: () => _newDocument(currentDir),
-                  tooltip: '新建文档',
-                  padding: EdgeInsets.zero,
-                  constraints:
-                      const BoxConstraints(minWidth: 32, minHeight: 32),
-                ),
-                IconButton(
-                  icon: const Icon(Icons.create_new_folder_outlined, size: 18),
-                  onPressed: () => _newFolder(currentDir),
-                  tooltip: '新建文件夹',
-                  padding: EdgeInsets.zero,
-                  constraints:
-                      const BoxConstraints(minWidth: 32, minHeight: 32),
-                ),
-                IconButton(
-                  icon: const Icon(Icons.upload_file_outlined, size: 18),
-                  onPressed: () => _importFiles(currentDir),
-                  tooltip: '导入物料',
-                  padding: EdgeInsets.zero,
-                  constraints:
-                      const BoxConstraints(minWidth: 32, minHeight: 32),
-                ),
-                IconButton(
-                  icon: const Icon(Icons.category_outlined, size: 18),
-                  onPressed: () => _showSummary(currentDir),
-                  tooltip: '分类汇总',
-                  padding: EdgeInsets.zero,
-                  constraints:
-                      const BoxConstraints(minWidth: 32, minHeight: 32),
-                ),
-                IconButton(
-                  icon: const Icon(Icons.refresh, size: 18),
-                  onPressed: _reload,
-                  tooltip: '刷新',
-                  padding: EdgeInsets.zero,
-                  constraints:
-                      const BoxConstraints(minWidth: 32, minHeight: 32),
-                ),
-              ],
+                  const SizedBox(width: 8),
+                ],
+              ),
             ),
           ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(8, 0, 8, 6),
+          // 操作行：筛选（左）+ 操作按钮（右）
+          DecoratedBox(
+            decoration: BoxDecoration(
+              border: Border(bottom: line),
+            ),
             child: SizedBox(
-              height: 32,
-              child: TextField(
-                controller: _searchCtrl,
-                onChanged: (v) => setState(() => _query = v),
-                style: const TextStyle(fontSize: 12),
-                decoration: InputDecoration(
-                  hintText: '搜索当前目录',
-                  hintStyle: TextStyle(fontSize: 12, color: Colors.grey[600]),
-                  isDense: true,
-                  prefixIcon: const Icon(Icons.search, size: 16),
-                  suffixIcon: _query.isEmpty
-                      ? null
-                      : IconButton(
-                          icon: const Icon(Icons.clear, size: 16),
-                          onPressed: () {
-                            _searchCtrl.clear();
-                            setState(() => _query = '');
-                          },
-                        ),
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(8),
-                    borderSide: BorderSide.none,
+              height: 36,
+              child: Row(
+                children: [
+                  _buildFilterChips(),
+                  const Spacer(),
+                  IconButton(
+                    icon: Icon(
+                      _viewMode == _AssetViewMode.grid
+                          ? Icons.view_list_outlined
+                          : Icons.grid_view_outlined,
+                      size: 18,
+                    ),
+                    onPressed: () => _setViewMode(
+                      _viewMode == _AssetViewMode.grid
+                          ? _AssetViewMode.list
+                          : _AssetViewMode.grid,
+                    ),
+                    tooltip: _viewMode == _AssetViewMode.grid
+                        ? '列表展示'
+                        : '网格展示',
+                    padding: EdgeInsets.zero,
+                    constraints:
+                        const BoxConstraints(minWidth: 32, minHeight: 32),
                   ),
-                  filled: true,
-                  fillColor:
-                      Theme.of(context).colorScheme.surfaceContainerLowest,
-                  contentPadding: const EdgeInsets.symmetric(vertical: 6),
-                ),
+                  IconButton(
+                    icon: const Icon(Icons.note_add_outlined, size: 18),
+                    onPressed: () => _newDocument(currentDir),
+                    tooltip: '新建文档',
+                    padding: EdgeInsets.zero,
+                    constraints:
+                        const BoxConstraints(minWidth: 32, minHeight: 32),
+                  ),
+                  IconButton(
+                    icon:
+                        const Icon(Icons.create_new_folder_outlined, size: 18),
+                    onPressed: () => _newFolder(currentDir),
+                    tooltip: '新建文件夹',
+                    padding: EdgeInsets.zero,
+                    constraints:
+                        const BoxConstraints(minWidth: 32, minHeight: 32),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.upload_file_outlined, size: 18),
+                    onPressed: () => _importFiles(currentDir),
+                    tooltip: '导入物料',
+                    padding: EdgeInsets.zero,
+                    constraints:
+                        const BoxConstraints(minWidth: 32, minHeight: 32),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.category_outlined, size: 18),
+                    onPressed: () => _showSummary(currentDir),
+                    tooltip: '分类汇总',
+                    padding: EdgeInsets.zero,
+                    constraints:
+                        const BoxConstraints(minWidth: 32, minHeight: 32),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.refresh, size: 18),
+                    onPressed: _reload,
+                    tooltip: '刷新',
+                    padding: EdgeInsets.zero,
+                    constraints:
+                        const BoxConstraints(minWidth: 32, minHeight: 32),
+                  ),
+                ],
               ),
             ),
           ),
@@ -1208,7 +1228,265 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
   }
 
   
-/// 生成面包屑层级（含各级名称与路径）。
+  /// 资源管理器风格地址栏：
+  /// - 子级名称：跳转到该目录
+  /// - 中间空白：进入路径编辑（可粘贴/输入完整路径）
+  /// - 右侧下拉：祖先目录层级菜单
+  Widget _buildPathAddressBar(BuildContext context, String currentDir) {
+    final scheme = Theme.of(context).colorScheme;
+
+    if (_pathEditing) {
+      return Container(
+        key: _pathBarKey,
+        height: 28,
+        margin: const EdgeInsets.only(right: 8),
+        alignment: Alignment.centerLeft,
+        decoration: BoxDecoration(
+          color: scheme.surfaceContainerLowest,
+          borderRadius: BorderRadius.circular(6),
+          border: Border.all(color: scheme.primary.withValues(alpha: 0.55)),
+        ),
+        child: Focus(
+          onKeyEvent: (node, event) {
+            if (event is KeyDownEvent &&
+                event.logicalKey == LogicalKeyboardKey.escape) {
+              _cancelPathEdit();
+              return KeyEventResult.handled;
+            }
+            return KeyEventResult.ignored;
+          },
+          child: TextField(
+            controller: _pathEditCtrl,
+            focusNode: _pathEditFocus,
+            style: const TextStyle(fontSize: 12),
+            cursorHeight: 14,
+            textAlignVertical: TextAlignVertical.center,
+            decoration: const InputDecoration(
+              isDense: true,
+              border: InputBorder.none,
+              contentPadding:
+                  EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+            ),
+            onSubmitted: (_) => _commitPathEdit(),
+            onTapOutside: (_) => _commitPathEdit(),
+          ),
+        ),
+      );
+    }
+
+    final crumbs = _breadcrumbs(currentDir);
+    const maxVisible = 3;
+    final hiddenCount =
+        crumbs.length > maxVisible ? crumbs.length - maxVisible : 0;
+    final visible = hiddenCount > 0 ? crumbs.sublist(hiddenCount) : crumbs;
+
+    Widget seg(String label, {VoidCallback? onTap, bool muted = false}) {
+      final text = Text(
+        label,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: TextStyle(
+          fontSize: 12,
+          color: muted ? scheme.onSurfaceVariant : scheme.onSurface,
+        ),
+      );
+      if (onTap == null) {
+        return Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+          child: text,
+        );
+      }
+      return InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(4),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+          child: text,
+        ),
+      );
+    }
+
+    return Tooltip(
+      message: currentDir,
+      waitDuration: const Duration(milliseconds: 500),
+      child: Container(
+        key: _pathBarKey,
+        height: 28,
+        margin: const EdgeInsets.only(right: 8),
+        decoration: BoxDecoration(
+          color: scheme.surfaceContainerLowest,
+          borderRadius: BorderRadius.circular(6),
+        ),
+        child: Row(
+          children: [
+            const SizedBox(width: 6),
+            const Icon(Icons.folder, size: 16, color: Colors.orange),
+            const SizedBox(width: 4),
+            Expanded(
+              child: Stack(
+                children: [
+                  // 空白区域点按 → 路径编辑
+                  Positioned.fill(
+                    child: InkWell(
+                      onTap: () => _beginPathEdit(currentDir),
+                      borderRadius: BorderRadius.circular(4),
+                    ),
+                  ),
+                  Row(
+                    children: [
+                      if (hiddenCount > 0) ...[
+                        seg(
+                          '…',
+                          onTap: () => _showPathAncestorMenu(
+                            context,
+                            currentDir,
+                            onlyHidden: true,
+                          ),
+                          muted: true,
+                        ),
+                        Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 2),
+                          child: Text(
+                            '›',
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: scheme.onSurfaceVariant,
+                            ),
+                          ),
+                        ),
+                      ],
+                      for (var i = 0; i < visible.length; i++) ...[
+                        if (i > 0)
+                          Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 2),
+                            child: Text(
+                              '›',
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: scheme.onSurfaceVariant,
+                              ),
+                            ),
+                          ),
+                        // 每一级都可收缩省略，避免长路径撑破地址栏
+                        Flexible(
+                          child: seg(
+                            visible[i].label,
+                            onTap: visible[i].path == currentDir
+                                ? () => _beginPathEdit(currentDir)
+                                : () => _enterDir(visible[i].path),
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ],
+              ),
+            ),
+            InkWell(
+              onTap: () => _showPathAncestorMenu(context, currentDir),
+              borderRadius: BorderRadius.circular(4),
+              child: const SizedBox(
+                width: 24,
+                height: 28,
+                child: Icon(Icons.arrow_drop_down, size: 18),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _beginPathEdit(String currentDir) {
+    setState(() {
+      _pathEditing = true;
+      _pathEditCtrl.text = currentDir;
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _pathEditFocus.requestFocus();
+      _pathEditCtrl.selection = TextSelection(
+        baseOffset: 0,
+        extentOffset: _pathEditCtrl.text.length,
+      );
+    });
+  }
+
+  void _cancelPathEdit() {
+    if (!_pathEditing) return;
+    setState(() => _pathEditing = false);
+  }
+
+  void _commitPathEdit() {
+    if (!_pathEditing) return;
+    final raw = _pathEditCtrl.text.trim();
+    setState(() => _pathEditing = false);
+    if (raw.isEmpty || raw == _currentDir) return;
+    final dir = Directory(raw);
+    if (dir.existsSync()) {
+      _enterDir(dir.path);
+      return;
+    }
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('路径不存在：$raw'),
+        duration: const Duration(seconds: 2),
+      ),
+    );
+  }
+
+  /// 弹出祖先目录层级菜单（宽度对齐路径栏，过宽时封顶）。
+  Future<void> _showPathAncestorMenu(
+    BuildContext context,
+    String currentDir, {
+    bool onlyHidden = false,
+  }) async {
+    final box = _pathBarKey.currentContext?.findRenderObject() as RenderBox?;
+    if (box == null || !box.hasSize) return;
+
+    final offset = box.localToGlobal(Offset.zero);
+    final size = box.size;
+    // 与路径栏左对齐；窄时略撑开，宽时封顶，避免贴满整栏。
+    final menuW = size.width.clamp(260.0, 420.0);
+    final scheme = Theme.of(context).colorScheme;
+    final hoverBg = scheme.primary.withValues(alpha: 0.22);
+    final all = _breadcrumbs(currentDir);
+    const maxVisible = 3;
+    final hiddenCount =
+        all.length > maxVisible ? all.length - maxVisible : 0;
+    final crumbs = onlyHidden && hiddenCount > 0
+        ? all.sublist(0, hiddenCount)
+        : all;
+
+    final selected = await showMenu<String>(
+      context: context,
+      position: RelativeRect.fromLTRB(
+        offset.dx,
+        offset.dy + size.height + 2,
+        offset.dx + menuW,
+        offset.dy + size.height + 2,
+      ),
+      constraints: BoxConstraints(minWidth: menuW, maxWidth: menuW),
+      items: [
+        for (var i = 0; i < crumbs.length; i++)
+          PopupMenuItem<String>(
+            value: crumbs[i].path,
+            height: 28,
+            padding: EdgeInsets.zero,
+            child: _PathAncestorTile(
+              label: crumbs[i].label,
+              depth: i,
+              selected: crumbs[i].path == currentDir,
+              hoverColor: hoverBg,
+            ),
+          ),
+      ],
+    );
+    if (selected != null) _enterDir(selected);
+  }
+
+  /// 生成面包屑层级（含各级名称与路径）。
   List<({String label, String path})> _breadcrumbs(String dir) {
     final sep = Platform.pathSeparator;
     final result = <({String label, String path})>[];
@@ -1298,7 +1576,8 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
 
       final content = _viewMode == _AssetViewMode.list
           ? ListView.builder(
-              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+              // 勿加水平 padding：列宽总和已贴齐内容宽，左右各 4 会触发 8px overflow。
+              padding: const EdgeInsets.symmetric(vertical: 2),
               itemCount: itemCount,
               itemExtent: _kListRowH,
               itemBuilder: (context, index) => itemAt(index, list: true),
@@ -1365,7 +1644,7 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
                       child: Column(
                         children: [
                           _buildListHeader(context),
-                          const Divider(height: 1, color: Colors.white12),
+                          const Divider(height: 1, color: Colors.white24),
                           Expanded(child: selectable),
                         ],
                       ),
@@ -2075,6 +2354,69 @@ class _InlineCreateAssetRow extends ConsumerWidget {
           ),
           field,
         ],
+      ),
+    );
+  }
+}
+
+class _PathAncestorTile extends StatefulWidget {
+  const _PathAncestorTile({
+    required this.label,
+    required this.depth,
+    required this.selected,
+    required this.hoverColor,
+  });
+
+  final String label;
+  final int depth;
+  final bool selected;
+  final Color hoverColor;
+
+  @override
+  State<_PathAncestorTile> createState() => _PathAncestorTileState();
+}
+
+class _PathAncestorTileState extends State<_PathAncestorTile> {
+  bool _hovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hovered = true),
+      onExit: (_) => setState(() => _hovered = false),
+      child: Container(
+        alignment: Alignment.centerLeft,
+        height: 28,
+        padding: EdgeInsets.only(
+          left: 8 + widget.depth * 12.0,
+          right: 8,
+        ),
+        color: _hovered
+            ? widget.hoverColor
+            : (widget.selected
+                ? scheme.primary.withValues(alpha: 0.12)
+                : Colors.transparent),
+        child: Row(
+          children: [
+            const Icon(Icons.folder, size: 16, color: Colors.orange),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Text(
+                widget.label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight:
+                      widget.selected ? FontWeight.w600 : FontWeight.w400,
+                ),
+              ),
+            ),
+            if (widget.selected)
+              Icon(Icons.check, size: 14, color: scheme.primary),
+          ],
+        ),
       ),
     );
   }

@@ -369,25 +369,32 @@ class _MainLayoutState extends ConsumerState<MainLayout> with WindowListener {
         onKeyEvent: _handleFsKeyEvent,
         child: LayoutBuilder(
       builder: (context, constraints) {
-        // 首次布局：中间栏 / Shell = 6 / 4
+        final maxWidth = constraints.maxWidth;
+        // 首次布局：中间栏 / Shell = 6 / 4，并保证中间栏不低于最小宽度。
         if (_shellWidth == null) {
-          const dividerW = 6.0; // 两处分隔条
-          final avail = constraints.maxWidth - _treeWidth - dividerW;
+          final dividers = shellVisible ? _dividerWidth * 2 : _dividerWidth;
+          final avail = maxWidth - _treeWidth - dividers;
           _shellWidth = avail * 0.4;
-          if (_shellWidth! < 280) _shellWidth = 280;
         }
+        _ensurePanelWidths(maxWidth, shellVisible: shellVisible);
+        final shellW = shellVisible ? (_shellWidth ?? 0) : 0.0;
+        final dividers = shellVisible ? _dividerWidth * 2 : _dividerWidth;
+        final centerW = (maxWidth - _treeWidth - shellW - dividers)
+            .clamp(kCenterPanelMinWidth, maxWidth);
 
         return Scaffold(
           body: Row(
             children: [
-              // Left panel: Project tree
               SizedBox(
                 width: _treeWidth,
                 child: const ProjectTree(),
               ),
-              _buildDivider(resizeTree: true),
-              // Center panel: Editor tabs OR asset grid (both kept alive)
-              Expanded(
+              _buildDivider(
+                resizeTree: true,
+                maxWidth: maxWidth,
+              ),
+              SizedBox(
+                width: centerW,
                 child: Column(
                   children: [
                     _buildTopBar(context),
@@ -409,10 +416,13 @@ class _MainLayoutState extends ConsumerState<MainLayout> with WindowListener {
                   ],
                 ),
               ),
-              if (shellVisible) _buildDivider(resizeTree: false),
-              // 始终挂载 ShellPanel，折叠时宽度为 0，避免销毁 PTY / 智能体会话
+              if (shellVisible)
+                _buildDivider(
+                  resizeTree: false,
+                  maxWidth: maxWidth,
+                ),
               SizedBox(
-                width: shellVisible ? _shellWidth : 0,
+                width: shellW,
                 child: const ShellPanel(),
               ),
             ],
@@ -422,6 +432,49 @@ class _MainLayoutState extends ConsumerState<MainLayout> with WindowListener {
         ),
       ),
     );
+  }
+
+  static const double _treeMinWidth = 180;
+  static const double _treeMaxWidth = 500;
+  static const double _shellMinWidth = 280;
+  static const double _dividerWidth = 3;
+
+  /// 拖拽与窗口缩放后，保证中间栏宽度 ≥ 左右按钮块贴齐时的宽度。
+  void _ensurePanelWidths(double maxWidth, {required bool shellVisible}) {
+    final dividers = shellVisible ? _dividerWidth * 2 : _dividerWidth;
+    _treeWidth = _treeWidth.clamp(_treeMinWidth, _treeMaxWidth);
+
+    if (!shellVisible) {
+      // 仅目录树 + 中间栏：目录树不能把中间栏压穿。
+      final maxTree = maxWidth - _dividerWidth - kCenterPanelMinWidth;
+      _treeWidth = _treeWidth.clamp(
+        _treeMinWidth,
+        maxTree < _treeMinWidth ? _treeMinWidth : maxTree,
+      );
+      return;
+    }
+
+    var shell = _shellWidth ?? _shellMinWidth;
+    // 先按当前目录树，算出 Shell 上限。
+    var maxShell = maxWidth - _treeWidth - dividers - kCenterPanelMinWidth;
+    if (maxShell < _shellMinWidth) {
+      // Shell 已顶到最小，再压目录树。
+      final maxTree =
+          maxWidth - _shellMinWidth - dividers - kCenterPanelMinWidth;
+      _treeWidth = _treeWidth.clamp(
+        _treeMinWidth,
+        maxTree < _treeMinWidth ? _treeMinWidth : maxTree,
+      );
+      maxShell = maxWidth - _treeWidth - dividers - kCenterPanelMinWidth;
+    }
+    if (maxShell <= 0) {
+      shell = 0;
+    } else if (maxShell < _shellMinWidth) {
+      shell = maxShell;
+    } else {
+      shell = shell.clamp(_shellMinWidth, maxShell);
+    }
+    _shellWidth = shell;
   }
 
   Widget _buildModeBar(BuildContext context) {
@@ -631,23 +684,44 @@ class _MainLayoutState extends ConsumerState<MainLayout> with WindowListener {
     );
   }
 
-  Widget _buildDivider({required bool resizeTree}) {
+  Widget _buildDivider({
+    required bool resizeTree,
+    required double maxWidth,
+  }) {
+    final shellVisible = ref.read(shellVisibleProvider);
     return GestureDetector(
       onPanUpdate: (details) {
         setState(() {
           if (resizeTree) {
-            _treeWidth = (_treeWidth + details.delta.dx).clamp(180.0, 500.0);
+            final shellW = shellVisible ? (_shellWidth ?? _shellMinWidth) : 0.0;
+            final dividers =
+                shellVisible ? _dividerWidth * 2 : _dividerWidth;
+            final maxTree =
+                maxWidth - shellW - dividers - kCenterPanelMinWidth;
+            final treeCap = maxTree < _treeMinWidth
+                ? _treeMinWidth
+                : (maxTree > _treeMaxWidth ? _treeMaxWidth : maxTree);
+            _treeWidth = (_treeWidth + details.delta.dx).clamp(
+              _treeMinWidth,
+              treeCap,
+            );
           } else {
-            // Shell 面板只限制最小宽度，允许无限放大到占满窗口
-            _shellWidth = (_shellWidth ?? 400) - details.delta.dx;
-            if (_shellWidth! < 280) _shellWidth = 280;
+            final maxShell = maxWidth -
+                _treeWidth -
+                _dividerWidth * 2 -
+                kCenterPanelMinWidth;
+            _shellWidth = ((_shellWidth ?? 400) - details.delta.dx).clamp(
+              0.0,
+              maxShell < 0 ? 0.0 : maxShell,
+            );
           }
+          _ensurePanelWidths(maxWidth, shellVisible: shellVisible);
         });
       },
       child: MouseRegion(
         cursor: SystemMouseCursors.resizeColumn,
         child: Container(
-          width: 3,
+          width: _dividerWidth,
           color: Theme.of(context).dividerColor.withValues(alpha: 0.2),
         ),
       ),

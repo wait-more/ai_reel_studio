@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'config.dart';
+import 'windows_path.dart';
 
 /// 单个文档的阅读/编辑位置。
 class EditorViewState {
@@ -118,15 +119,9 @@ class WorkspaceSnapshot {
   /// 丢弃不存在或不在当前项目根下的路径。
   WorkspaceSnapshot sanitized() {
     final root = AppConfig.instance.projectRoot;
-    bool underRoot(String path) {
-      if (root.isEmpty) return true;
-      final nRoot = root.replaceAll('/', Platform.pathSeparator);
-      final nPath = path.replaceAll('/', Platform.pathSeparator);
-      return nPath.toLowerCase().startsWith(nRoot.toLowerCase());
-    }
 
     bool alive(String path) {
-      if (!underRoot(path)) return false;
+      if (!isPathUnderRoot(path, root)) return false;
       try {
         return FileSystemEntity.typeSync(path) != FileSystemEntityType.notFound;
       } catch (_) {
@@ -143,11 +138,18 @@ class WorkspaceSnapshot {
     final file = (selectedFile != null && alive(selectedFile!))
         ? selectedFile
         : (tabs.isNotEmpty ? tabs.last : null);
-    final dir = (selectedDir != null &&
+    var dir = (selectedDir != null &&
             Directory(selectedDir!).existsSync() &&
-            underRoot(selectedDir!))
+            isPathUnderRoot(selectedDir!, root))
         ? selectedDir
         : null;
+    // 素材模式且目录丢失时，回落到项目根，避免启动后空白「请选择」
+    if (dir == null &&
+        contentMode == 'assets' &&
+        root.isNotEmpty &&
+        Directory(root).existsSync()) {
+      dir = root;
+    }
 
     return WorkspaceSnapshot(
       expandedPaths: expandedPaths.where(alive).toList(),

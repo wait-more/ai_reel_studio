@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:media_kit/media_kit.dart';
@@ -6,6 +8,7 @@ import 'core/config.dart';
 import 'core/progress.dart';
 import 'core/providers.dart';
 import 'core/window_state.dart';
+import 'core/windows_path.dart';
 import 'core/workspace_memory.dart';
 
 void main() async {
@@ -16,6 +19,11 @@ void main() async {
   await AppConfig.instance.init();
   final windowState = WindowState();
   await windowState.init();
+
+  // 先刷新盘符↔UNC，避免工作区路径在 Z: / \\nas 形态下被误丢弃。
+  if (Platform.isWindows) {
+    await WindowsDriveUncCache.instance.refresh();
+  }
 
   final container = ProviderContainer();
   // 启动时把已保存的创作进度载入 provider（供树/网格徽章显示）
@@ -38,6 +46,11 @@ void main() async {
   }
   if (workspace.selectedDir != null) {
     container.read(selectedDirProvider.notifier).state = workspace.selectedDir;
+  } else if (AppConfig.instance.projectRoot.isNotEmpty &&
+      workspace.contentMode == 'assets') {
+    // 素材模式无记忆目录时，默认打开项目根，避免空白「请选择」
+    container.read(selectedDirProvider.notifier).state =
+        AppConfig.instance.projectRoot;
   }
   container.read(contentModeProvider.notifier).state = workspace.contentMode;
   if (workspace.expandedPaths.isNotEmpty) {
