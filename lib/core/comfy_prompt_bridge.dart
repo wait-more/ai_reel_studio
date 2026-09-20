@@ -39,25 +39,43 @@ final comfyPromptInjectRequestProvider =
 final comfyPromptLastTargetProvider =
     StateProvider<ComfyPromptSendTarget?>((ref) => null);
 
+/// 右键二级菜单里的固定填入路径，排在「填入上次」之后。
+final comfyPromptShortcutsProvider =
+    StateProvider<List<ComfyPromptSendTarget>>((ref) => const []);
+
 class ComfyPromptSendTarget {
   final String serverId;
   final String templateId;
   final String fieldId;
   /// 如：`本地 · 定妆文生图 · 正向提示词`
   final String displayLabel;
+  /// 用户起的名字，可为空。
+  final String name;
 
   const ComfyPromptSendTarget({
     required this.serverId,
     required this.templateId,
     required this.fieldId,
     this.displayLabel = '',
+    this.name = '',
   });
+
+  ComfyPromptSendTarget copyWith({String? name}) {
+    return ComfyPromptSendTarget(
+      serverId: serverId,
+      templateId: templateId,
+      fieldId: fieldId,
+      displayLabel: displayLabel,
+      name: name ?? this.name,
+    );
+  }
 
   Map<String, dynamic> toJson() => {
         'serverId': serverId,
         'templateId': templateId,
         'fieldId': fieldId,
         'displayLabel': displayLabel,
+        'name': name,
       };
 
   factory ComfyPromptSendTarget.fromJson(Map<String, dynamic> json) =>
@@ -66,6 +84,7 @@ class ComfyPromptSendTarget {
         templateId: json['templateId']?.toString() ?? '',
         fieldId: json['fieldId']?.toString() ?? '',
         displayLabel: json['displayLabel']?.toString() ?? '',
+        name: json['name']?.toString() ?? '',
       );
 
   bool get isValid =>
@@ -75,6 +94,7 @@ class ComfyPromptSendTarget {
 class ComfyPromptSendMemory {
   ComfyPromptSendMemory._();
   static const _kKey = 'comfy_prompt_send_target_v1';
+  static const _kShortcuts = 'comfy_prompt_shortcuts_v1';
 
   static Future<ComfyPromptSendTarget?> load() async {
     try {
@@ -97,9 +117,38 @@ class ComfyPromptSendMemory {
     } catch (_) {}
   }
 
+  static Future<List<ComfyPromptSendTarget>> loadShortcuts() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_kShortcuts);
+      if (raw == null || raw.isEmpty) return const [];
+      final list = jsonDecode(raw);
+      if (list is! List) return const [];
+      return [
+        for (final item in list)
+          if (item is Map)
+            ComfyPromptSendTarget.fromJson(Map<String, dynamic>.from(item)),
+      ].where((t) => t.isValid).toList(growable: false);
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  static Future<void> saveShortcuts(List<ComfyPromptSendTarget> items) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(
+        _kShortcuts,
+        jsonEncode(items.map((e) => e.toJson()).toList()),
+      );
+    } catch (_) {}
+  }
+
   /// 启动时/进入编辑器时灌入 provider，供右键菜单同步读取。
   static Future<void> hydrateProvider(WidgetRef ref) async {
     final loaded = await load();
+    final shortcuts = await loadShortcuts();
+    ref.read(comfyPromptShortcutsProvider.notifier).state = shortcuts;
     if (loaded == null) {
       ref.read(comfyPromptLastTargetProvider.notifier).state = null;
       return;
@@ -193,6 +242,22 @@ String _displayLabelFor({
 }) =>
     '${server.name} · ${template.name} · ${_fieldPickLabel(template, field)}';
 
+Widget _shortcutMenuLabel(ComfyPromptSendTarget shortcut, TextStyle style) {
+  final path = shortcut.displayLabel.trim();
+  final name = shortcut.name.trim();
+  final text = name.isEmpty ? path : '$name：$path';
+  return Text(
+    text,
+    maxLines: 1,
+    overflow: TextOverflow.ellipsis,
+    style: style,
+  );
+}
+
+Widget _menuDivider(Color color) {
+  return Divider(height: 1, thickness: 1, color: color.withValues(alpha: 0.16));
+}
+
 class _PromptFillPickResult {
   final ComfyServer server;
   final ComfyTemplate template;
@@ -212,6 +277,7 @@ Future<_PromptFillPickResult?> _pickPromptFillTarget({
   required List<ComfyTemplate> allTemplates,
   required ComfyBindings bindings,
   ComfyPromptSendTarget? last,
+  String confirmLabel = '填入',
 }) {
   return showDialog<_PromptFillPickResult>(
     context: context,
@@ -221,6 +287,45 @@ Future<_PromptFillPickResult?> _pickPromptFillTarget({
       allTemplates: allTemplates,
       bindings: bindings,
       last: last,
+      confirmLabel: confirmLabel,
+    ),
+  );
+}
+
+/// 设置页添加快捷路径：选出实例 / 模板 / 字段，不立即填入。
+Future<ComfyPromptSendTarget?> pickComfyPromptShortcut(
+  BuildContext context,
+) async {
+  final servers = AppConfig.instance.comfyServers
+      .where((s) => s.enabled)
+      .toList(growable: false);
+  if (servers.isEmpty) {
+    showGlobalToast(context, '请先在设置中启用至少一个 Comfy 实例');
+    return null;
+  }
+  final templates = await ComfyTemplateStore.loadTemplates();
+  final bindings = await ComfyTemplateStore.loadBindings();
+  if (!context.mounted) return null;
+  if (templates.isEmpty) {
+    showGlobalToast(context, '还没有模板，请先在生成面板导入');
+    return null;
+  }
+  final picked = await _pickPromptFillTarget(
+    context: context,
+    servers: servers,
+    allTemplates: templates,
+    bindings: bindings,
+    confirmLabel: '添加',
+  );
+  if (picked == null) return null;
+  return ComfyPromptSendTarget(
+    serverId: picked.server.id,
+    templateId: picked.template.id,
+    fieldId: picked.field.id,
+    displayLabel: _displayLabelFor(
+      server: picked.server,
+      template: picked.template,
+      field: picked.field,
     ),
   );
 }
@@ -230,12 +335,14 @@ class _PromptFillPickerDialog extends StatefulWidget {
   final List<ComfyTemplate> allTemplates;
   final ComfyBindings bindings;
   final ComfyPromptSendTarget? last;
+  final String confirmLabel;
 
   const _PromptFillPickerDialog({
     required this.servers,
     required this.allTemplates,
     required this.bindings,
     this.last,
+    this.confirmLabel = '填入',
   });
 
   @override
@@ -469,7 +576,7 @@ class _PromptFillPickerDialogState extends State<_PromptFillPickerDialog> {
                                 ),
                               );
                             },
-                      child: const Text('填入'),
+                      child: Text(widget.confirmLabel),
                     ),
                   ],
                 ),
@@ -701,8 +808,19 @@ class _ComfyPromptFillSubmenuButtonState
 
     final topLeft = box.localToGlobal(Offset(box.size.width - 2, 0));
     final last = ref.read(comfyPromptLastTargetProvider);
+    final enabledIds = {
+      for (final s in ref.read(comfyServersProvider))
+        if (s.enabled) s.id,
+    };
     final fullLabel = last?.displayLabel.trim() ?? '';
-    final hasLast = last != null && last.isValid && fullLabel.isNotEmpty;
+    final hasLast = last != null &&
+        last.isValid &&
+        fullLabel.isNotEmpty &&
+        enabledIds.contains(last.serverId);
+    final shortcuts = [
+      for (final item in ref.read(comfyPromptShortcutsProvider))
+        if (item.isValid && enabledIds.contains(item.serverId)) item,
+    ];
     final shortLabel = fullLabel.length > 36
         ? '${fullLabel.substring(0, 36)}…'
         : fullLabel;
@@ -752,32 +870,53 @@ class _ComfyPromptFillSubmenuButtonState
                     elevation: 1,
                     type: MaterialType.card,
                     child: SizedBox(
-                      width: 222,
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          if (hasLast)
-                            Tooltip(
-                              message: fullLabel,
-                              waitDuration:
-                                  const Duration(milliseconds: 250),
-                              child: DesktopTextSelectionToolbarButton(
-                                onPressed: () => _run(useLast: true),
-                                child: Text(
-                                  '填入上次：$shortLabel',
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: labelStyle.copyWith(color: fg),
+                      width: 280,
+                      child: ConstrainedBox(
+                        constraints: const BoxConstraints(maxHeight: 360),
+                        child: SingleChildScrollView(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              if (hasLast) ...[
+                                Tooltip(
+                                  message: fullLabel,
+                                  waitDuration:
+                                      const Duration(milliseconds: 250),
+                                  child: DesktopTextSelectionToolbarButton(
+                                    onPressed: () => _run(useLast: true),
+                                    child: Text(
+                                      '填入上次：$shortLabel',
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: labelStyle.copyWith(color: fg),
+                                    ),
+                                  ),
                                 ),
+                                _menuDivider(fg),
+                              ],
+                              for (final shortcut in shortcuts)
+                                Tooltip(
+                                  message: shortcut.displayLabel,
+                                  waitDuration:
+                                      const Duration(milliseconds: 250),
+                                  child: DesktopTextSelectionToolbarButton(
+                                    onPressed: () => _run(explicit: shortcut),
+                                    child: _shortcutMenuLabel(
+                                      shortcut,
+                                      labelStyle.copyWith(color: fg),
+                                    ),
+                                  ),
+                                ),
+                              if (shortcuts.isNotEmpty) _menuDivider(fg),
+                              DesktopTextSelectionToolbarButton.text(
+                                context: ctx,
+                                onPressed: () => _run(useLast: false),
+                                text: '选择目标…',
                               ),
-                            ),
-                          DesktopTextSelectionToolbarButton.text(
-                            context: ctx,
-                            onPressed: () => _run(useLast: false),
-                            text: '选择目标…',
+                            ],
                           ),
-                        ],
+                        ),
                       ),
                     ),
                   ),
@@ -792,7 +931,10 @@ class _ComfyPromptFillSubmenuButtonState
     setState(() {});
   }
 
-  Future<void> _run({required bool useLast}) async {
+  Future<void> _run({
+    bool useLast = false,
+    ComfyPromptSendTarget? explicit,
+  }) async {
     final text = widget.selectedText;
     final host = widget.hostContext;
     if (!host.mounted) return;
@@ -807,6 +949,7 @@ class _ComfyPromptFillSubmenuButtonState
       container,
       text: text,
       useLastTarget: useLast,
+      explicitTarget: explicit,
     );
   }
 
@@ -869,6 +1012,7 @@ Future<bool> sendSelectionToComfyPrompt(
   ProviderContainer container, {
   required String text,
   bool useLastTarget = false,
+  ComfyPromptSendTarget? explicitTarget,
 }) async {
   try {
     return await _sendSelectionToComfyPromptImpl(
@@ -876,6 +1020,7 @@ Future<bool> sendSelectionToComfyPrompt(
       container,
       text: text,
       useLastTarget: useLastTarget,
+      explicitTarget: explicitTarget,
     );
   } catch (e) {
     if (context.mounted) {
@@ -890,6 +1035,7 @@ Future<bool> _sendSelectionToComfyPromptImpl(
   ProviderContainer container, {
   required String text,
   required bool useLastTarget,
+  ComfyPromptSendTarget? explicitTarget,
 }) async {
   final trimmed = text.trimRight();
   if (trimmed.trim().isEmpty) {
@@ -918,16 +1064,21 @@ Future<bool> _sendSelectionToComfyPromptImpl(
       await ComfyPromptSendMemory.load();
   if (!context.mounted) return false;
 
-  if (useLastTarget) {
+  if (useLastTarget || explicitTarget != null) {
     final resolved = _resolveTarget(
-      last: last,
+      last: explicitTarget ?? last,
       servers: servers,
       templates: templates,
       bindings: bindings,
     );
     if (resolved == null) {
-      showGlobalToast(context, '上次目标已失效，请重新选择');
-      container.read(comfyPromptLastTargetProvider.notifier).state = null;
+      showGlobalToast(
+        context,
+        explicitTarget != null ? '该快捷路径已失效，请到设置里更新' : '上次目标已失效，请重新选择',
+      );
+      if (explicitTarget == null) {
+        container.read(comfyPromptLastTargetProvider.notifier).state = null;
+      }
       return false;
     }
     return _commitPromptFill(

@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import '../../core/comfy/comfy_models.dart';
+import '../../core/comfy_prompt_bridge.dart';
 import '../../core/config.dart';
 import '../../core/key_chord.dart';
 import '../../core/providers.dart';
@@ -467,6 +468,8 @@ class _ComfySectionState extends ConsumerState<_ComfySection> {
             label: const Text('添加实例'),
           ),
         ),
+        const SizedBox(height: 28),
+        const _ComfyPromptShortcuts(),
       ],
     );
   }
@@ -544,6 +547,221 @@ class _ComfySectionState extends ConsumerState<_ComfySection> {
     final next =
         ref.read(comfyServersProvider).where((s) => s.id != server.id).toList();
     await _persist(next);
+  }
+}
+
+/// 填入生成提示词的固定路径。放在 Comfy 实例下面：路径里含实例，
+/// 关掉「启用」后二级菜单会一起藏掉对应项。
+class _ComfyPromptShortcuts extends ConsumerStatefulWidget {
+  const _ComfyPromptShortcuts();
+
+  @override
+  ConsumerState<_ComfyPromptShortcuts> createState() =>
+      _ComfyPromptShortcutsState();
+}
+
+class _ComfyPromptShortcutsState extends ConsumerState<_ComfyPromptShortcuts> {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) ComfyPromptSendMemory.hydrateProvider(ref);
+    });
+  }
+
+  Future<void> _save(List<ComfyPromptSendTarget> next) async {
+    ref.read(comfyPromptShortcutsProvider.notifier).state = next;
+    await ComfyPromptSendMemory.saveShortcuts(next);
+  }
+
+  Future<void> _add() async {
+    final picked = await pickComfyPromptShortcut(context);
+    if (picked == null || !mounted) return;
+    final named = await _promptShortcutName(context);
+    if (named == null || !mounted) return;
+    final item = picked.copyWith(name: named);
+    final current = ref.read(comfyPromptShortcutsProvider);
+    final exists = current.any(
+      (t) =>
+          t.serverId == item.serverId &&
+          t.templateId == item.templateId &&
+          t.fieldId == item.fieldId,
+    );
+    if (exists) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('这条路径已经在列表里')),
+      );
+      return;
+    }
+    await _save([...current, item]);
+  }
+
+  Future<void> _rename(int index) async {
+    final shortcuts = ref.read(comfyPromptShortcutsProvider);
+    if (index < 0 || index >= shortcuts.length) return;
+    final named = await _promptShortcutName(
+      context,
+      initial: shortcuts[index].name,
+    );
+    if (named == null) return;
+    final next = List<ComfyPromptSendTarget>.of(shortcuts);
+    next[index] = next[index].copyWith(name: named);
+    await _save(next);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final shortcuts = ref.watch(comfyPromptShortcutsProvider);
+    final servers = ref.watch(comfyServersProvider);
+    final cs = Theme.of(context).colorScheme;
+    final enabledIds = {
+      for (final s in servers)
+        if (s.enabled) s.id,
+    };
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text('填入快捷路径', style: Theme.of(context).textTheme.titleMedium),
+        const SizedBox(height: 8),
+        Text(
+          '出现在文档右键「填入生成提示词」的二级菜单里，排在「填入上次」后面。'
+          '实例关闭启用后，对应项会从菜单隐藏。',
+          style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                color: cs.onSurfaceVariant,
+              ),
+        ),
+        const SizedBox(height: 12),
+        if (shortcuts.isEmpty)
+          Text(
+            '还没有快捷路径',
+            style: Theme.of(context).textTheme.bodySmall,
+          )
+        else
+          for (var i = 0; i < shortcuts.length; i++)
+            Card(
+              margin: const EdgeInsets.only(bottom: 8),
+              child: ListTile(
+                title: Text(
+                  shortcuts[i].name.trim().isEmpty
+                      ? (shortcuts[i].displayLabel.isEmpty
+                          ? '未命名路径'
+                          : shortcuts[i].displayLabel)
+                      : '${shortcuts[i].name.trim()}：',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: enabledIds.contains(shortcuts[i].serverId)
+                      ? null
+                      : TextStyle(color: cs.onSurface.withValues(alpha: 0.45)),
+                ),
+                subtitle: () {
+                  final lines = [
+                    if (shortcuts[i].name.trim().isNotEmpty)
+                      shortcuts[i].displayLabel,
+                    if (!enabledIds.contains(shortcuts[i].serverId))
+                      '实例已关闭，菜单中隐藏',
+                  ];
+                  if (lines.isEmpty) return null;
+                  return Text(
+                    lines.join('\n'),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  );
+                }(),
+                trailing: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    IconButton(
+                      tooltip: '命名',
+                      icon: const Icon(Icons.drive_file_rename_outline, size: 20),
+                      onPressed: () => _rename(i),
+                    ),
+                    IconButton(
+                      tooltip: '删除',
+                      icon: Icon(Icons.delete_outline, size: 20, color: cs.error),
+                      onPressed: () {
+                        final next = List<ComfyPromptSendTarget>.of(shortcuts)
+                          ..removeAt(i);
+                        _save(next);
+                      },
+                    ),
+                  ],
+                ),
+              ),
+            ),
+        const SizedBox(height: 8),
+        Align(
+          alignment: Alignment.centerLeft,
+          child: FilledButton.tonalIcon(
+            onPressed: _add,
+            icon: const Icon(Icons.add),
+            label: const Text('添加快捷路径'),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// 返回 trim 后的名称；取消返回 null。空字符串表示不命名。
+Future<String?> _promptShortcutName(
+  BuildContext context, {
+  String initial = '',
+}) {
+  return showDialog<String>(
+    context: context,
+    builder: (ctx) => _ShortcutNameDialog(initial: initial),
+  );
+}
+
+class _ShortcutNameDialog extends StatefulWidget {
+  final String initial;
+
+  const _ShortcutNameDialog({required this.initial});
+
+  @override
+  State<_ShortcutNameDialog> createState() => _ShortcutNameDialogState();
+}
+
+class _ShortcutNameDialogState extends State<_ShortcutNameDialog> {
+  late final TextEditingController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = TextEditingController(text: widget.initial);
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('快捷路径名称', style: TextStyle(fontSize: 15)),
+      content: TextField(
+        controller: _controller,
+        autofocus: true,
+        decoration: const InputDecoration(
+          labelText: '名称',
+          hintText: '可留空',
+        ),
+        onSubmitted: (value) => Navigator.pop(context, value.trim()),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('取消'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(context, _controller.text.trim()),
+          child: const Text('确定'),
+        ),
+      ],
+    );
   }
 }
 
