@@ -1720,17 +1720,12 @@ class _AssetCard extends ConsumerWidget {
     ColorScheme scheme,
     InlineFsEdit? inline,
   ) {
-    return Container(
-      decoration: BoxDecoration(
-        color: selected
-            ? scheme.primary.withValues(alpha: 0.16)
-            : scheme.surfaceContainerHigh,
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(
-          color: selected ? scheme.primary : Colors.white10,
-          width: selected ? 1.5 : 1,
-        ),
-      ),
+    final renaming =
+        inline?.matchesRename(entity.path, FsShortcutPane.assets) == true;
+    return _AssetGridHoverChrome(
+      selected: selected,
+      renaming: renaming,
+      scheme: scheme,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -1950,6 +1945,69 @@ class _AssetCard extends ConsumerWidget {
     }
     if (lower.endsWith('.md')) return (Icons.description, Colors.blueGrey);
     return (Icons.insert_drive_file, Colors.grey);
+  }
+}
+
+/// 网格卡片轻量悬停：比选中更淡，只提示可点。
+class _AssetGridHoverChrome extends StatefulWidget {
+  const _AssetGridHoverChrome({
+    required this.selected,
+    required this.renaming,
+    required this.scheme,
+    required this.child,
+  });
+
+  final bool selected;
+  final bool renaming;
+  final ColorScheme scheme;
+  final Widget child;
+
+  @override
+  State<_AssetGridHoverChrome> createState() => _AssetGridHoverChromeState();
+}
+
+class _AssetGridHoverChromeState extends State<_AssetGridHoverChrome> {
+  bool _hovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final selected = widget.selected;
+    final renaming = widget.renaming;
+    final scheme = widget.scheme;
+    final showHover = _hovered && !selected && !renaming;
+    return MouseRegion(
+      onEnter: renaming
+          ? null
+          : (_) {
+              if (!_hovered) setState(() => _hovered = true);
+            },
+      onExit: (_) {
+        if (_hovered) setState(() => _hovered = false);
+      },
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 90),
+        decoration: BoxDecoration(
+          color: selected
+              ? scheme.primary.withValues(alpha: 0.16)
+              : showHover
+                  ? Color.alphaBlend(
+                      scheme.onSurface.withValues(alpha: 0.06),
+                      scheme.surfaceContainerHigh,
+                    )
+                  : scheme.surfaceContainerHigh,
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(
+            color: selected
+                ? scheme.primary
+                : showHover
+                    ? Colors.white24
+                    : Colors.white10,
+            width: selected ? 1.5 : 1,
+          ),
+        ),
+        child: widget.child,
+      ),
+    );
   }
 }
 

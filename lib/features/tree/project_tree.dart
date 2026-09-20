@@ -795,6 +795,7 @@ class _TreeNodeWidget extends ConsumerStatefulWidget {
 
 class _TreeNodeWidgetState extends ConsumerState<_TreeNodeWidget> {
   Offset _menuPos = Offset.zero;
+  bool _hovered = false;
 
   void _syncExpandedPathsToProvider() {
     final out = <String>[];
@@ -1075,105 +1076,121 @@ class _TreeNodeWidgetState extends ConsumerState<_TreeNodeWidget> {
                   isFile ? Directory(node.path).parent.path : node.path,
                 );
               },
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  // 原地重命名时只留输入框描边，避免「选中框套编辑框」。
-                  color: selected && !renaming
-                      ? scheme.primary.withValues(alpha: 0.15)
-                      : null,
-                  borderRadius: BorderRadius.circular(4),
-                  border: selected && !renaming
-                      ? Border.all(
-                          color: scheme.primary.withValues(alpha: 0.55),
-                        )
-                      : null,
-                ),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: InkWell(
-                        borderRadius: BorderRadius.circular(4),
-                        onTap: renaming ? null : () => _onNodeTap(isFile: isFile),
-                        onDoubleTap: renaming
-                            ? null
-                            : () {
-                                if (isFile) {
-                                  _setSingleTreeSelection(
-                                    path: node.path,
-                                    isDir: false,
-                                  );
-                                  _openFile(node.path, pin: true);
-                                } else {
-                                  _toggleExpand();
-                                }
-                              },
-                        onSecondaryTapDown: renaming
-                            ? null
-                            : (d) => _menuPos = d.globalPosition,
-                        onSecondaryTap:
-                            renaming ? null : () => _showMenu(context),
-                        child: Padding(
-                          padding: const EdgeInsets.symmetric(vertical: 4),
-                          child: Row(
-                            children: [
-                              Icon(
-                                _iconFor(node),
-                                size: 16,
-                                color: _iconColorFor(context, node),
-                              ),
-                              const SizedBox(width: 6),
-                              Expanded(
-                                child: renameEdit != null
-                                    ? InlineFsNameField(
-                                        key: ValueKey(
-                                            'rename-${renameEdit.nonce}'),
-                                        initialName: renameEdit.initialName,
-                                        isDir: !isFile,
-                                        onSubmit: (name) => unawaited(
-                                          _commitInline(renameEdit, name),
+              child: MouseRegion(
+                onEnter: renaming
+                    ? null
+                    : (_) {
+                        if (!_hovered) setState(() => _hovered = true);
+                      },
+                onExit: (_) {
+                  if (_hovered) setState(() => _hovered = false);
+                },
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    // 原地重命名时只留输入框描边，避免「选中框套编辑框」。
+                    color: renaming
+                        ? null
+                        : selected
+                            ? scheme.primary.withValues(alpha: 0.15)
+                            : _hovered
+                                ? scheme.onSurface.withValues(alpha: 0.07)
+                                : null,
+                    borderRadius: BorderRadius.circular(4),
+                    border: selected && !renaming
+                        ? Border.all(
+                            color: scheme.primary.withValues(alpha: 0.55),
+                          )
+                        : null,
+                  ),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: InkWell(
+                          borderRadius: BorderRadius.circular(4),
+                          onTap: renaming
+                              ? null
+                              : () => _onNodeTap(isFile: isFile),
+                          onDoubleTap: renaming
+                              ? null
+                              : () {
+                                  if (isFile) {
+                                    _setSingleTreeSelection(
+                                      path: node.path,
+                                      isDir: false,
+                                    );
+                                    _openFile(node.path, pin: true);
+                                  } else {
+                                    _toggleExpand();
+                                  }
+                                },
+                          onSecondaryTapDown: renaming
+                              ? null
+                              : (d) => _menuPos = d.globalPosition,
+                          onSecondaryTap:
+                              renaming ? null : () => _showMenu(context),
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(vertical: 4),
+                            child: Row(
+                              children: [
+                                Icon(
+                                  _iconFor(node),
+                                  size: 16,
+                                  color: _iconColorFor(context, node),
+                                ),
+                                const SizedBox(width: 6),
+                                Expanded(
+                                  child: renameEdit != null
+                                      ? InlineFsNameField(
+                                          key: ValueKey(
+                                              'rename-${renameEdit.nonce}'),
+                                          initialName: renameEdit.initialName,
+                                          isDir: !isFile,
+                                          onSubmit: (name) => unawaited(
+                                            _commitInline(renameEdit, name),
+                                          ),
+                                          onCancel: () =>
+                                              clearInlineFsEdit(ref),
+                                        )
+                                      : Text(
+                                          node.name,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: TextStyle(
+                                            fontSize: 13,
+                                            fontWeight: FontWeight.w400,
+                                            color: isExpanded
+                                                ? scheme.primary
+                                                : null,
+                                          ),
                                         ),
-                                        onCancel: () =>
-                                            clearInlineFsEdit(ref),
-                                      )
-                                    : Text(
-                                        node.name,
-                                        overflow: TextOverflow.ellipsis,
-                                        style: TextStyle(
-                                          fontSize: 13,
-                                          fontWeight: FontWeight.w400,
-                                          color: isExpanded
-                                              ? scheme.primary
-                                              : null,
-                                        ),
-                                      ),
-                              ),
-                              if (!renaming) _progressBubble(node),
-                            ],
+                                ),
+                                if (!renaming) _progressBubble(node),
+                              ],
+                            ),
                           ),
                         ),
                       ),
-                    ),
-                    if (canExpand && !renaming)
-                      InkWell(
-                        borderRadius: BorderRadius.circular(4),
-                        onTap: _toggleExpand,
-                        onSecondaryTapDown: (d) =>
-                            _menuPos = d.globalPosition,
-                        onSecondaryTap: () => _showMenu(context),
-                        child: Padding(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 4,
-                            vertical: 4,
-                          ),
-                          child: Icon(
-                            isExpanded
-                                ? Icons.keyboard_arrow_down
-                                : Icons.keyboard_arrow_right,
-                            size: 16,
+                      if (canExpand && !renaming)
+                        InkWell(
+                          borderRadius: BorderRadius.circular(4),
+                          onTap: _toggleExpand,
+                          onSecondaryTapDown: (d) =>
+                              _menuPos = d.globalPosition,
+                          onSecondaryTap: () => _showMenu(context),
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 4,
+                              vertical: 4,
+                            ),
+                            child: Icon(
+                              isExpanded
+                                  ? Icons.keyboard_arrow_down
+                                  : Icons.keyboard_arrow_right,
+                              size: 16,
+                            ),
                           ),
                         ),
-                      ),
-                  ],
+                    ],
+                  ),
                 ),
               ),
             ),
