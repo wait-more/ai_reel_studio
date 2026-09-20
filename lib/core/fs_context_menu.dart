@@ -88,6 +88,23 @@ void _removeMenuEntry(OverlayEntry? entry) {
   }
 }
 
+/// 菜单内容高度。条目 36，分隔线用自身高度，避免把整表估成固定上限。
+double _estimateMenuHeight(List<Widget> children) {
+  var height = 0.0;
+  for (final child in children) {
+    if (child is Divider) {
+      height += child.height ?? 16;
+    } else if (child is Padding) {
+      final insets = child.padding;
+      final vertical = insets is EdgeInsets ? insets.vertical : 16.0;
+      height += vertical + 16;
+    } else {
+      height += 36;
+    }
+  }
+  return height;
+}
+
 /// 左树与中间素材栏共用的文件系统右键菜单。
 ///
 /// 关键要点（修复「换地方右键只关不开」）：
@@ -397,15 +414,27 @@ Future<void> showFsContextMenu({
         ],
       ];
 
-      // 命中检测用真实布局高度，避免估算过高把空白点击当成点在菜单内。
-      final estimatedHeight =
-          (children.length * 36.0).clamp(80.0, 480.0);
-      final left =
-          globalPosition.dx.clamp(8.0, size.width - menuWidth - 8.0);
-      final top =
-          globalPosition.dy.clamp(8.0, size.height - estimatedHeight - 8.0);
+      // 按条目真实高度估算。不能再把上限卡在 480：目录菜单更长，
+      // 贴底打开时「删除」会画出窗口，被任务栏挡住。
+      final contentHeight = _estimateMenuHeight(children);
+      final padding = MediaQuery.paddingOf(ctx);
+      final topLimit = padding.top + 8;
+      final bottomLimit = size.height - padding.bottom - 8;
+      final available = bottomLimit - topLimit;
+      final menuHeight = available <= 0
+          ? contentHeight
+          : (contentHeight <= available ? contentHeight : available);
+      final maxLeft = size.width - menuWidth - 8;
+      final left = maxLeft <= 8
+          ? 8.0
+          : globalPosition.dx.clamp(8.0, maxLeft);
+      var top = globalPosition.dy;
+      if (top + menuHeight > bottomLimit) {
+        top = bottomLimit - menuHeight;
+      }
+      if (top < topLimit) top = topLimit;
 
-      _activeMenuRect ??= Rect.fromLTWH(left, top, menuWidth, estimatedHeight);
+      _activeMenuRect ??= Rect.fromLTWH(left, top, menuWidth, menuHeight);
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (_activeMenuEntry != entry || !entry.mounted) return;
         final box =
@@ -426,7 +455,7 @@ Future<void> showFsContextMenu({
           clipBehavior: Clip.antiAlias,
           color: menuColor,
           child: ConstrainedBox(
-            constraints: BoxConstraints(maxHeight: size.height - 16),
+            constraints: BoxConstraints(maxHeight: menuHeight),
             child: SingleChildScrollView(
               child: SizedBox(
                 width: menuWidth,
