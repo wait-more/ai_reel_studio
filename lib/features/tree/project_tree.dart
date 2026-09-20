@@ -149,20 +149,33 @@ class _ProjectTreeState extends ConsumerState<ProjectTree> {
     if (expandedPaths.isEmpty) {
       _collectExpandedPaths(ref.read(treeRootProvider), expandedPaths);
     }
+    final savedOffset = _treeScrollController.hasClients
+        ? _treeScrollController.offset
+        : null;
 
     _lastSyncedPath = null; // 强制重新执行展开
     DirectoryParser.parseRootAsync(AppConfig.instance.projectRoot).then(
         (root) async {
       if (!mounted) return;
-      ref.read(treeRootProvider.notifier).state = root;
-      // 2. 恢复用户展开的分支（懒加载壳需先加载子项）
+      // 先在未挂上的新树上恢复展开。若先把折叠树交给界面，
+      // 列表变短会把滚动夹到 0，展开后再也回不去。
       await _applyExpandedPaths(root, expandedPaths);
       if (!mounted) return;
+      ref.read(treeRootProvider.notifier).state = root;
       setState(() {});
       _publishExpandedPaths();
-      // 3. 锚定到触发变更的位置
-      unawaited(_expandTo(anchorPath));
+      await _expandTo(anchorPath);
+      if (!mounted) return;
+      await _restoreTreeScroll(savedOffset);
     });
+  }
+
+  Future<void> _restoreTreeScroll(double? offset) async {
+    if (offset == null) return;
+    await WidgetsBinding.instance.endOfFrame;
+    if (!mounted || !_treeScrollController.hasClients) return;
+    final max = _treeScrollController.position.maxScrollExtent;
+    _treeScrollController.jumpTo(offset.clamp(0.0, max));
   }
 
   
