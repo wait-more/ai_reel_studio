@@ -604,8 +604,24 @@ class _ProjectTreeState extends ConsumerState<ProjectTree> {
         color: Theme.of(context).colorScheme.surfaceContainerLow,
         child: Column(
           children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(8, 8, 4, 0),
+            Container(
+              height: kColumnTopBarHeight,
+              decoration: BoxDecoration(
+                color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                border: Border(
+                  top: BorderSide(
+                    color: Theme.of(context)
+                        .dividerColor
+                        .withValues(alpha: 0.35),
+                  ),
+                  bottom: BorderSide(
+                    color: Theme.of(context)
+                        .dividerColor
+                        .withValues(alpha: 0.35),
+                  ),
+                ),
+              ),
+              padding: const EdgeInsets.fromLTRB(8, 0, 4, 0),
               child: Row(
                 children: [
                   Expanded(
@@ -620,6 +636,11 @@ class _ProjectTreeState extends ConsumerState<ProjectTree> {
                         suffixIcon: _searchText.isNotEmpty
                             ? IconButton(
                                 icon: const Icon(Icons.clear, size: 16),
+                                padding: EdgeInsets.zero,
+                                constraints: const BoxConstraints(
+                                  minWidth: 28,
+                                  minHeight: 28,
+                                ),
                                 onPressed: () {
                                   _searchController.clear();
                                   setState(() => _searchText = '');
@@ -631,19 +652,33 @@ class _ProjectTreeState extends ConsumerState<ProjectTree> {
                           borderSide: BorderSide.none,
                         ),
                         filled: true,
+                        fillColor: Theme.of(context)
+                            .colorScheme
+                            .surface
+                            .withValues(alpha: 0.55),
                         contentPadding:
-                            const EdgeInsets.symmetric(vertical: 8),
+                            const EdgeInsets.symmetric(vertical: 6),
                       ),
                     ),
                   ),
                   IconButton(
                     icon: const Icon(Icons.add, size: 20),
                     tooltip: '新建顶层剧本',
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(
+                      minWidth: 32,
+                      minHeight: 32,
+                    ),
                     onPressed: _createScript,
                   ),
                   IconButton(
                     icon: const Icon(Icons.refresh, size: 18),
                     tooltip: '手动刷新目录',
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(
+                      minWidth: 32,
+                      minHeight: 32,
+                    ),
                     onPressed: () => _handleTreeChanged(''),
                   ),
                 ],

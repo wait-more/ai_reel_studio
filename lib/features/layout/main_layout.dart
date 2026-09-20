@@ -564,9 +564,20 @@ class _MainLayoutState extends ConsumerState<MainLayout> with WindowListener {
   }
 
   Widget _buildTopBar(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
     return Container(
-      height: 40,
-      color: Theme.of(context).colorScheme.surfaceContainerHighest,
+      height: kColumnTopBarHeight,
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainerHighest,
+        border: Border(
+          top: BorderSide(
+            color: Theme.of(context).dividerColor.withValues(alpha: 0.35),
+          ),
+          bottom: BorderSide(
+            color: Theme.of(context).dividerColor.withValues(alpha: 0.35),
+          ),
+        ),
+      ),
       padding: const EdgeInsets.symmetric(horizontal: 8),
       child: Row(
         children: [

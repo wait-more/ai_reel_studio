@@ -8,6 +8,9 @@ import 'directory_parser.dart';
 import 'key_chord.dart';
 import 'workspace_memory.dart';
 
+/// 左 / 中 / 右三栏最顶栏统一高度（以中间栏顶栏为准）。
+const double kColumnTopBarHeight = 40;
+
 /// 当前选中的文件路径（在编辑区打开）
 final selectedFileProvider = StateProvider<String?>((ref) => null);
 

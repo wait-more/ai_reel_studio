@@ -566,7 +566,6 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
       child: Column(
         children: [
           _buildTabBar(context),
-          const Divider(height: 1, color: Colors.white12),
           Expanded(
             child: _tabs.isEmpty
                 ? const SizedBox.shrink()
@@ -606,8 +605,14 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
 
   Widget _buildTabBar(BuildContext context) {
     return Container(
-      height: 34,
-      color: const Color(0xFF2D2D2D),
+      height: kColumnTopBarHeight,
+      decoration: const BoxDecoration(
+        color: Color(0xFF2D2D2D),
+        border: Border(
+          top: BorderSide(color: Colors.white12, width: 1),
+          bottom: BorderSide(color: Colors.white12, width: 1),
+        ),
+      ),
       child: Row(
         children: [
           Expanded(
