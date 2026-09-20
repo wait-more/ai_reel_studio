@@ -821,6 +821,100 @@ Future<OpenCodeSelectSessionResult> trySelectOpenCodeTuiSession({
   }
 }
 
+/// 让正在跑的 TUI 回到空白新会话（等同 `/new`）。
+///
+/// 会话要等第一次交流才会进列表，这里不创建数据库记录。
+Future<OpenCodeSelectSessionResult> tryStartOpenCodeNewSession({
+  required int port,
+}) async {
+  if (port <= 0) {
+    return OpenCodeSelectSessionResult.fail('无有效端口');
+  }
+
+  final client = HttpClient()
+    ..connectionTimeout = const Duration(milliseconds: 800);
+  try {
+    final healthUri = Uri(
+      scheme: 'http',
+      host: '127.0.0.1',
+      port: port,
+      path: '/global/health',
+    );
+    try {
+      final healthReq = await client.getUrl(healthUri);
+      final healthRes =
+          await healthReq.close().timeout(const Duration(milliseconds: 800));
+      await healthRes.drain<void>();
+      if (healthRes.statusCode < 200 || healthRes.statusCode >= 300) {
+        return OpenCodeSelectSessionResult.fail(
+          '健康检查失败',
+          statusCode: healthRes.statusCode,
+        );
+      }
+    } catch (e) {
+      return OpenCodeSelectSessionResult.fail('无法连接 :$port（$e）');
+    }
+
+    Future<OpenCodeSelectSessionResult> postJson(
+      Uri uri,
+      Map<String, dynamic>? body,
+    ) async {
+      final req = await client.postUrl(uri);
+      req.headers.set(HttpHeaders.acceptHeader, 'application/json');
+      if (body != null) {
+        req.headers.set(HttpHeaders.contentTypeHeader, 'application/json');
+        final bytes = utf8.encode(jsonEncode(body));
+        req.contentLength = bytes.length;
+        req.add(bytes);
+      } else {
+        req.contentLength = 0;
+      }
+      final res = await req.close().timeout(const Duration(seconds: 2));
+      final text = await res.transform(utf8.decoder).join();
+      if (res.statusCode >= 200 && res.statusCode < 300) {
+        return OpenCodeSelectSessionResult.success();
+      }
+      return OpenCodeSelectSessionResult.fail(
+        text.trim().isEmpty ? 'HTTP ${res.statusCode}' : text.trim(),
+        statusCode: res.statusCode,
+      );
+    }
+
+    Uri tui(String path) => Uri(
+          scheme: 'http',
+          host: '127.0.0.1',
+          port: port,
+          path: path,
+        );
+
+    // 输入框里的草稿会跟着 /new 带过去，先清掉。失败不影响新建。
+    try {
+      await postJson(tui('/tui/clear-prompt'), null);
+    } catch (_) {}
+
+    final published = await postJson(tui('/tui/publish'), {
+      'type': 'tui.command.execute',
+      'properties': {'command': 'session.new'},
+    });
+    if (published.ok) return published;
+
+    // 别名接口：session_new → session.new
+    final executed = await postJson(tui('/tui/execute-command'), {
+      'command': 'session_new',
+    });
+    if (executed.ok) return executed;
+
+    return OpenCodeSelectSessionResult.fail(
+      published.reason,
+      statusCode: published.statusCode,
+    );
+  } catch (e) {
+    return OpenCodeSelectSessionResult.fail('请求异常：$e');
+  } finally {
+    client.close(force: true);
+  }
+}
+
 Future<bool> _waitOpenCodeHealth(int port, {int attempts = 40}) async {
   final client = HttpClient()
     ..connectionTimeout = const Duration(milliseconds: 400);

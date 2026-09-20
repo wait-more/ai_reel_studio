@@ -724,8 +724,7 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
     }
   }
 
-  void _clearRememberedOpenCodeSession(_ShellTab tab, String sessionId) {
-    if (tab.currentOpenCodeSessionId != sessionId) return;
+  void _forgetOpenCodeSession(_ShellTab tab) {
     tab.currentOpenCodeSessionId = null;
     final cmd = tab.launchCommand;
     if (cmd != null && cmd.isNotEmpty) {
@@ -743,6 +742,22 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
       }
     }
     _schedulePersist();
+  }
+
+  void _clearRememberedOpenCodeSession(_ShellTab tab, String sessionId) {
+    if (tab.currentOpenCodeSessionId != sessionId) return;
+    _forgetOpenCodeSession(tab);
+  }
+
+  Future<Set<String>?> _snapshotSessionIds(String? cwd) async {
+    final dir = cwd?.trim() ?? '';
+    if (dir.isEmpty) return null;
+    try {
+      final existing = await listOpenCodeSessions(cwd: dir, forceRefresh: true);
+      return {for (final s in existing) s.id};
+    } catch (_) {
+      return null;
+    }
   }
 
   Future<void> _openSessionMenu(BuildContext context) async {
@@ -763,6 +778,9 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
               parseOpenCodeServerPort(tab.launchCommand),
           knownSessionId: tab.currentOpenCodeSessionId ??
               parseOpenCodeSessionFlag(tab.launchCommand),
+          awaitingNewSessionIds: tab.awaitingNewSessionIds == null
+              ? null
+              : Set<String>.of(tab.awaitingNewSessionIds!),
           onActiveSessionResolved: (id) {
             if (!mounted || _tabs.isEmpty) return;
             final t = _tabs[_activeIndex];
@@ -770,7 +788,19 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
               _rememberOpenCodeSession(t, id);
             }
           },
+          onNewSessionIdentified: (id) {
+            if (!mounted || _tabs.isEmpty) return;
+            final t = _tabs[_activeIndex];
+            t.awaitingNewSessionIds = null;
+            if (t.currentOpenCodeSessionId != id) {
+              _rememberOpenCodeSession(t, id);
+            }
+          },
           onDismiss: _dismissSessionMenu,
+          onCreate: () {
+            _dismissSessionMenu();
+            unawaited(_startNewOpenCodeSession());
+          },
           onSelect: (session) {
             _dismissSessionMenu();
             unawaited(_switchToOpenCodeSession(session));
@@ -848,10 +878,83 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
     }
   }
 
+  Future<void> _startNewOpenCodeSession() async {
+    if (_switchingSession || _tabs.isEmpty) return;
+    final tab = _tabs[_activeIndex];
+    if (!_isOpencodeTab(tab)) return;
+
+    setState(() => _switchingSession = true);
+    try {
+      final cwd = tab.cwd ?? _projectRoot;
+      final port = tab.opencodeServerPort ??
+          parseOpenCodeServerPort(tab.launchCommand);
+      final baseline = await _snapshotSessionIds(cwd);
+
+      if (port != null && port > 0) {
+        final result = await tryStartOpenCodeNewSession(port: port);
+        if (result.ok) {
+          _forgetOpenCodeSession(tab);
+          tab.awaitingNewSessionIds = baseline;
+          invalidateOpenCodeSessionCache();
+          if (mounted) {
+            setState(() {});
+            showGlobalToast(context, '已打开新会话，开始对话后会出现在列表里');
+            _focusActiveTerminal();
+          }
+          return;
+        }
+        if (mounted) {
+          showGlobalToast(
+            context,
+            '进程内新建失败（${result.reason}），正在重启…',
+          );
+        }
+      } else if (mounted) {
+        showGlobalToast(context, '当前 OpenCode 未绑定端口，正在重启…');
+      }
+
+      _forgetOpenCodeSession(tab);
+      await _leaveOpenCodeToShell(tab.session, port: port);
+      if (!mounted) return;
+
+      final prepared = await prepareOpenCodeTuiLaunch('opencode');
+      final launch = prepared.command;
+      if (cwd != null && cwd.isNotEmpty) {
+        final line = Platform.isWindows
+            ? powershellCdAndCommand(cwd, launch)
+            : 'cd "$cwd" && $launch';
+        tab.session.sendCommand(line);
+      } else {
+        tab.session.sendCommand(launch);
+      }
+      tab.session.syncViewportSize();
+      tab.launchCommand = launch;
+      tab.opencodeServerPort = prepared.port;
+      tab.currentOpenCodeSessionId = null;
+      tab.awaitingNewSessionIds = baseline;
+      tab.launchedAgentHint = 'opencode';
+      invalidateOpenCodeSessionCache();
+      _schedulePersist();
+      _registerHost();
+      if (mounted) {
+        setState(() {});
+        showGlobalToast(context, '已打开新会话，开始对话后会出现在列表里');
+        _focusActiveTerminal();
+      }
+    } catch (e) {
+      if (mounted) {
+        showGlobalToast(context, '新建会话失败：$e');
+      }
+    } finally {
+      if (mounted) setState(() => _switchingSession = false);
+    }
+  }
+
   Future<void> _switchToOpenCodeSession(OpenCodeSessionInfo info) async {
     if (_switchingSession || _tabs.isEmpty) return;
     final tab = _tabs[_activeIndex];
     if (!_isOpencodeTab(tab)) return;
+    tab.awaitingNewSessionIds = null;
 
     // 已是当前会话则无需切换
     final already = tab.currentOpenCodeSessionId ??
@@ -984,8 +1087,11 @@ class _OpenCodeSessionMenuOverlay extends StatefulWidget {
     required this.cwd,
     this.serverPort,
     this.knownSessionId,
+    this.awaitingNewSessionIds,
     this.onActiveSessionResolved,
+    this.onNewSessionIdentified,
     required this.onDismiss,
+    required this.onCreate,
     required this.onSelect,
     this.onSessionDeleted,
     this.onMessage,
@@ -995,8 +1101,11 @@ class _OpenCodeSessionMenuOverlay extends StatefulWidget {
   final String cwd;
   final int? serverPort;
   final String? knownSessionId;
+  final Set<String>? awaitingNewSessionIds;
   final ValueChanged<String>? onActiveSessionResolved;
+  final ValueChanged<String>? onNewSessionIdentified;
   final VoidCallback onDismiss;
+  final VoidCallback onCreate;
   final ValueChanged<OpenCodeSessionInfo> onSelect;
   final ValueChanged<String>? onSessionDeleted;
   final ValueChanged<String>? onMessage;
@@ -1016,6 +1125,7 @@ class _OpenCodeSessionMenuOverlayState extends State<_OpenCodeSessionMenuOverlay
   bool _renaming = false;
   String? _pendingDeleteId;
   String? _deletingId;
+  bool _creating = false;
   final TextEditingController _filter = TextEditingController();
   final TextEditingController _edit = TextEditingController();
   final FocusNode _editFocus = FocusNode();
@@ -1180,6 +1290,33 @@ class _OpenCodeSessionMenuOverlayState extends State<_OpenCodeSessionMenuOverlay
     }
   }
 
+  String? _resolveCurrentSessionId({
+    required List<OpenCodeSessionInfo> list,
+    required String? liveId,
+    required String? known,
+    required Set<String>? baseline,
+  }) {
+    if (baseline == null) {
+      return (liveId != null && liveId.isNotEmpty) ? liveId : known;
+    }
+    if (liveId != null && liveId.isNotEmpty && !baseline.contains(liveId)) {
+      return liveId;
+    }
+    OpenCodeSessionInfo? newest;
+    for (final session in list) {
+      if (baseline.contains(session.id)) continue;
+      final time = session.updated ?? session.created;
+      final best = newest == null
+          ? null
+          : (newest.updated ?? newest.created);
+      if (newest == null ||
+          (time != null && (best == null || time.isAfter(best)))) {
+        newest = session;
+      }
+    }
+    return newest?.id;
+  }
+
   Future<void> _load({bool forceRefresh = false}) async {
     final peeked = peekOpenCodeSessionCache(widget.cwd);
     final hasStale = _items != null || peeked != null;
@@ -1212,8 +1349,20 @@ class _OpenCodeSessionMenuOverlayState extends State<_OpenCodeSessionMenuOverlay
       final list = results[0] as List<OpenCodeSessionInfo>;
       final liveId = results[1] as String?;
       final known = widget.knownSessionId ?? _currentSessionId;
-      final current = liveId ?? known;
-      if (liveId != null && liveId.isNotEmpty) {
+      final baseline = widget.awaitingNewSessionIds;
+      final current = _resolveCurrentSessionId(
+        list: list,
+        liveId: liveId,
+        known: known,
+        baseline: baseline,
+      );
+      if (baseline != null) {
+        if (current != null &&
+            current.isNotEmpty &&
+            !baseline.contains(current)) {
+          widget.onNewSessionIdentified?.call(current);
+        }
+      } else if (liveId != null && liveId.isNotEmpty) {
         widget.onActiveSessionResolved?.call(liveId);
       }
       setState(() {
@@ -1384,7 +1533,7 @@ class _OpenCodeSessionMenuOverlayState extends State<_OpenCodeSessionMenuOverlay
                         ),
                       ),
                       Padding(
-                        padding: const EdgeInsets.fromLTRB(10, 0, 10, 8),
+                        padding: const EdgeInsets.fromLTRB(10, 0, 10, 6),
                         child: TextField(
                           controller: _filter,
                           enabled: !editing && !_busy && !pendingDelete,
@@ -1413,6 +1562,9 @@ class _OpenCodeSessionMenuOverlayState extends State<_OpenCodeSessionMenuOverlay
                           ),
                         ),
                       ),
+                      _buildNewSessionBar(
+                        enabled: !editing && !_busy && !pendingDelete && !_creating,
+                      ),
                       const Divider(height: 1, color: Colors.white12),
                       Expanded(child: _buildBody()),
                     ],
@@ -1421,6 +1573,62 @@ class _OpenCodeSessionMenuOverlayState extends State<_OpenCodeSessionMenuOverlay
               ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildNewSessionBar({required bool enabled}) {
+    const accent = Colors.lightGreenAccent;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(10, 0, 10, 8),
+      child: Material(
+        color: enabled
+            ? Colors.white.withValues(alpha: 0.04)
+            : Colors.white.withValues(alpha: 0.02),
+        borderRadius: BorderRadius.circular(6),
+        child: InkWell(
+          onTap: enabled
+              ? () {
+                  _creating = true;
+                  widget.onCreate();
+                }
+              : null,
+          mouseCursor: enabled
+              ? SystemMouseCursors.click
+              : SystemMouseCursors.basic,
+          hoverColor: Colors.white.withValues(alpha: 0.06),
+          borderRadius: BorderRadius.circular(6),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+            child: Row(
+              children: [
+                Container(
+                  width: 22,
+                  height: 22,
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(
+                    color: accent.withValues(alpha: enabled ? 0.16 : 0.08),
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: Icon(
+                    Icons.add,
+                    size: 15,
+                    color: accent.withValues(alpha: enabled ? 1 : 0.4),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  '新建会话',
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w500,
+                    color: enabled ? Colors.white : Colors.white38,
+                  ),
+                ),
+              ],
+            ),
+          ),
         ),
       ),
     );
@@ -2015,6 +2223,10 @@ class _ShellTab {
 
   /// 我们已知的当前会话（启动 `-s` / 切换成功 / HTTP 探活回写）。
   String? currentOpenCodeSessionId;
+
+  /// 点「新建会话」时已经存在的 id。之后列表里多出来的那条才是当前会话。
+  /// OpenCode 的 `/new` 会把活跃会话报成空，不能靠探活回写。
+  Set<String>? awaitingNewSessionIds;
 
   _ShellTab({
     required this.session,
