@@ -10,6 +10,7 @@ import '../../core/comfy_prompt_bridge.dart';
 import '../../core/editor_tab_menu.dart';
 import '../../core/editor_tabs.dart';
 import '../../core/file_actions.dart';
+import '../../core/fresh_file_image.dart';
 import '../../core/providers.dart';
 import '../../core/toast.dart';
 import '../../core/workspace_memory.dart';
@@ -1646,7 +1647,7 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
         context: context,
         builder: (_) => Dialog(
           backgroundColor: Colors.black,
-          child: Image.file(File(path)),
+          child: ProjectFileImage(path),
         ),
       );
     }

@@ -14,6 +14,7 @@ import '../../core/editor_tabs.dart';
 import '../../core/file_actions.dart';
 import '../../core/fs_context_menu.dart';
 import '../../core/fs_drag.dart';
+import '../../core/fresh_file_image.dart';
 import '../../core/inline_fs_edit.dart';
 import '../../core/media_types.dart';
 import '../../core/progress.dart';
@@ -1911,8 +1912,8 @@ class _AssetCard extends ConsumerWidget {
       );
     }
     if (classifyMedia(_name) == MediaKind.image) {
-      return Image.file(
-        File(entity.path),
+      return ProjectFileImage(
+        entity.path,
         fit: BoxFit.cover,
         errorBuilder: (_, __, ___) =>
             _fallbackIcon(context, Icons.broken_image_outlined, size),

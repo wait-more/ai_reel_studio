@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
+import '../../core/fresh_file_image.dart';
 import '../../core/video_frame_extract.dart';
 import '../../core/toast.dart';
 
@@ -57,7 +58,7 @@ void showImageViewerDialog(BuildContext context, String path) {
               child: InteractiveViewer(
                 minScale: 0.5,
                 maxScale: 4,
-                child: Image.file(File(path), fit: BoxFit.contain),
+                child: ProjectFileImage(path, fit: BoxFit.contain),
               ),
             ),
             Positioned(

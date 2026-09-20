@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path/path.dart' as p;
 import 'config.dart';
+import 'fresh_file_image.dart';
 import 'progress.dart';
 import 'providers.dart';
 import 'toast.dart';
@@ -341,6 +342,7 @@ Future<bool> deleteEntitiesDialog(
   var failed = 0;
   for (final item in items) {
     try {
+      if (!item.isDir) evictProjectFileImage(item.path);
       if (item.isDir) {
         await Directory(item.path).delete(recursive: true);
       } else {
@@ -641,6 +643,7 @@ Future<bool> deleteEntityDialog(
   );
   if (ok != true) return false;
   try {
+    if (!isDir) evictProjectFileImage(path);
     if (isDir) {
       await Directory(path).delete(recursive: true);
     } else {

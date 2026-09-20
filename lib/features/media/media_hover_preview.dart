@@ -8,6 +8,7 @@ import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import 'package:path/path.dart' as p;
 
+import '../../core/fresh_file_image.dart';
 import '../../core/media_types.dart';
 import '../../core/path_ellipsis_text.dart';
 import 'media_preview.dart';
@@ -370,8 +371,8 @@ class _HoverPreviewLayerState extends State<_HoverPreviewLayer> {
       children: [
         ColoredBox(
           color: Colors.black,
-          child: Image.file(
-            File(widget.path),
+          child: ProjectFileImage(
+            widget.path,
             fit: BoxFit.contain,
             errorBuilder: (_, __, ___) =>
                 const Center(child: Icon(Icons.broken_image, size: 48)),
