@@ -28,6 +28,9 @@ String _formatJobElapsed(Duration elapsed) {
   return '${m}m ${r.toString().padLeft(2, '0')}s';
 }
 
+/// Comfy 面板左右顶栏统一高度（标题行 + 副文案/操作）。
+const double _kComfyHeaderBarHeight = 56;
+
 class _ComfyBundle {
   final List<ComfyTemplate> templates;
   final ComfyBindings bindings;
@@ -1794,7 +1797,15 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
             _ensureSelectedFromBundle(bundle);
           });
         }
-        return Row(
+        return DecoratedBox(
+          decoration: BoxDecoration(
+            border: Border(
+              top: BorderSide(
+                color: cs.outlineVariant.withValues(alpha: 0.85),
+              ),
+            ),
+          ),
+          child: Row(
           children: [
             SizedBox(
               width: 230,
@@ -1866,6 +1877,7 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
                   : _buildDetail(),
             ),
           ],
+        ),
         );
       },
     );
@@ -1961,55 +1973,68 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(10, 8, 4, 4),
-          child: Row(
-            children: [
-              Expanded(
-                child: Text(
-                  'Comfy URL',
-                  style: Theme.of(context).textTheme.titleSmall,
-                ),
+        SizedBox(
+          height: _kComfyHeaderBarHeight,
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              color: cs.surfaceContainerHighest,
+              border: const Border(
+                bottom: BorderSide(color: Colors.white24),
               ),
-              Icon(
-                _pingingAll
-                    ? Icons.hourglass_top
-                    : Icons.cloud_done,
-                size: 14,
-                color: _pingingAll
-                    ? cs.onSurfaceVariant
-                    : (onlineCount > 0 ? Colors.green : cs.error),
-              ),
-              const SizedBox(width: 2),
-              TextButton(
-                onPressed: _pingingAll ? null : _checkConnection,
-                style: TextButton.styleFrom(
-                  visualDensity: VisualDensity.compact,
-                  padding: const EdgeInsets.symmetric(horizontal: 8),
-                  minimumSize: const Size(0, 28),
-                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                ),
-                child: Text(_pingingAll ? '检测中' : '重试'),
-              ),
-            ],
-          ),
-        ),
-        if (servers.isNotEmpty)
-          Padding(
-            padding: const EdgeInsets.fromLTRB(10, 0, 10, 6),
-            child: Text(
-              _pingingAll
-                  ? '正在检测全部实例…'
-                  : '在线 $onlineCount / ${servers.length} · 当前 ${_online ? '已连接' : '未连接'}',
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                fontSize: 11,
-                color: cs.onSurfaceVariant,
+            ),
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(10, 0, 4, 0),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          'Comfy URL',
+                          style: Theme.of(context).textTheme.titleSmall,
+                        ),
+                      ),
+                      Icon(
+                        _pingingAll ? Icons.hourglass_top : Icons.cloud_done,
+                        size: 14,
+                        color: _pingingAll
+                            ? cs.onSurfaceVariant
+                            : (onlineCount > 0 ? Colors.green : cs.error),
+                      ),
+                      const SizedBox(width: 2),
+                      TextButton(
+                        onPressed: _pingingAll ? null : _checkConnection,
+                        style: TextButton.styleFrom(
+                          visualDensity: VisualDensity.compact,
+                          padding: const EdgeInsets.symmetric(horizontal: 8),
+                          minimumSize: const Size(0, 28),
+                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        ),
+                        child: Text(_pingingAll ? '检测中' : '重试'),
+                      ),
+                    ],
+                  ),
+                  if (servers.isNotEmpty) ...[
+                    const SizedBox(height: 2),
+                    Text(
+                      _pingingAll
+                          ? '正在检测全部实例…'
+                          : '在线 $onlineCount / ${servers.length} · 当前 ${_online ? '已连接' : '未连接'}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: cs.onSurfaceVariant,
+                      ),
+                    ),
+                  ],
+                ],
               ),
             ),
           ),
-        const Divider(height: 1),
+        ),
         Expanded(
           child: servers.isEmpty
               ? Center(
@@ -2241,66 +2266,81 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(14, 10, 12, 8),
-          child: Row(
-            children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      t.name,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: Theme.of(context).textTheme.titleMedium,
-                    ),
-                    Text(
-                      t.workflowFile,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                            color: cs.onSurfaceVariant,
-                          ),
-                    ),
-                  ],
-                ),
+        SizedBox(
+          height: _kComfyHeaderBarHeight,
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              color: cs.surfaceContainerHighest,
+              border: const Border(
+                bottom: BorderSide(color: Colors.white24),
               ),
-              const SizedBox(width: 8),
-              Builder(
-                builder: (btnCtx) => Tooltip(
-                  message: '将当前节点参数与使能复制到其它 Comfy 实例，便于并行同跑',
-                  waitDuration: const Duration(milliseconds: 400),
-                  child: TextButton.icon(
-                    onPressed: () => _twinTaskToOtherServer(btnCtx),
-                    style: TextButton.styleFrom(
-                      visualDensity: VisualDensity.compact,
-                      minimumSize: const Size(0, 36),
+            ),
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(14, 0, 12, 0),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Text(
+                          t.name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: Theme.of(context).textTheme.titleSmall,
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          t.workflowFile,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style:
+                              Theme.of(context).textTheme.bodySmall?.copyWith(
+                                    color: cs.onSurfaceVariant,
+                                    fontSize: 11,
+                                  ),
+                        ),
+                      ],
                     ),
-                    icon: const Icon(
-                      Icons.control_point_duplicate_outlined,
-                      size: 18,
-                    ),
-                    label: const Text('任务孪生'),
                   ),
-                ),
+                  const SizedBox(width: 8),
+                  Builder(
+                    builder: (btnCtx) => Tooltip(
+                      message: '将当前节点参数与使能复制到其它 Comfy 实例，便于并行同跑',
+                      waitDuration: const Duration(milliseconds: 400),
+                      child: TextButton.icon(
+                        onPressed: () => _twinTaskToOtherServer(btnCtx),
+                        style: TextButton.styleFrom(
+                          visualDensity: VisualDensity.compact,
+                          minimumSize: const Size(0, 32),
+                        ),
+                        icon: const Icon(
+                          Icons.control_point_duplicate_outlined,
+                          size: 18,
+                        ),
+                        label: const Text('任务孪生'),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  FilledButton.icon(
+                    onPressed:
+                        _workflow == null || t.nodes.isEmpty ? null : _run,
+                    style: FilledButton.styleFrom(
+                      visualDensity: VisualDensity.compact,
+                      minimumSize: const Size(0, 32),
+                    ),
+                    icon: const Icon(Icons.play_arrow, size: 18),
+                    label: Text(
+                      serverJobs.any((j) => j.isActive) ? '继续生成' : '生成',
+                    ),
+                  ),
+                ],
               ),
-              const SizedBox(width: 8),
-              FilledButton.icon(
-                onPressed: _workflow == null || t.nodes.isEmpty ? null : _run,
-                style: FilledButton.styleFrom(
-                  visualDensity: VisualDensity.compact,
-                  minimumSize: const Size(0, 36),
-                ),
-                icon: const Icon(Icons.play_arrow, size: 18),
-                label: Text(
-                  serverJobs.any((j) => j.isActive) ? '继续生成' : '生成',
-                ),
-              ),
-            ],
+            ),
           ),
         ),
-        const Divider(height: 1),
         Expanded(
           child: LayoutBuilder(
             builder: (context, constraints) {
