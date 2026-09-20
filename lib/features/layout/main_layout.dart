@@ -561,6 +561,7 @@ class _MainLayoutState extends ConsumerState<MainLayout> with WindowListener {
             }
           }
         },
+        mouseCursor: SystemMouseCursors.click,
         borderRadius: BorderRadius.circular(8),
         hoverColor: active
             ? scheme.onPrimary.withValues(alpha: 0.08)
@@ -592,7 +593,8 @@ class _MainLayoutState extends ConsumerState<MainLayout> with WindowListener {
                 const SizedBox(width: 6),
                 Container(
                   constraints: const BoxConstraints(minWidth: 18),
-                  padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
                   decoration: BoxDecoration(
                     color: badgeBg,
                     borderRadius: BorderRadius.circular(9),
@@ -618,6 +620,41 @@ class _MainLayoutState extends ConsumerState<MainLayout> with WindowListener {
 
   Widget _buildTopBar(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    Widget topBtn({
+      required Widget icon,
+      required VoidCallback? onPressed,
+      required String tooltip,
+    }) {
+      final enabled = onPressed != null;
+      return Tooltip(
+        message: tooltip,
+        child: Material(
+          color: Colors.transparent,
+          child: InkWell(
+            onTap: onPressed,
+            mouseCursor: enabled
+                ? SystemMouseCursors.click
+                : SystemMouseCursors.basic,
+            borderRadius: BorderRadius.circular(6),
+            hoverColor: scheme.onSurface.withValues(alpha: 0.10),
+            child: SizedBox(
+              width: 32,
+              height: 32,
+              child: IconTheme.merge(
+                data: IconThemeData(
+                  size: 18,
+                  color: enabled
+                      ? scheme.onSurface
+                      : scheme.onSurface.withValues(alpha: 0.38),
+                ),
+                child: Center(child: icon),
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
     return Container(
       height: kColumnTopBarHeight,
       decoration: BoxDecoration(
@@ -634,10 +671,8 @@ class _MainLayoutState extends ConsumerState<MainLayout> with WindowListener {
       padding: const EdgeInsets.symmetric(horizontal: 8),
       child: Row(
         children: [
-          IconButton(
+          topBtn(
             icon: const Icon(Icons.menu, size: 18),
-            padding: EdgeInsets.zero,
-            constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
             onPressed: () {},
             tooltip: '菜单',
           ),
@@ -649,33 +684,26 @@ class _MainLayoutState extends ConsumerState<MainLayout> with WindowListener {
             ),
           ),
           const Spacer(),
-          IconButton(
+          topBtn(
             icon: const Icon(Icons.search, size: 18),
-            padding: EdgeInsets.zero,
-            constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
             onPressed: () => showGlobalSearch(context),
             tooltip: '全局搜索 (Ctrl+P)',
           ),
           const SizedBox(width: 4),
-          IconButton(
+          topBtn(
             icon: Icon(
               ref.watch(shellVisibleProvider)
                   ? Icons.terminal
                   : Icons.terminal_outlined,
               size: 18,
             ),
-            padding: EdgeInsets.zero,
-            constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
-            onPressed: () =>
-                ref.read(shellVisibleProvider.notifier).state =
-                    !ref.read(shellVisibleProvider),
+            onPressed: () => ref.read(shellVisibleProvider.notifier).state =
+                !ref.read(shellVisibleProvider),
             tooltip: '终端',
           ),
           const SizedBox(width: 4),
-          IconButton(
+          topBtn(
             icon: const Icon(Icons.settings, size: 18),
-            padding: EdgeInsets.zero,
-            constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
             onPressed: () => _openSettings(context),
             tooltip: '设置',
           ),

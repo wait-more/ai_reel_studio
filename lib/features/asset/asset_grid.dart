@@ -862,6 +862,43 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
   Widget _buildToolbar(BuildContext context, String currentDir) {
     final scheme = Theme.of(context).colorScheme;
     final line = const BorderSide(color: Colors.white24);
+    // 用 InkWell.mouseCursor（与 Shell 一致）；外层 MouseRegion 会被 IconButton 内部光标盖掉。
+    Widget toolBtn({
+      required Widget icon,
+      required VoidCallback? onPressed,
+      required String tooltip,
+      double minSize = 32,
+    }) {
+      final enabled = onPressed != null;
+      return Tooltip(
+        message: tooltip,
+        child: Material(
+          color: Colors.transparent,
+          child: InkWell(
+            onTap: onPressed,
+            mouseCursor: enabled
+                ? SystemMouseCursors.click
+                : SystemMouseCursors.basic,
+            borderRadius: BorderRadius.circular(6),
+            hoverColor: scheme.onSurface.withValues(alpha: 0.10),
+            child: SizedBox(
+              width: minSize,
+              height: minSize,
+              child: IconTheme.merge(
+                data: IconThemeData(
+                  size: 18,
+                  color: enabled
+                      ? scheme.onSurface
+                      : scheme.onSurface.withValues(alpha: 0.38),
+                ),
+                child: Center(child: icon),
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
     return Container(
       color: scheme.surfaceContainerHigh,
       child: Column(
@@ -876,29 +913,20 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
               height: 36,
               child: Row(
                 children: [
-                  IconButton(
+                  toolBtn(
                     icon: const Icon(Icons.arrow_back, size: 18),
                     onPressed: _canBack ? _back : null,
                     tooltip: '后退',
-                    padding: EdgeInsets.zero,
-                    constraints:
-                        const BoxConstraints(minWidth: 32, minHeight: 32),
                   ),
-                  IconButton(
+                  toolBtn(
                     icon: const Icon(Icons.arrow_forward, size: 18),
                     onPressed: _canForward ? _forward : null,
                     tooltip: '前进',
-                    padding: EdgeInsets.zero,
-                    constraints:
-                        const BoxConstraints(minWidth: 32, minHeight: 32),
                   ),
-                  IconButton(
+                  toolBtn(
                     icon: const Icon(Icons.arrow_upward, size: 18),
                     onPressed: _up,
                     tooltip: '上一级',
-                    padding: EdgeInsets.zero,
-                    constraints:
-                        const BoxConstraints(minWidth: 32, minHeight: 32),
                   ),
                   const SizedBox(width: 8),
                   Expanded(
@@ -925,17 +953,14 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
                         ),
                         suffixIcon: _query.isEmpty
                             ? null
-                            : IconButton(
+                            : toolBtn(
                                 icon: const Icon(Icons.clear, size: 14),
                                 onPressed: () {
                                   _searchCtrl.clear();
                                   setState(() => _query = '');
                                 },
-                                padding: EdgeInsets.zero,
-                                constraints: const BoxConstraints(
-                                  minWidth: 24,
-                                  minHeight: 24,
-                                ),
+                                tooltip: '清除',
+                                minSize: 24,
                               ),
                         border: OutlineInputBorder(
                           borderRadius: BorderRadius.circular(6),
@@ -964,7 +989,7 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
                 children: [
                   _buildFilterChips(),
                   const Spacer(),
-                  IconButton(
+                  toolBtn(
                     icon: Icon(
                       _viewMode == _AssetViewMode.grid
                           ? Icons.view_list_outlined
@@ -979,50 +1004,31 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
                     tooltip: _viewMode == _AssetViewMode.grid
                         ? '列表展示'
                         : '网格展示',
-                    padding: EdgeInsets.zero,
-                    constraints:
-                        const BoxConstraints(minWidth: 32, minHeight: 32),
                   ),
-                  IconButton(
+                  toolBtn(
                     icon: const Icon(Icons.note_add_outlined, size: 18),
                     onPressed: () => _newDocument(currentDir),
                     tooltip: '新建文档',
-                    padding: EdgeInsets.zero,
-                    constraints:
-                        const BoxConstraints(minWidth: 32, minHeight: 32),
                   ),
-                  IconButton(
-                    icon:
-                        const Icon(Icons.create_new_folder_outlined, size: 18),
+                  toolBtn(
+                    icon: const Icon(Icons.create_new_folder_outlined, size: 18),
                     onPressed: () => _newFolder(currentDir),
                     tooltip: '新建文件夹',
-                    padding: EdgeInsets.zero,
-                    constraints:
-                        const BoxConstraints(minWidth: 32, minHeight: 32),
                   ),
-                  IconButton(
+                  toolBtn(
                     icon: const Icon(Icons.upload_file_outlined, size: 18),
                     onPressed: () => _importFiles(currentDir),
                     tooltip: '导入物料',
-                    padding: EdgeInsets.zero,
-                    constraints:
-                        const BoxConstraints(minWidth: 32, minHeight: 32),
                   ),
-                  IconButton(
+                  toolBtn(
                     icon: const Icon(Icons.category_outlined, size: 18),
                     onPressed: () => _showSummary(currentDir),
                     tooltip: '分类汇总',
-                    padding: EdgeInsets.zero,
-                    constraints:
-                        const BoxConstraints(minWidth: 32, minHeight: 32),
                   ),
-                  IconButton(
+                  toolBtn(
                     icon: const Icon(Icons.refresh, size: 18),
                     onPressed: _reload,
                     tooltip: '刷新',
-                    padding: EdgeInsets.zero,
-                    constraints:
-                        const BoxConstraints(minWidth: 32, minHeight: 32),
                   ),
                 ],
               ),
@@ -1034,56 +1040,28 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
   }
 
   
-/// 类型过滤 chips（紧凑，文字 + 图标）。
+  /// 类型过滤 chips（紧凑，文字 + 图标；悬停提示可点）。
   Widget _buildFilterChips() {
-    Widget chip(_AssetFilter f, IconData icon, String label) {
-      final sel = _filter == f;
-      return Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 2),
-        child: InkWell(
-          onTap: () => setState(() => _filter = f),
-          borderRadius: BorderRadius.circular(6),
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
-            decoration: BoxDecoration(
-              color: sel
-                  ? Theme.of(context).colorScheme.primaryContainer
-                  : Colors.transparent,
-              borderRadius: BorderRadius.circular(6),
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(icon,
-                    size: 13,
-                    color: sel
-                        ? Theme.of(context).colorScheme.onPrimaryContainer
-                        : Colors.grey[400]),
-                const SizedBox(width: 3),
-                Text(label,
-                    style: TextStyle(
-                        fontSize: 11,
-                        color: sel
-                            ? Theme.of(context)
-                                .colorScheme
-                                .onPrimaryContainer
-                            : Colors.grey[400])),
-              ],
-            ),
-          ),
-        ),
-      );
-    }
-
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        chip(_AssetFilter.all, Icons.apps, '全部'),
-        chip(_AssetFilter.folders, Icons.folder, '目录'),
-        chip(_AssetFilter.images, Icons.image, '图片'),
-        chip(_AssetFilter.videos, Icons.videocam, '视频'),
-        chip(_AssetFilter.audios, Icons.audiotrack, '音频'),
-        chip(_AssetFilter.docs, Icons.description, '文档'),
+        for (final item in const [
+          (_AssetFilter.all, Icons.apps, '全部'),
+          (_AssetFilter.folders, Icons.folder, '目录'),
+          (_AssetFilter.images, Icons.image, '图片'),
+          (_AssetFilter.videos, Icons.videocam, '视频'),
+          (_AssetFilter.audios, Icons.audiotrack, '音频'),
+          (_AssetFilter.docs, Icons.description, '文档'),
+        ])
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 2),
+            child: _FilterChipButton(
+              selected: _filter == item.$1,
+              icon: item.$2,
+              label: item.$3,
+              onTap: () => setState(() => _filter = item.$1),
+            ),
+          ),
       ],
     );
   }
@@ -1296,12 +1274,17 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
           child: text,
         );
       }
-      return InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(4),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
-          child: text,
+      return Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: onTap,
+          mouseCursor: SystemMouseCursors.click,
+          borderRadius: BorderRadius.circular(4),
+          hoverColor: scheme.onSurface.withValues(alpha: 0.08),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+            child: text,
+          ),
         ),
       );
     }
@@ -1327,9 +1310,14 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
                 children: [
                   // 空白区域点按 → 路径编辑
                   Positioned.fill(
-                    child: InkWell(
-                      onTap: () => _beginPathEdit(currentDir),
-                      borderRadius: BorderRadius.circular(4),
+                    child: Material(
+                      color: Colors.transparent,
+                      child: InkWell(
+                        onTap: () => _beginPathEdit(currentDir),
+                        mouseCursor: SystemMouseCursors.click,
+                        borderRadius: BorderRadius.circular(4),
+                        hoverColor: scheme.onSurface.withValues(alpha: 0.06),
+                      ),
                     ),
                   ),
                   Row(
@@ -1382,13 +1370,18 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
                 ],
               ),
             ),
-            InkWell(
-              onTap: () => _showPathAncestorMenu(context, currentDir),
-              borderRadius: BorderRadius.circular(4),
-              child: const SizedBox(
-                width: 24,
-                height: 28,
-                child: Icon(Icons.arrow_drop_down, size: 18),
+            Material(
+              color: Colors.transparent,
+              child: InkWell(
+                onTap: () => _showPathAncestorMenu(context, currentDir),
+                mouseCursor: SystemMouseCursors.click,
+                borderRadius: BorderRadius.circular(4),
+                hoverColor: scheme.onSurface.withValues(alpha: 0.10),
+                child: const SizedBox(
+                  width: 24,
+                  height: 28,
+                  child: Icon(Icons.arrow_drop_down, size: 18),
+                ),
               ),
             ),
           ],
@@ -2228,6 +2221,77 @@ class _AssetCard extends ConsumerWidget {
 }
 
 /// 网格卡片轻量悬停：比选中更淡，只提示可点。
+class _FilterChipButton extends StatefulWidget {
+  const _FilterChipButton({
+    required this.selected,
+    required this.icon,
+    required this.label,
+    required this.onTap,
+  });
+
+  final bool selected;
+  final IconData icon;
+  final String label;
+  final VoidCallback onTap;
+
+  @override
+  State<_FilterChipButton> createState() => _FilterChipButtonState();
+}
+
+class _FilterChipButtonState extends State<_FilterChipButton> {
+  bool _hovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final sel = widget.selected;
+    final hover = _hovered && !sel;
+    final fg = sel
+        ? scheme.onPrimaryContainer
+        : hover
+            ? scheme.onSurface
+            : Colors.grey[400];
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: widget.onTap,
+        mouseCursor: SystemMouseCursors.click,
+        borderRadius: BorderRadius.circular(6),
+        hoverColor: Colors.transparent,
+        onHover: (v) {
+          if (_hovered != v) setState(() => _hovered = v);
+        },
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 90),
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+          decoration: BoxDecoration(
+            color: sel
+                ? scheme.primaryContainer
+                : hover
+                    ? scheme.onSurface.withValues(alpha: 0.10)
+                    : Colors.transparent,
+            borderRadius: BorderRadius.circular(6),
+            border: Border.all(
+              color: hover ? Colors.white24 : Colors.transparent,
+            ),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(widget.icon, size: 13, color: fg),
+              const SizedBox(width: 3),
+              Text(
+                widget.label,
+                style: TextStyle(fontSize: 11, color: fg),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _AssetGridHoverChrome extends StatefulWidget {
   const _AssetGridHoverChrome({
     required this.selected,

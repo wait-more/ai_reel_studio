@@ -1107,6 +1107,9 @@ class _TreeNodeWidgetState extends ConsumerState<_TreeNodeWidget> {
                       Expanded(
                         child: InkWell(
                           borderRadius: BorderRadius.circular(4),
+                          mouseCursor: renaming
+                              ? SystemMouseCursors.basic
+                              : SystemMouseCursors.click,
                           onTap: renaming
                               ? null
                               : () => _onNodeTap(isFile: isFile),
