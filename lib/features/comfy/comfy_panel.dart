@@ -2231,15 +2231,30 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
                     ),
                   ),
                 )
-              : ListView.builder(
+              : ListView.separated(
                   itemCount: bound.length,
+                  separatorBuilder: (_, __) => Divider(
+                    height: 1,
+                    thickness: 1,
+                    indent: 10,
+                    endIndent: 10,
+                    color: cs.outlineVariant.withValues(alpha: 0.7),
+                  ),
                   itemBuilder: (context, i) {
                     final t = bound[i];
                     final active = _selected?.id == t.id;
                     return ListTile(
                       dense: true,
                       selected: active,
-                      title: Text(t.name, maxLines: 1),
+                      title: Tooltip(
+                        message: t.name,
+                        waitDuration: const Duration(milliseconds: 400),
+                        child: Text(
+                          t.name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
                       subtitle: Text(
                         '${t.nodes.length} 个节点',
                         style: const TextStyle(fontSize: 11),
