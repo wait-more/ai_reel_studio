@@ -14,6 +14,7 @@ import '../../core/comfy/comfy_template_store.dart';
 import '../../core/comfy_prompt_bridge.dart';
 import '../../core/config.dart';
 import '../../core/file_actions.dart';
+import '../../core/fs_drag.dart';
 import '../../core/path_ellipsis_text.dart';
 import '../../core/providers.dart';
 import '../../core/toast.dart';
@@ -851,6 +852,133 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
       default:
         return false;
     }
+  }
+
+  bool _nodeCanAcceptMediaDrop(ComfyExposedNode node, FsDragItem item) {
+    for (final e in item.items) {
+      if (e.isDir) continue;
+      for (final field in node.fields) {
+        if (field.widget.isMedia && _mediaMatches(field.widget, e.path)) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  bool _fieldCanAcceptMediaDrop(ComfyExposedField field, FsDragItem item) {
+    if (!field.widget.isMedia) return false;
+    for (final e in item.items) {
+      if (!e.isDir && _mediaMatches(field.widget, e.path)) return true;
+    }
+    return false;
+  }
+
+  void _applyMediaDropToNode(ComfyExposedNode node, FsDragItem item) {
+    final paths = [for (final e in item.items) if (!e.isDir) e.path];
+    if (paths.isEmpty) {
+      showGlobalToast(context, '请拖入文件（不能是文件夹）');
+      return;
+    }
+    final mediaFields = [
+      for (final f in node.fields)
+        if (f.widget.isMedia) f,
+    ];
+    if (mediaFields.isEmpty) {
+      showGlobalToast(context, '该节点没有媒体输入');
+      return;
+    }
+
+    final assignments = <String, String>{};
+    final used = <int>{};
+    for (final field in mediaFields) {
+      for (var i = 0; i < paths.length; i++) {
+        if (used.contains(i)) continue;
+        if (!_mediaMatches(field.widget, paths[i])) continue;
+        assignments[field.id] = paths[i];
+        used.add(i);
+        break;
+      }
+    }
+    if (assignments.isEmpty) {
+      showGlobalToast(context, '文件类型与节点不匹配');
+      return;
+    }
+    setState(() {
+      _values.addAll(assignments);
+      if (node.bypassWhenDisabled) {
+        _enabled[node.nodeId] = true;
+      }
+    });
+    _schedulePersistSession();
+    showGlobalToast(
+      context,
+      assignments.length == 1
+          ? '已填入 ${p.basename(assignments.values.first)}'
+          : '已填入 ${assignments.length} 个路径',
+    );
+  }
+
+  void _applyMediaDropToField(
+    ComfyExposedNode node,
+    ComfyExposedField field,
+    FsDragItem item,
+  ) {
+    for (final e in item.items) {
+      if (e.isDir) continue;
+      if (!_mediaMatches(field.widget, e.path)) continue;
+      setState(() {
+        _values[field.id] = e.path;
+        if (node.bypassWhenDisabled) {
+          _enabled[node.nodeId] = true;
+        }
+      });
+      _schedulePersistSession();
+      showGlobalToast(context, '已填入 ${p.basename(e.path)}');
+      return;
+    }
+    showGlobalToast(context, '文件类型与字段不匹配');
+  }
+
+  void _applyOutputDirDrop(FsDragItem item) {
+    final primary = item.items.first;
+    final dir = primary.isDir ? primary.path : p.dirname(primary.path);
+    if (dir.isEmpty || dir == '.') {
+      showGlobalToast(context, '无法解析输出目录');
+      return;
+    }
+    setState(() => _outputDir = dir);
+    _schedulePersistSession();
+    showGlobalToast(
+      context,
+      primary.isDir ? '已设为输出目录' : '已用文件所在目录作为输出目录',
+    );
+  }
+
+  String _mediaDropRejectHint(FsDragItem item) {
+    if (item.items.every((e) => e.isDir)) {
+      return '请拖入文件，文件夹无法填入';
+    }
+    return '文件类型不匹配，无法填入';
+  }
+
+  Widget _wrapFsDropTarget({
+    required bool Function(FsDragItem item) canAccept,
+    required void Function(FsDragItem item) onAccept,
+    required Widget Function(BuildContext context, bool hot, bool blocked)
+        builder,
+    BorderRadius? radius,
+    String dropHint = '释放以填入路径',
+    String Function(FsDragItem item)? rejectHintFor,
+  }) {
+    return _ComfyFsDropTarget(
+      canAccept: canAccept,
+      onAccept: onAccept,
+      dropHint: dropHint,
+      rejectHintFor: rejectHintFor ?? _mediaDropRejectHint,
+      radius: radius,
+      builder: builder,
+    );
   }
 
   Future<void> _bindMore(List<ComfyTemplate> all, ComfyServerBinding binding) async {
@@ -2614,43 +2742,77 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
   }
 
   Widget _buildOutputDirField(ColorScheme cs, String dirText) {
-    return InputDecorator(
-      decoration: const InputDecoration(
-        isDense: true,
-        labelText: '输出目录',
-        prefixIcon: Icon(Icons.folder_outlined, size: 18),
-        border: OutlineInputBorder(),
-        contentPadding: EdgeInsets.fromLTRB(10, 8, 4, 8),
-      ),
-      child: Row(
-        children: [
-          Expanded(
-            child: PathEllipsisText(
-              dirText,
-              style: TextStyle(fontSize: 12.5, color: cs.onSurface),
+    return DragTarget<FsDragItem>(
+      onWillAcceptWithDetails: (_) => true,
+      onAcceptWithDetails: (d) => _applyOutputDirDrop(d.data),
+      builder: (context, candidate, rejected) {
+        final hot = candidate.isNotEmpty;
+        final borderColor = hot ? cs.primary : cs.outline;
+        final borderWidth = hot ? 2.0 : 1.0;
+        return InputDecorator(
+          decoration: InputDecoration(
+            isDense: true,
+            labelText: '输出目录',
+            prefixIcon: Icon(
+              Icons.folder_outlined,
+              size: 18,
+              color: hot ? cs.primary : null,
             ),
-          ),
-          TextButton(
-            onPressed: _useSelectedAsOutputDir,
-            style: TextButton.styleFrom(
-              visualDensity: VisualDensity.compact,
-              padding: const EdgeInsets.symmetric(horizontal: 8),
-              minimumSize: const Size(0, 32),
-              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            filled: hot,
+            fillColor: hot ? cs.primary.withValues(alpha: 0.10) : null,
+            border: OutlineInputBorder(
+              borderSide: BorderSide(color: borderColor, width: borderWidth),
             ),
-            child: const Text('当前选中'),
-          ),
-          FilledButton.tonal(
-            onPressed: _pickOutputDir,
-            style: FilledButton.styleFrom(
-              visualDensity: VisualDensity.compact,
-              padding: const EdgeInsets.symmetric(horizontal: 10),
-              minimumSize: const Size(0, 32),
+            enabledBorder: OutlineInputBorder(
+              borderSide: BorderSide(color: borderColor, width: borderWidth),
             ),
-            child: const Text('浏览'),
+            focusedBorder: OutlineInputBorder(
+              borderSide: BorderSide(color: cs.primary, width: 2),
+            ),
+            contentPadding: const EdgeInsets.fromLTRB(10, 8, 4, 8),
           ),
-        ],
-      ),
+          child: Row(
+            children: [
+              Expanded(
+                child: hot
+                    ? Text(
+                        '释放以设为输出目录',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.w600,
+                          color: cs.primary,
+                        ),
+                      )
+                    : PathEllipsisText(
+                        dirText,
+                        style: TextStyle(fontSize: 12.5, color: cs.onSurface),
+                      ),
+              ),
+              TextButton(
+                onPressed: _useSelectedAsOutputDir,
+                style: TextButton.styleFrom(
+                  visualDensity: VisualDensity.compact,
+                  padding: const EdgeInsets.symmetric(horizontal: 8),
+                  minimumSize: const Size(0, 32),
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+                child: const Text('当前选中'),
+              ),
+              FilledButton.tonal(
+                onPressed: _pickOutputDir,
+                style: FilledButton.styleFrom(
+                  visualDensity: VisualDensity.compact,
+                  padding: const EdgeInsets.symmetric(horizontal: 10),
+                  minimumSize: const Size(0, 32),
+                ),
+                child: const Text('浏览'),
+              ),
+            ],
+          ),
+        );
+      },
     );
   }
 
@@ -3321,107 +3483,142 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
 
     // 左侧 InkWell 展开；右侧预览图标在 Expanded 外固定宽度，
     // 标题/副标题 ellipsis 按剩余宽度计算，不与图标抢宽。
-    final tile = Material(
-      color: expanded
-          ? cs.primary.withValues(alpha: 0.16)
-          : cs.surfaceContainerLow,
-      borderRadius: BorderRadius.circular(8),
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(8, 6, 6, 6),
-        child: Row(
-          children: [
-            Expanded(
-              child: InkWell(
-                borderRadius: BorderRadius.circular(6),
-                onTap: toggleExpand,
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 2),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        displayLabel,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          fontWeight: FontWeight.w600,
-                          fontSize: 12,
-                          color: expanded ? cs.primary : cs.onSurface,
+    Widget buildTile({required bool dropHot, required bool dropBlocked}) {
+      return Material(
+        color: expanded
+            ? cs.primary.withValues(alpha: 0.16)
+            : cs.surfaceContainerLow,
+        borderRadius: BorderRadius.circular(8),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(8, 6, 6, 6),
+          child: Row(
+            children: [
+              Expanded(
+                child: InkWell(
+                  borderRadius: BorderRadius.circular(6),
+                  onTap: toggleExpand,
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 2),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          displayLabel,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontWeight: FontWeight.w600,
+                            fontSize: 12,
+                            color: expanded ? cs.primary : cs.onSurface,
+                          ),
                         ),
-                      ),
-                      const SizedBox(height: 2),
-                      Text(
-                        preview.isEmpty ? '未填写' : preview,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          fontSize: 10,
-                          color: cs.onSurfaceVariant,
+                        const SizedBox(height: 2),
+                        Text(
+                          dropHot
+                              ? '释放以填入路径'
+                              : dropBlocked
+                                  ? '类型不匹配'
+                                  : (preview.isEmpty ? '未填写' : preview),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 10,
+                            fontWeight: dropHot || dropBlocked
+                                ? FontWeight.w600
+                                : FontWeight.w400,
+                            color: dropHot
+                                ? cs.primary
+                                : dropBlocked
+                                    ? cs.error
+                                    : cs.onSurfaceVariant,
+                          ),
                         ),
-                      ),
-                    ],
+                      ],
+                    ),
                   ),
                 ),
               ),
-            ),
-            for (final path in mediaPaths.take(3))
-              MediaHoverPreviewIcon(path: path),
-            if (mediaPaths.length > 3)
-              Padding(
-                padding: const EdgeInsets.only(right: 2),
-                child: Text(
-                  '+',
-                  style: TextStyle(fontSize: 10, color: cs.onSurfaceVariant),
+              if (!dropHot && !dropBlocked) ...[
+                for (final path in mediaPaths.take(3))
+                  MediaHoverPreviewIcon(path: path),
+                if (mediaPaths.length > 3)
+                  Padding(
+                    padding: const EdgeInsets.only(right: 2),
+                    child: Text(
+                      '+',
+                      style: TextStyle(
+                        fontSize: 10,
+                        color: cs.onSurfaceVariant,
+                      ),
+                    ),
+                  ),
+              ],
+              if (canBypass)
+                SizedBox(
+                  height: 28,
+                  child: Switch(
+                    value: on,
+                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    onChanged: (v) => _setNodeEnabled(node.nodeId, v),
+                  ),
                 ),
-              ),
-            if (canBypass)
-              SizedBox(
-                height: 28,
-                child: Switch(
-                  value: on,
-                  materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                  onChanged: (v) => _setNodeEnabled(node.nodeId, v),
-                ),
-              ),
-          ],
+            ],
+          ),
         ),
-      ),
-    );
+      );
+    }
 
-    return LongPressDraggable<({int category, int index})>(
-      data: (category: category, index: index),
-      feedback: Material(
-        elevation: 6,
-        borderRadius: BorderRadius.circular(8),
-        child: SizedBox(
-          width: 160,
-          child: Opacity(opacity: 0.92, child: tile),
-        ),
-      ),
-      childWhenDragging: Opacity(opacity: 0.35, child: tile),
-      child: DragTarget<({int category, int index})>(
-        onWillAcceptWithDetails: (details) =>
-            details.data.category == category && details.data.index != index,
-        onAcceptWithDetails: (details) {
-          _moveNodeInCategory(category, details.data.index, index);
-        },
-        builder: (context, candidate, rejected) {
-          final hovering = candidate.isNotEmpty;
-          return AnimatedContainer(
-            duration: const Duration(milliseconds: 120),
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(8),
-              border: Border.all(
-                color: hovering || expanded
-                    ? cs.primary
-                    : cs.outlineVariant.withValues(alpha: 0.55),
-                width: hovering || expanded ? 1.5 : 1,
+    return _wrapFsDropTarget(
+      canAccept: (item) => _nodeCanAcceptMediaDrop(node, item),
+      onAccept: (item) => _applyMediaDropToNode(node, item),
+      builder: (context, dropHot, dropBlocked) {
+        final tile = buildTile(dropHot: dropHot, dropBlocked: dropBlocked);
+        return LongPressDraggable<({int category, int index})>(
+          data: (category: category, index: index),
+          feedback: Material(
+            elevation: 6,
+            borderRadius: BorderRadius.circular(8),
+            child: SizedBox(
+              width: 160,
+              child: Opacity(
+                opacity: 0.92,
+                child: buildTile(dropHot: false, dropBlocked: false),
               ),
             ),
-            child: tile,
-          );
-        },
-      ),
+          ),
+          childWhenDragging: Opacity(
+            opacity: 0.35,
+            child: buildTile(dropHot: false, dropBlocked: false),
+          ),
+          child: DragTarget<({int category, int index})>(
+            onWillAcceptWithDetails: (details) =>
+                details.data.category == category && details.data.index != index,
+            onAcceptWithDetails: (details) {
+              _moveNodeInCategory(category, details.data.index, index);
+            },
+            builder: (context, candidate, rejected) {
+              final hovering = candidate.isNotEmpty;
+              return AnimatedContainer(
+                duration: const Duration(milliseconds: 120),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(
+                    color: dropBlocked
+                        ? cs.error
+                        : hovering || expanded || dropHot
+                            ? cs.primary
+                            : cs.outlineVariant.withValues(alpha: 0.55),
+                    width: hovering || expanded || dropHot || dropBlocked
+                        ? 1.5
+                        : 1,
+                  ),
+                ),
+                child: tile,
+              );
+            },
+          ),
+        );
+      },
     );
   }
 
@@ -3433,7 +3630,7 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
         : true;
     final displayLabel = _nodeDisplayLabel(node);
 
-    return Container(
+    final editor = Container(
       width: double.infinity,
       padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
       decoration: BoxDecoration(
@@ -3483,6 +3680,83 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
           ),
         ],
       ),
+    );
+
+    // 已启用时只由地址栏接收拖放，避免与外层叠两层提示；
+    // 禁用时字段不可点，整块编辑区接收以便拖入后自动使能。
+    if (on || !canBypass) return editor;
+
+    return _wrapFsDropTarget(
+      canAccept: (item) => _nodeCanAcceptMediaDrop(node, item),
+      onAccept: (item) => _applyMediaDropToNode(node, item),
+      builder: (context, dropHot, dropBlocked) {
+        return Container(
+          width: double.infinity,
+          padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
+          decoration: BoxDecoration(
+            color: cs.surface,
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(
+              color: dropBlocked
+                  ? cs.error
+                  : dropHot
+                      ? cs.primary
+                      : cs.primary.withValues(alpha: 0.7),
+              width: dropHot || dropBlocked ? 2 : 1,
+            ),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      dropHot
+                          ? '释放以填入路径'
+                          : dropBlocked
+                              ? '文件类型不匹配，无法填入'
+                              : displayLabel,
+                      style: TextStyle(
+                        fontWeight: FontWeight.w600,
+                        fontSize: 13,
+                        color: dropHot
+                            ? cs.primary
+                            : dropBlocked
+                                ? cs.error
+                                : null,
+                      ),
+                    ),
+                  ),
+                  IconButton(
+                    tooltip: '收起',
+                    visualDensity: VisualDensity.compact,
+                    icon: const Icon(Icons.close, size: 18),
+                    onPressed: () {
+                      setState(() => _expanded[node.nodeId] = false);
+                      _schedulePersistSession();
+                    },
+                  ),
+                ],
+              ),
+              Padding(
+                padding: const EdgeInsets.only(bottom: 6),
+                child: Text(
+                  '已禁用：本次生成将 Bypass 整个节点',
+                  style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant),
+                ),
+              ),
+              Opacity(
+                opacity: 0.45,
+                child: IgnorePointer(
+                  ignoring: true,
+                  child: _buildFieldsLayout(node, nodeTitle: displayLabel),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
     );
   }
 
@@ -3554,7 +3828,7 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         for (final field in wide)
-          _buildFieldBody(field, nodeTitle: nodeTitle),
+          _buildFieldBody(field, node: node, nodeTitle: nodeTitle),
         for (var i = 0; i < narrow.length; i += 2)
           Padding(
             padding: const EdgeInsets.only(bottom: 2),
@@ -3562,12 +3836,20 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Expanded(
-                  child: _buildFieldBody(narrow[i], nodeTitle: nodeTitle),
+                  child: _buildFieldBody(
+                    narrow[i],
+                    node: node,
+                    nodeTitle: nodeTitle,
+                  ),
                 ),
                 const SizedBox(width: 8),
                 Expanded(
                   child: i + 1 < narrow.length
-                      ? _buildFieldBody(narrow[i + 1], nodeTitle: nodeTitle)
+                      ? _buildFieldBody(
+                          narrow[i + 1],
+                          node: node,
+                          nodeTitle: nodeTitle,
+                        )
                       : const SizedBox.shrink(),
                 ),
               ],
@@ -3579,6 +3861,7 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
 
   Widget _buildFieldBody(
     ComfyExposedField field, {
+    required ComfyExposedNode node,
     required String nodeTitle,
   }) {
     switch (field.widget) {
@@ -3596,57 +3879,84 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
       case ComfyWidgetKind.video:
         final path = _values[field.id]?.toString() ?? '';
         final canPreview = MediaHoverPreviewIcon.canPreview(path);
-        return Padding(
-          padding: const EdgeInsets.only(bottom: 8),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(field.label, style: const TextStyle(fontSize: 12)),
-              Row(
+        return _wrapFsDropTarget(
+          canAccept: (item) => _fieldCanAcceptMediaDrop(field, item),
+          onAccept: (item) => _applyMediaDropToField(node, field, item),
+          radius: BorderRadius.circular(6),
+          builder: (context, dropHot, dropBlocked) {
+            final fieldCs = Theme.of(context).colorScheme;
+            return Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  // 路径在 Expanded 内按剩余宽度折叠；预览图标固定宽在外侧。
-                  Expanded(
-                    child: path.isEmpty
-                        ? Text(
-                            '未选择',
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                              fontSize: 12,
-                              color: Theme.of(context)
-                                  .colorScheme
-                                  .onSurfaceVariant,
-                            ),
-                          )
-                        : PathEllipsisText(
-                            path,
-                            style: TextStyle(
-                              fontSize: 12,
-                              color: Theme.of(context)
-                                  .colorScheme
-                                  .onSurfaceVariant,
-                            ),
-                          ),
-                  ),
-                  if (canPreview) MediaHoverPreviewIcon(path: path),
-                  TextButton(
-                    style: TextButton.styleFrom(
-                      visualDensity: VisualDensity.compact,
-                    ),
-                    onPressed: () => _useSelectedFile(field),
-                    child: const Text('用当前选中'),
-                  ),
-                  FilledButton.tonal(
-                    style: FilledButton.styleFrom(
-                      visualDensity: VisualDensity.compact,
-                    ),
-                    onPressed: () => _pickMedia(field),
-                    child: const Text('浏览'),
+                  Text(field.label, style: const TextStyle(fontSize: 12)),
+                  Row(
+                    children: [
+                      // 路径在 Expanded 内按剩余宽度折叠；预览图标固定宽在外侧。
+                      Expanded(
+                        child: dropHot
+                            ? Text(
+                                '释放以填入路径',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w600,
+                                  color: fieldCs.primary,
+                                ),
+                              )
+                            : dropBlocked
+                                ? Text(
+                                    '文件类型不匹配，无法填入',
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: TextStyle(
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w600,
+                                      color: fieldCs.error,
+                                    ),
+                                  )
+                                : path.isEmpty
+                                    ? Text(
+                                        '未选择（可拖入文件）',
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(
+                                          fontSize: 12,
+                                          color: fieldCs.onSurfaceVariant,
+                                        ),
+                                      )
+                                    : PathEllipsisText(
+                                        path,
+                                        style: TextStyle(
+                                          fontSize: 12,
+                                          color: fieldCs.onSurfaceVariant,
+                                        ),
+                                      ),
+                      ),
+                      if (!dropHot && !dropBlocked && canPreview)
+                        MediaHoverPreviewIcon(path: path),
+                      TextButton(
+                        style: TextButton.styleFrom(
+                          visualDensity: VisualDensity.compact,
+                        ),
+                        onPressed: () => _useSelectedFile(field),
+                        child: const Text('用当前选中'),
+                      ),
+                      FilledButton.tonal(
+                        style: FilledButton.styleFrom(
+                          visualDensity: VisualDensity.compact,
+                        ),
+                        onPressed: () => _pickMedia(field),
+                        child: const Text('浏览'),
+                      ),
+                    ],
                   ),
                 ],
               ),
-            ],
-          ),
+            );
+          },
         );
       case ComfyWidgetKind.multiline:
         final cs = Theme.of(context).colorScheme;
@@ -3759,6 +4069,186 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
           ),
         );
     }
+  }
+}
+
+/// 生成面板媒体/路径拖入：可接收时立即提示；不可接收时悬停片刻再提示原因。
+/// 拖拽中指针按下，系统 [Tooltip] 往往不弹出，故用自绘浮层。
+class _ComfyFsDropTarget extends StatefulWidget {
+  const _ComfyFsDropTarget({
+    required this.canAccept,
+    required this.onAccept,
+    required this.builder,
+    required this.dropHint,
+    required this.rejectHintFor,
+    this.radius,
+  });
+
+  final bool Function(FsDragItem item) canAccept;
+  final void Function(FsDragItem item) onAccept;
+  final Widget Function(BuildContext context, bool hot, bool blocked) builder;
+  final String dropHint;
+  final String Function(FsDragItem item) rejectHintFor;
+  final BorderRadius? radius;
+
+  @override
+  State<_ComfyFsDropTarget> createState() => _ComfyFsDropTargetState();
+}
+
+class _ComfyFsDropTargetState extends State<_ComfyFsDropTarget> {
+  static const _rejectTipDelay = Duration(milliseconds: 480);
+
+  Timer? _rejectTipTimer;
+  bool _showRejectTip = false;
+  String _rejectTip = '';
+  final LayerLink _link = LayerLink();
+  OverlayEntry? _tipEntry;
+
+  @override
+  void dispose() {
+    _rejectTipTimer?.cancel();
+    _removeTip();
+    super.dispose();
+  }
+
+  void _removeTip() {
+    _tipEntry?.remove();
+    _tipEntry = null;
+  }
+
+  void _clearRejectTip() {
+    _rejectTipTimer?.cancel();
+    _rejectTipTimer = null;
+    if (_showRejectTip || _rejectTip.isNotEmpty) {
+      _showRejectTip = false;
+      _rejectTip = '';
+      _removeTip();
+      if (mounted) setState(() {});
+    }
+  }
+
+  void _armRejectTip(FsDragItem item) {
+    final tip = widget.rejectHintFor(item);
+    if (_rejectTipTimer != null && _rejectTip == tip && !_showRejectTip) {
+      return;
+    }
+    if (_showRejectTip && _rejectTip == tip) return;
+    _rejectTipTimer?.cancel();
+    _rejectTip = tip;
+    _showRejectTip = false;
+    _removeTip();
+    _rejectTipTimer = Timer(_rejectTipDelay, () {
+      if (!mounted) return;
+      setState(() => _showRejectTip = true);
+      _showTipOverlay(tip, isError: true);
+    });
+  }
+
+  void _showAcceptTip() {
+    _clearRejectTip();
+    _showTipOverlay(widget.dropHint, isError: false);
+  }
+
+  void _showTipOverlay(String message, {required bool isError}) {
+    _removeTip();
+    final overlay = Overlay.maybeOf(context);
+    if (overlay == null) return;
+    final cs = Theme.of(context).colorScheme;
+    _tipEntry = OverlayEntry(
+      builder: (ctx) {
+        return IgnorePointer(
+          child: UnconstrainedBox(
+            child: CompositedTransformFollower(
+              link: _link,
+              showWhenUnlinked: false,
+              targetAnchor: Alignment.topCenter,
+              followerAnchor: Alignment.bottomCenter,
+              offset: const Offset(0, -8),
+              child: Material(
+                elevation: 6,
+                color: isError ? cs.errorContainer : cs.inverseSurface,
+                borderRadius: BorderRadius.circular(6),
+                child: Padding(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                  child: Text(
+                    message,
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w500,
+                      color: isError
+                          ? cs.onErrorContainer
+                          : cs.onInverseSurface,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+    overlay.insert(_tipEntry!);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return CompositedTransformTarget(
+      link: _link,
+      child: DragTarget<FsDragItem>(
+        onWillAcceptWithDetails: (d) {
+          final ok = widget.canAccept(d.data);
+          if (ok) {
+            _clearRejectTip();
+          } else {
+            _armRejectTip(d.data);
+          }
+          return ok;
+        },
+        onMove: (details) {
+          if (widget.canAccept(details.data)) {
+            if (_tipEntry == null || _showRejectTip) {
+              _showAcceptTip();
+            }
+          } else {
+            _armRejectTip(details.data);
+          }
+        },
+        onLeave: (_) {
+          _clearRejectTip();
+          _removeTip();
+        },
+        onAcceptWithDetails: (d) {
+          _clearRejectTip();
+          _removeTip();
+          widget.onAccept(d.data);
+        },
+        builder: (context, candidate, rejected) {
+          final hot = candidate.isNotEmpty;
+          final blocked = !hot && rejected.isNotEmpty;
+          final cs = Theme.of(context).colorScheme;
+          return DecoratedBox(
+            decoration: BoxDecoration(
+              borderRadius: widget.radius ?? BorderRadius.circular(8),
+              border: hot
+                  ? Border.all(color: cs.primary, width: 2)
+                  : blocked
+                      ? Border.all(
+                          color: cs.error.withValues(alpha: 0.85),
+                          width: 2,
+                        )
+                      : Border.all(color: Colors.transparent, width: 2),
+              color: hot
+                  ? cs.primary.withValues(alpha: 0.08)
+                  : blocked
+                      ? cs.error.withValues(alpha: 0.06)
+                      : null,
+            ),
+            child: widget.builder(context, hot, blocked),
+          );
+        },
+      ),
+    );
   }
 }
 
