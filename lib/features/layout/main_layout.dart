@@ -398,7 +398,6 @@ class _MainLayoutState extends ConsumerState<MainLayout> with WindowListener {
                 child: Column(
                   children: [
                     _buildTopBar(context),
-                    _buildModeBar(context),
                     Expanded(
                       child: IndexedStack(
                         index: switch (ref.watch(contentModeProvider)) {
@@ -477,57 +476,45 @@ class _MainLayoutState extends ConsumerState<MainLayout> with WindowListener {
     _shellWidth = shell;
   }
 
-  Widget _buildModeBar(BuildContext context) {
+  Widget _buildModeSwitcher(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final mode = ref.watch(contentModeProvider);
     final tabCount = ref.watch(openTabsProvider).length;
-    return Container(
-      height: 46,
-      color: scheme.surfaceContainerLow,
-      padding: const EdgeInsets.fromLTRB(10, 6, 10, 6),
-      child: Row(
-        children: [
-          DecoratedBox(
-            decoration: BoxDecoration(
-              color: scheme.surface.withValues(alpha: 0.55),
-              borderRadius: BorderRadius.circular(11),
-              border: Border.all(
-                color: scheme.outlineVariant.withValues(alpha: 0.7),
-              ),
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: scheme.surface.withValues(alpha: 0.55),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: scheme.outlineVariant),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(2),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            _modeSegment(
+              context,
+              value: 'assets',
+              label: '素材',
+              icon: Icons.photo_library_outlined,
+              current: mode,
             ),
-            child: Padding(
-              padding: const EdgeInsets.all(3),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  _modeSegment(
-                    context,
-                    value: 'assets',
-                    label: '素材',
-                    icon: Icons.photo_library_outlined,
-                    current: mode,
-                  ),
-                  _modeSegment(
-                    context,
-                    value: 'editor',
-                    label: '文档',
-                    icon: Icons.article_outlined,
-                    current: mode,
-                    count: tabCount > 0 ? tabCount : null,
-                  ),
-                  _modeSegment(
-                    context,
-                    value: 'comfy',
-                    label: '生成',
-                    icon: Icons.auto_awesome_outlined,
-                    current: mode,
-                  ),
-                ],
-              ),
+            _modeSegment(
+              context,
+              value: 'editor',
+              label: '文档',
+              icon: Icons.article_outlined,
+              current: mode,
+              count: tabCount > 0 ? tabCount : null,
             ),
-          ),
-          const Spacer(),
-        ],
+            _modeSegment(
+              context,
+              value: 'comfy',
+              label: '生成',
+              icon: Icons.auto_awesome_outlined,
+              current: mode,
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -542,11 +529,11 @@ class _MainLayoutState extends ConsumerState<MainLayout> with WindowListener {
   }) {
     final scheme = Theme.of(context).colorScheme;
     final active = current == value;
-    final fg = active ? scheme.onPrimary : scheme.onSurfaceVariant;
+    final fg = active ? scheme.primary : scheme.onSurfaceVariant;
     final badgeBg = active
-        ? scheme.onPrimary.withValues(alpha: 0.22)
+        ? scheme.primary.withValues(alpha: 0.14)
         : scheme.surfaceContainerHighest;
-    final badgeFg = active ? scheme.onPrimary : scheme.onSurfaceVariant;
+    final badgeFg = active ? scheme.primary : scheme.onSurfaceVariant;
 
     return Material(
       color: Colors.transparent,
@@ -562,31 +549,31 @@ class _MainLayoutState extends ConsumerState<MainLayout> with WindowListener {
           }
         },
         mouseCursor: SystemMouseCursors.click,
-        borderRadius: BorderRadius.circular(8),
-        hoverColor: active
-            ? scheme.onPrimary.withValues(alpha: 0.08)
-            : scheme.onSurface.withValues(alpha: 0.06),
+        borderRadius: BorderRadius.circular(6),
+        hoverColor: scheme.onSurface.withValues(alpha: 0.06),
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 160),
           curve: Curves.easeOutCubic,
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
           decoration: BoxDecoration(
-            color: active ? scheme.primary : Colors.transparent,
-            borderRadius: BorderRadius.circular(8),
+            color: active ? scheme.surfaceContainerLowest : Colors.transparent,
+            borderRadius: BorderRadius.circular(6),
+            border: Border.all(
+              color: active ? scheme.primary : Colors.transparent,
+            ),
           ),
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(icon, size: 15, color: fg),
-              const SizedBox(width: 6),
+              Icon(icon, size: 14, color: fg),
+              const SizedBox(width: 5),
               Text(
                 label,
                 style: TextStyle(
-                  fontSize: 13,
+                  fontSize: 12,
                   height: 1.1,
-                  fontWeight: active ? FontWeight.w700 : FontWeight.w500,
+                  fontWeight: active ? FontWeight.w600 : FontWeight.w500,
                   color: fg,
-                  letterSpacing: active ? 0.2 : 0,
                 ),
               ),
               if (count != null) ...[
@@ -664,48 +651,61 @@ class _MainLayoutState extends ConsumerState<MainLayout> with WindowListener {
             color: Theme.of(context).dividerColor.withValues(alpha: 0.35),
           ),
           bottom: BorderSide(
-            color: Theme.of(context).dividerColor.withValues(alpha: 0.35),
+            color: Theme.of(context).dividerColor,
           ),
         ),
       ),
       padding: const EdgeInsets.symmetric(horizontal: 8),
       child: Row(
         children: [
-          topBtn(
-            icon: const Icon(Icons.menu, size: 18),
-            onPressed: () {},
-            tooltip: '菜单',
-          ),
-          const SizedBox(width: 4),
-          Text(
-            'AIReelStudio',
-            style: Theme.of(context).textTheme.titleSmall?.copyWith(
-              fontWeight: FontWeight.w600,
+          Expanded(
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: Padding(
+                padding: const EdgeInsets.only(left: 4),
+                child: Text(
+                  'AIReelStudio',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.titleSmall,
+                ),
+              ),
             ),
           ),
-          const Spacer(),
-          topBtn(
-            icon: const Icon(Icons.search, size: 18),
-            onPressed: () => showGlobalSearch(context),
-            tooltip: '全局搜索 (Ctrl+P)',
-          ),
-          const SizedBox(width: 4),
-          topBtn(
-            icon: Icon(
-              ref.watch(shellVisibleProvider)
-                  ? Icons.terminal
-                  : Icons.terminal_outlined,
-              size: 18,
+          _buildModeSwitcher(context),
+          Expanded(
+            child: Align(
+              alignment: Alignment.centerRight,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  topBtn(
+                    icon: const Icon(Icons.search, size: 18),
+                    onPressed: () => showGlobalSearch(context),
+                    tooltip: '全局搜索 (Ctrl+P)',
+                  ),
+                  const SizedBox(width: 4),
+                  topBtn(
+                    icon: Icon(
+                      ref.watch(shellVisibleProvider)
+                          ? Icons.terminal
+                          : Icons.terminal_outlined,
+                      size: 18,
+                    ),
+                    onPressed: () =>
+                        ref.read(shellVisibleProvider.notifier).state =
+                            !ref.read(shellVisibleProvider),
+                    tooltip: '终端',
+                  ),
+                  const SizedBox(width: 4),
+                  topBtn(
+                    icon: const Icon(Icons.settings, size: 18),
+                    onPressed: () => _openSettings(context),
+                    tooltip: '设置',
+                  ),
+                ],
+              ),
             ),
-            onPressed: () => ref.read(shellVisibleProvider.notifier).state =
-                !ref.read(shellVisibleProvider),
-            tooltip: '终端',
-          ),
-          const SizedBox(width: 4),
-          topBtn(
-            icon: const Icon(Icons.settings, size: 18),
-            onPressed: () => _openSettings(context),
-            tooltip: '设置',
           ),
         ],
       ),
@@ -717,7 +717,7 @@ class _MainLayoutState extends ConsumerState<MainLayout> with WindowListener {
     required double maxWidth,
   }) {
     final shellVisible = ref.read(shellVisibleProvider);
-    return GestureDetector(
+    return _ColumnSplitter(
       onPanUpdate: (details) {
         setState(() {
           if (resizeTree) {
@@ -746,13 +746,6 @@ class _MainLayoutState extends ConsumerState<MainLayout> with WindowListener {
           _ensurePanelWidths(maxWidth, shellVisible: shellVisible);
         });
       },
-      child: MouseRegion(
-        cursor: SystemMouseCursors.resizeColumn,
-        child: Container(
-          width: _dividerWidth,
-          color: Theme.of(context).dividerColor.withValues(alpha: 0.2),
-        ),
-      ),
     );
   }
 
@@ -760,6 +753,39 @@ class _MainLayoutState extends ConsumerState<MainLayout> with WindowListener {
     showDialog(
       context: context,
       builder: (_) => const SettingsPage(),
+    );
+  }
+}
+
+/// 平时几乎看不见，悬停时用强调色标出可拖区域。
+class _ColumnSplitter extends StatefulWidget {
+  const _ColumnSplitter({required this.onPanUpdate});
+
+  final GestureDragUpdateCallback onPanUpdate;
+
+  @override
+  State<_ColumnSplitter> createState() => _ColumnSplitterState();
+}
+
+class _ColumnSplitterState extends State<_ColumnSplitter> {
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return MouseRegion(
+      cursor: SystemMouseCursors.resizeColumn,
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: GestureDetector(
+        onPanUpdate: widget.onPanUpdate,
+        child: Container(
+          width: 3,
+          color: _hover
+              ? scheme.primary.withValues(alpha: 0.85)
+              : scheme.outlineVariant.withValues(alpha: 0.45),
+        ),
+      ),
     );
   }
 }

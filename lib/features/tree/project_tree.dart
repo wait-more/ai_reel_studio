@@ -14,6 +14,7 @@ import '../../core/inline_fs_edit.dart';
 import '../../core/media_types.dart';
 import '../../core/progress.dart';
 import '../../core/providers.dart';
+import '../../core/ui_palette.dart';
 import '../media/media_preview.dart';
 
 /// 目录树行定位用：按路径相等匹配，避免 [GlobalObjectKey] 对临时字符串用 identical。
@@ -821,21 +822,34 @@ class _TreeNodeWidgetState extends ConsumerState<_TreeNodeWidget> {
       return const SizedBox.shrink();
     }
     final color = Color(EpisodeStatus.colors[status] ?? 0xFF9E9E9E);
+    final label = EpisodeStatus.labelIcons[status] ?? status;
     return Padding(
-      padding: const EdgeInsets.only(right: 4),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
-        decoration: BoxDecoration(
-          color: color.withValues(alpha: 0.2),
-          borderRadius: BorderRadius.circular(4),
-        ),
-        child: Text(
-          EpisodeStatus.labelIcons[status] ?? status,
-          style: TextStyle(
-            fontSize: 9,
-            color: color,
-            fontWeight: FontWeight.w600,
-          ),
+      padding: const EdgeInsets.only(right: 6),
+      child: Tooltip(
+        message: status,
+        waitDuration: const Duration(milliseconds: 400),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 18,
+              height: 4,
+              decoration: BoxDecoration(
+                color: color,
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+            const SizedBox(width: 4),
+            Text(
+              label,
+              style: TextStyle(
+                fontSize: 11,
+                height: 1.1,
+                color: color,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
         ),
       ),
     );
@@ -1282,27 +1296,15 @@ class _TreeNodeWidgetState extends ConsumerState<_TreeNodeWidget> {
   Color _iconColorFor(BuildContext context, ScriptNode node) {
     switch (node.type) {
       case ScriptNodeType.script:
-        return Colors.orange;
+        return UiPalette.image;
       case ScriptNodeType.season:
-        return Colors.teal;
+        return UiPalette.document;
       case ScriptNodeType.episode:
-        return Colors.indigo;
+        return UiPalette.video;
       case ScriptNodeType.folder:
-        return Colors.grey;
+        return UiPalette.folder;
       case ScriptNodeType.file:
-        if (node.name.endsWith('.md')) return Colors.blueGrey;
-        if (node.name.endsWith('.png') ||
-            node.name.endsWith('.jpg') ||
-            node.name.endsWith('.jpeg')) {
-          return Colors.purple;
-        }
-        if (node.name.endsWith('.mp4') || node.name.endsWith('.mov')) {
-          return Colors.red;
-        }
-        if (node.name.endsWith('.wav') || node.name.endsWith('.mp3')) {
-          return Colors.pink;
-        }
-        return Colors.blueGrey;
+        return UiPalette.forPath(node.name, isDir: false);
     }
   }
 }
@@ -1330,7 +1332,7 @@ class _InlineCreateTreeRow extends ConsumerWidget {
           Icon(
             isFolder ? Icons.folder_outlined : Icons.description_outlined,
             size: 16,
-            color: isFolder ? Colors.grey : Colors.blueGrey,
+            color: isFolder ? UiPalette.folder : UiPalette.document,
           ),
           const SizedBox(width: 6),
           Expanded(

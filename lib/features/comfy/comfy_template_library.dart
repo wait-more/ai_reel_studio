@@ -111,6 +111,10 @@ class _ComfyTemplateLibraryDialogState
           ),
           FilledButton(
             onPressed: () => Navigator.pop(ctx, true),
+            style: FilledButton.styleFrom(
+              backgroundColor: Theme.of(ctx).colorScheme.error,
+              foregroundColor: Theme.of(ctx).colorScheme.onError,
+            ),
             child: const Text('删除'),
           ),
         ],

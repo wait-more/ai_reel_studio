@@ -50,7 +50,7 @@ void showImageViewerDialog(BuildContext context, String path) {
         return KeyEventResult.ignored;
       },
       child: Dialog(
-        backgroundColor: Colors.black,
+        backgroundColor: Theme.of(dialogCtx).colorScheme.surface,
         insetPadding: const EdgeInsets.all(24),
         child: Stack(
           children: [
@@ -66,7 +66,10 @@ void showImageViewerDialog(BuildContext context, String path) {
               right: 8,
               child: IconButton(
                 tooltip: '关闭 (Esc)',
-                icon: const Icon(Icons.close, color: Colors.white70),
+                icon: Icon(
+                  Icons.close,
+                  color: Theme.of(dialogCtx).colorScheme.onSurfaceVariant,
+                ),
                 onPressed: () => Navigator.pop(dialogCtx),
               ),
             ),
@@ -427,12 +430,10 @@ class _MediaPreviewDialogState extends State<MediaPreviewDialog> {
   @override
   Widget build(BuildContext context) {
     return Dialog.fullscreen(
-      backgroundColor: const Color(0xFF101014),
-      // Dialog 无自己的 Scaffold，SnackBar 会绑到底层主窗体被遮挡；
-      // 局部 ScaffoldMessenger + Scaffold 让提示显示在对话框层之上。
+      backgroundColor: Theme.of(context).colorScheme.surface,
       child: ScaffoldMessenger(
         child: Scaffold(
-          backgroundColor: const Color(0xFF101014),
+          backgroundColor: Theme.of(context).colorScheme.surface,
           body: Focus(
             autofocus: true,
             onKeyEvent: _onKey,
@@ -453,26 +454,30 @@ class _MediaPreviewDialogState extends State<MediaPreviewDialog> {
   }
 
   Widget _buildTopBar(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
     return Container(
       height: 44,
       padding: const EdgeInsets.symmetric(horizontal: 12),
+      decoration: BoxDecoration(
+        border: Border(bottom: BorderSide(color: scheme.outlineVariant)),
+      ),
       child: Row(
         children: [
           Icon(
             widget.isVideo ? Icons.videocam : Icons.audiotrack,
             size: 16,
-            color: Colors.white70,
+            color: scheme.onSurfaceVariant,
           ),
           const SizedBox(width: 8),
           Expanded(
             child: Text(
               _name,
               overflow: TextOverflow.ellipsis,
-              style: const TextStyle(fontSize: 13, color: Colors.white),
+              style: TextStyle(fontSize: 13, color: scheme.onSurface),
             ),
           ),
           IconButton(
-            icon: const Icon(Icons.close, size: 18, color: Colors.white70),
+            icon: Icon(Icons.close, size: 18, color: scheme.onSurfaceVariant),
             tooltip: '关闭 (Esc)',
             onPressed: () => Navigator.pop(context),
           ),
@@ -515,11 +520,18 @@ class _MediaPreviewDialogState extends State<MediaPreviewDialog> {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          const Icon(Icons.music_note, size: 96, color: Colors.white24),
+          Icon(
+            Icons.music_note,
+            size: 96,
+            color: Theme.of(context).colorScheme.onSurfaceVariant,
+          ),
           const SizedBox(height: 12),
           Text(
             _name,
-            style: const TextStyle(fontSize: 13, color: Colors.white54),
+            style: TextStyle(
+              fontSize: 13,
+              color: Theme.of(context).colorScheme.onSurfaceVariant,
+            ),
           ),
         ],
       ),
@@ -533,16 +545,17 @@ class _MediaPreviewDialogState extends State<MediaPreviewDialog> {
             ? (_position.inMilliseconds.toDouble() / durationMs).clamp(0.0, 1.0)
             : 0.0);
 
+    final scheme = Theme.of(context).colorScheme;
     return Container(
       padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
-      color: Colors.black38,
+      color: scheme.surfaceContainerHigh,
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
           Row(
             children: [
               IconButton(
-                icon: const Icon(Icons.replay_5, size: 20, color: Colors.white),
+                icon: const Icon(Icons.replay_5, size: 20),
                 tooltip: '后退 5 秒 (←)',
                 onPressed: _opened ? () => _seekBy(-5) : null,
               ),
@@ -550,13 +563,12 @@ class _MediaPreviewDialogState extends State<MediaPreviewDialog> {
                 icon: Icon(
                   _playing ? Icons.pause : Icons.play_arrow,
                   size: 26,
-                  color: Colors.white,
                 ),
                 tooltip: '播放/暂停 (空格)',
                 onPressed: _opened ? _togglePlay : null,
               ),
               IconButton(
-                icon: const Icon(Icons.forward_5, size: 20, color: Colors.white),
+                icon: const Icon(Icons.forward_5, size: 20),
                 tooltip: '前进 5 秒 (→)',
                 onPressed: _opened ? () => _seekBy(5) : null,
               ),
@@ -567,9 +579,9 @@ class _MediaPreviewDialogState extends State<MediaPreviewDialog> {
                     trackHeight: 3,
                     thumbShape: const RoundSliderThumbShape(
                         enabledThumbRadius: 6),
-                    activeTrackColor: Colors.teal,
-                    inactiveTrackColor: Colors.white24,
-                    thumbColor: Colors.teal,
+                    activeTrackColor: scheme.primary,
+                    inactiveTrackColor: scheme.outlineVariant,
+                    thumbColor: scheme.primary,
                   ),
                   child: Slider(
                     value: shown,
@@ -582,7 +594,7 @@ class _MediaPreviewDialogState extends State<MediaPreviewDialog> {
               const SizedBox(width: 8),
               Text(
                 '${_fmt(_dragValue != null ? _duration * _dragValue! : _position)} / ${_fmt(_duration)}',
-                style: const TextStyle(fontSize: 12, color: Colors.white70),
+                style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant),
               ),
             ],
           ),
@@ -614,18 +626,19 @@ class _MediaPreviewDialogState extends State<MediaPreviewDialog> {
   }
 
   Widget _actionButton(IconData icon, String label, VoidCallback? onPressed) {
+    final scheme = Theme.of(context).colorScheme;
     return SizedBox(
       width: 130,
       child: OutlinedButton.icon(
         onPressed: onPressed,
-        icon: Icon(icon, size: 16, color: Colors.tealAccent),
+        icon: Icon(icon, size: 16, color: scheme.primary),
         label: Text(
           label,
           textAlign: TextAlign.center,
-          style: const TextStyle(fontSize: 11, color: Colors.white70),
+          style: TextStyle(fontSize: 11, color: scheme.onSurface),
         ),
         style: OutlinedButton.styleFrom(
-          side: const BorderSide(color: Colors.white24),
+          side: BorderSide(color: scheme.outlineVariant),
           padding: const EdgeInsets.symmetric(vertical: 6),
         ),
       ),
@@ -638,7 +651,10 @@ class _MediaPreviewDialogState extends State<MediaPreviewDialog> {
       alignment: Alignment.center,
       child: Text(
         '空格 播放/暂停 · ←/→ 快退/快进 5s',
-        style: TextStyle(fontSize: 11, color: Colors.white38),
+        style: TextStyle(
+          fontSize: 11,
+          color: Theme.of(context).colorScheme.onSurfaceVariant,
+        ),
       ),
     );
   }

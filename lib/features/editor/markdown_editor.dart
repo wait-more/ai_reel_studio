@@ -110,6 +110,7 @@ class MarkdownEditor extends ConsumerWidget {
           final path = tabs[index];
           final isSelected = path == selected;
           final isPreview = path == preview;
+          final dirty = ref.watch(dirtyFilesProvider).contains(path);
           final name = path.split(Platform.pathSeparator).last;
           return ReorderableDragStartListener(
             key: ValueKey(path),
@@ -118,6 +119,7 @@ class MarkdownEditor extends ConsumerWidget {
               title: name,
               selected: isSelected,
               preview: isPreview,
+              dirty: dirty,
               onSelect: () =>
                   ref.read(selectedFileProvider.notifier).state = path,
               onPin: () => pinEditorTabRef(ref, path),
@@ -338,14 +340,23 @@ class MarkdownEditor extends ConsumerWidget {
         children: [
           Icon(
             Icons.edit_note,
-            size: 64,
-            color: Theme.of(context).colorScheme.primary.withOpacity(0.5),
+            size: 48,
+            color: Theme.of(context).colorScheme.onSurfaceVariant,
           ),
           const SizedBox(height: 12),
           Text(
-            '从左侧选择一个文件打开',
+            '还没有打开的文档',
             style: TextStyle(
               fontSize: 14,
+              fontWeight: FontWeight.w600,
+              color: Theme.of(context).colorScheme.onSurface,
+            ),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            '在左侧目录或素材里打开 .md，未保存的标签会显示圆点',
+            style: TextStyle(
+              fontSize: 12,
               color: Theme.of(context).colorScheme.onSurfaceVariant,
             ),
           ),
@@ -361,6 +372,7 @@ class _EditorTabChip extends StatefulWidget {
     required this.title,
     required this.selected,
     required this.preview,
+    this.dirty = false,
     required this.onSelect,
     required this.onPin,
     required this.onClose,
@@ -370,6 +382,7 @@ class _EditorTabChip extends StatefulWidget {
   final String title;
   final bool selected;
   final bool preview;
+  final bool dirty;
   final VoidCallback onSelect;
   final VoidCallback onPin;
   final VoidCallback onClose;
@@ -400,11 +413,8 @@ class _EditorTabChipState extends State<_EditorTabChip> {
     final Color fill;
     final Border? border;
     if (selected) {
-      fill = scheme.primary.withValues(alpha: 0.16);
-      border = Border.all(
-        color: scheme.primary.withValues(alpha: 0.55),
-        width: 1,
-      );
+      fill = scheme.surfaceContainerLowest;
+      border = Border.all(color: scheme.primary, width: 1);
     } else if (_hovering) {
       fill = scheme.onSurface.withValues(alpha: 0.06);
       border = Border.all(
@@ -445,6 +455,16 @@ class _EditorTabChipState extends State<_EditorTabChip> {
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
+                  if (widget.dirty)
+                    Container(
+                      width: 6,
+                      height: 6,
+                      margin: const EdgeInsets.only(right: 6),
+                      decoration: BoxDecoration(
+                        color: scheme.primary,
+                        shape: BoxShape.circle,
+                      ),
+                    ),
                   ConstrainedBox(
                     constraints: const BoxConstraints(maxWidth: 160),
                     child: Text(
@@ -1636,7 +1656,6 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
       showDialog(
         context: context,
         builder: (_) => Dialog(
-          backgroundColor: Colors.black,
           child: _VideoPreview(file: File(path)),
         ),
       );
@@ -1646,7 +1665,6 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
       showDialog(
         context: context,
         builder: (_) => Dialog(
-          backgroundColor: Colors.black,
           child: ProjectFileImage(path),
         ),
       );

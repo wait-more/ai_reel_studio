@@ -19,6 +19,7 @@ import '../../core/inline_fs_edit.dart';
 import '../../core/media_types.dart';
 import '../../core/progress.dart';
 import '../../core/providers.dart';
+import '../../core/ui_palette.dart';
 import '../media/media_preview.dart';
 
 /// 物料类型过滤器。
@@ -861,7 +862,7 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
 
   Widget _buildToolbar(BuildContext context, String currentDir) {
     final scheme = Theme.of(context).colorScheme;
-    final line = const BorderSide(color: Colors.white24);
+    final line = BorderSide(color: scheme.outlineVariant);
     // 用 InkWell.mouseCursor（与 Shell 一致）；外层 MouseRegion 会被 IconButton 内部光标盖掉。
     Widget toolBtn({
       required Widget icon,
@@ -943,7 +944,7 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
                         hintText: '搜索',
                         hintStyle: TextStyle(
                           fontSize: 12,
-                          color: Colors.grey[600],
+                          color: scheme.onSurfaceVariant,
                         ),
                         isDense: true,
                         prefixIcon: const Icon(Icons.search, size: 16),
@@ -1303,7 +1304,7 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
         child: Row(
           children: [
             const SizedBox(width: 6),
-            const Icon(Icons.folder, size: 16, color: Colors.orange),
+            Icon(Icons.folder_outlined, size: 16, color: UiPalette.folder),
             const SizedBox(width: 4),
             Expanded(
               child: Stack(
@@ -1507,6 +1508,7 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
 
   Widget _buildBody(BuildContext context) {
     final dir = _currentDir;
+    final scheme = Theme.of(context).colorScheme;
     final inline = ref.watch(inlineFsEditProvider);
     final creatingHere =
         dir != null &&
@@ -1527,19 +1529,29 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                const Icon(Icons.folder_open, size: 48, color: Colors.grey),
-                const SizedBox(height: 8),
+                Icon(
+                  Icons.folder_open,
+                  size: 40,
+                  color: scheme.onSurfaceVariant,
+                ),
+                const SizedBox(height: 10),
                 Text(
-                  _entries.isEmpty ? '此目录为空' : '无匹配内容',
-                  style: TextStyle(color: Colors.grey[500]),
+                  _entries.isEmpty ? '这个目录还是空的' : '没有符合筛选的内容',
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                    color: scheme.onSurface,
+                  ),
                 ),
                 if (_entries.isEmpty)
                   Padding(
                     padding: const EdgeInsets.only(top: 6),
                     child: Text(
-                      '可从资源管理器拖入文件，或在应用内拖拽整理',
-                      style:
-                          TextStyle(fontSize: 11, color: Colors.grey[600]),
+                      '拖入文件，或用上方按钮新建文档、导入物料',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: scheme.onSurfaceVariant,
+                      ),
                     ),
                   ),
               ],
@@ -1637,7 +1649,7 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
                       child: Column(
                         children: [
                           _buildListHeader(context),
-                          const Divider(height: 1, color: Colors.white24),
+                          const Divider(height: 1),
                           Expanded(child: selectable),
                         ],
                       ),
@@ -1751,7 +1763,7 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
                     child: Center(
                       child: Container(
                         width: 1,
-                        color: Colors.white24,
+                        color: scheme.outlineVariant,
                       ),
                     ),
                   ),
@@ -2003,13 +2015,23 @@ class _AssetCard extends ConsumerWidget {
         children: [
           Expanded(child: _preview(context, size: 44)),
           Container(
-            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
-            decoration: const BoxDecoration(
-              color: Colors.black26,
-              borderRadius: BorderRadius.vertical(bottom: Radius.circular(8)),
+            padding: const EdgeInsets.fromLTRB(8, 5, 6, 5),
+            decoration: BoxDecoration(
+              color: scheme.surface.withValues(alpha: 0.92),
+              borderRadius:
+                  const BorderRadius.vertical(bottom: Radius.circular(7)),
             ),
             child: Row(
               children: [
+                Container(
+                  width: 3,
+                  height: 14,
+                  margin: const EdgeInsets.only(right: 6),
+                  decoration: BoxDecoration(
+                    color: UiPalette.forPath(entity.path, isDir: _isDir),
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
                 if (_isDir) _statusBubble(ref),
                 Expanded(
                   child: _nameWidget(context, ref, inline),
@@ -2048,7 +2070,7 @@ class _AssetCard extends ConsumerWidget {
     return Container(
       decoration: BoxDecoration(
         color: selected
-            ? scheme.primary.withValues(alpha: 0.16)
+            ? scheme.primary.withValues(alpha: 0.10)
             : Colors.transparent,
         borderRadius: BorderRadius.circular(4),
       ),
@@ -2207,16 +2229,16 @@ class _AssetCard extends ConsumerWidget {
         lower.endsWith('.mov') ||
         lower.endsWith('.mkv') ||
         lower.endsWith('.avi')) {
-      return (Icons.videocam, Colors.redAccent);
+      return (Icons.videocam, UiPalette.video);
     }
     if (lower.endsWith('.wav') ||
         lower.endsWith('.mp3') ||
         lower.endsWith('.flac') ||
         lower.endsWith('.ogg')) {
-      return (Icons.audiotrack, Colors.pinkAccent);
+      return (Icons.audiotrack, UiPalette.audio);
     }
-    if (lower.endsWith('.md')) return (Icons.description, Colors.blueGrey);
-    return (Icons.insert_drive_file, Colors.grey);
+    if (lower.endsWith('.md')) return (Icons.description, UiPalette.document);
+    return (Icons.insert_drive_file, UiPalette.folder);
   }
 }
 
@@ -2247,10 +2269,10 @@ class _FilterChipButtonState extends State<_FilterChipButton> {
     final sel = widget.selected;
     final hover = _hovered && !sel;
     final fg = sel
-        ? scheme.onPrimaryContainer
+        ? scheme.primary
         : hover
             ? scheme.onSurface
-            : Colors.grey[400];
+            : scheme.onSurfaceVariant;
     return Material(
       color: Colors.transparent,
       child: InkWell(
@@ -2266,13 +2288,17 @@ class _FilterChipButtonState extends State<_FilterChipButton> {
           padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
           decoration: BoxDecoration(
             color: sel
-                ? scheme.primaryContainer
+                ? scheme.primary.withValues(alpha: 0.12)
                 : hover
-                    ? scheme.onSurface.withValues(alpha: 0.10)
+                    ? scheme.onSurface.withValues(alpha: 0.06)
                     : Colors.transparent,
             borderRadius: BorderRadius.circular(6),
             border: Border.all(
-              color: hover ? Colors.white24 : Colors.transparent,
+              color: sel
+                  ? scheme.primary
+                  : hover
+                      ? scheme.outlineVariant
+                      : Colors.transparent,
             ),
           ),
           child: Row(
@@ -2331,7 +2357,7 @@ class _AssetGridHoverChromeState extends State<_AssetGridHoverChrome> {
         duration: const Duration(milliseconds: 90),
         decoration: BoxDecoration(
           color: selected
-              ? scheme.primary.withValues(alpha: 0.16)
+              ? scheme.primary.withValues(alpha: 0.10)
               : showHover
                   ? Color.alphaBlend(
                       scheme.onSurface.withValues(alpha: 0.06),
@@ -2343,8 +2369,8 @@ class _AssetGridHoverChromeState extends State<_AssetGridHoverChrome> {
             color: selected
                 ? scheme.primary
                 : showHover
-                    ? Colors.white24
-                    : Colors.white10,
+                    ? scheme.outline
+                    : scheme.outlineVariant,
             width: selected ? 1.5 : 1,
           ),
         ),
@@ -2463,7 +2489,7 @@ class _PathAncestorTileState extends State<_PathAncestorTile> {
                 : Colors.transparent),
         child: Row(
           children: [
-            const Icon(Icons.folder, size: 16, color: Colors.orange),
+            Icon(Icons.folder_outlined, size: 16, color: UiPalette.folder),
             const SizedBox(width: 6),
             Expanded(
               child: Text(

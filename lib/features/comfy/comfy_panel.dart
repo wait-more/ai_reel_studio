@@ -1977,9 +1977,10 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
           height: _kComfyHeaderBarHeight,
           child: DecoratedBox(
             decoration: BoxDecoration(
-              color: cs.surfaceContainerHighest,
-              border: const Border(
-                bottom: BorderSide(color: Colors.white24),
+              color: cs.surface,
+              border: Border(
+                top: BorderSide(color: cs.outlineVariant),
+                bottom: BorderSide(color: cs.outlineVariant),
               ),
             ),
             child: Padding(
@@ -2072,7 +2073,7 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
                     final progressLabel = oldest?.runStatus?.progressLabel ?? '';
                     return Material(
                       color: selected
-                          ? cs.primaryContainer.withValues(alpha: 0.45)
+                          ? cs.surfaceContainerHighest.withValues(alpha: 0.65)
                           : Colors.transparent,
                       child: InkWell(
                         onTap: () => _selectServer(s.id),
@@ -2285,9 +2286,10 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
           height: _kComfyHeaderBarHeight,
           child: DecoratedBox(
             decoration: BoxDecoration(
-              color: cs.surfaceContainerHighest,
-              border: const Border(
-                bottom: BorderSide(color: Colors.white24),
+              color: cs.surface,
+              border: Border(
+                top: BorderSide(color: cs.outlineVariant),
+                bottom: BorderSide(color: cs.outlineVariant),
               ),
             ),
             child: Padding(
@@ -2359,9 +2361,8 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
         Expanded(
           child: LayoutBuilder(
             builder: (context, constraints) {
-              // 至少放下约 2 张任务卡（含间距），多任务时可再滚。
               final jobMaxH =
-                  (constraints.maxHeight * 0.55).clamp(360.0, 520.0);
+                  (constraints.maxHeight * 0.48).clamp(280.0, 460.0);
               return Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
@@ -2370,14 +2371,12 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
                     Container(
                       width: double.infinity,
                       decoration: BoxDecoration(
-                        color: cs.surfaceContainerLow,
+                        color: cs.surface,
                         border: Border(
-                          top: BorderSide(
-                            color: cs.outline.withValues(alpha: 0.45),
-                          ),
+                          bottom: BorderSide(color: cs.outlineVariant),
                         ),
                       ),
-                      padding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
+                      padding: const EdgeInsets.fromLTRB(14, 8, 14, 10),
                       child: _buildJobList(cs, serverJobs, maxHeight: jobMaxH),
                     ),
                   _buildZoneDivider(
@@ -2429,7 +2428,11 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
         children: [
           Row(
             children: [
-              Icon(Icons.folder_special_outlined, size: 16, color: cs.primary),
+              Icon(
+                Icons.folder_special_outlined,
+                size: 16,
+                color: cs.onSurfaceVariant,
+              ),
               const SizedBox(width: 6),
               Text(
                 '运行输出',
@@ -2753,14 +2756,7 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
               ),
           ],
         ),
-        Padding(
-          padding: const EdgeInsets.only(top: 8, bottom: 8),
-          child: Divider(
-            height: 1,
-            thickness: 1,
-            color: cs.outline.withValues(alpha: 0.4),
-          ),
-        ),
+        const SizedBox(height: 6),
         ConstrainedBox(
           constraints: BoxConstraints(maxHeight: listMax),
           child: ListView.separated(
@@ -2768,38 +2764,7 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
             shrinkWrap: true,
             physics: const ClampingScrollPhysics(),
             itemCount: jobs.length,
-            separatorBuilder: (_, __) => Padding(
-              padding: const EdgeInsets.symmetric(vertical: 6),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: Divider(
-                      height: 1,
-                      thickness: 1,
-                      color: cs.outlineVariant.withValues(alpha: 0.9),
-                    ),
-                  ),
-                  Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 8),
-                    child: Text(
-                      '·',
-                      style: TextStyle(
-                        fontSize: 11,
-                        color: cs.onSurfaceVariant.withValues(alpha: 0.7),
-                        height: 1,
-                      ),
-                    ),
-                  ),
-                  Expanded(
-                    child: Divider(
-                      height: 1,
-                      thickness: 1,
-                      color: cs.outlineVariant.withValues(alpha: 0.9),
-                    ),
-                  ),
-                ],
-              ),
-            ),
+            separatorBuilder: (_, __) => const SizedBox(height: 8),
             itemBuilder: (context, i) => _buildJobCard(jobs[i], cs),
           ),
         ),
@@ -2850,7 +2815,7 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
     final accent = switch (job.phase) {
       _ComfyJobPhase.failed => cs.error,
       _ComfyJobPhase.cancelled => cs.onSurfaceVariant,
-      _ComfyJobPhase.completed => const Color(0xFF2E7D32),
+      _ComfyJobPhase.completed => const Color(0xFF6F9A78),
       _ => cs.primary,
     };
     final progress = job.runStatus?.progressFraction;
@@ -2876,16 +2841,9 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
         border: Border.all(
           color: job.isActive
               ? accent.withValues(alpha: 0.7)
-              : cs.outline.withValues(alpha: 0.55),
+              : cs.outlineVariant,
           width: job.isActive ? 1.2 : 1,
         ),
-        boxShadow: [
-          BoxShadow(
-            color: cs.shadow.withValues(alpha: 0.06),
-            blurRadius: 4,
-            offset: const Offset(0, 1),
-          ),
-        ],
       ),
       clipBehavior: Clip.antiAlias,
       child: Stack(
@@ -3544,15 +3502,29 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
               TextField(
                 controller: _textCtrls[field.id],
                 focusNode: _textFocus[field.id],
-                maxLines: 4,
+                maxLines: 8,
+                minLines: 8,
                 onChanged: (_) => _schedulePersistSession(),
                 decoration: InputDecoration(
                   isDense: true,
                   labelText: field.label,
-                  border: const OutlineInputBorder(),
                   alignLabelWithHint: true,
+                  filled: true,
+                  fillColor: cs.surfaceContainerLowest,
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(8),
+                    borderSide: BorderSide(color: cs.outline),
+                  ),
+                  enabledBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(8),
+                    borderSide: BorderSide(color: cs.outline),
+                  ),
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(8),
+                    borderSide: BorderSide(color: cs.primary, width: 1.4),
+                  ),
                   // 右下角留给斜线抓手，避免文字压住。
-                  contentPadding: const EdgeInsets.fromLTRB(10, 10, 22, 18),
+                  contentPadding: const EdgeInsets.fromLTRB(12, 12, 22, 18),
                 ),
               ),
               Positioned(

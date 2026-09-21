@@ -41,13 +41,13 @@ class _FirstRunPanel extends ConsumerWidget {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             Icon(
-              Icons.movie_filter,
-              size: 72,
+              Icons.movie_filter_outlined,
+              size: 40,
               color: Theme.of(context).colorScheme.primary,
             ),
             const SizedBox(height: 16),
             Text(
-              '欢迎使用 AIReelStudio',
+              '开始使用 AIReelStudio',
               textAlign: TextAlign.center,
               style: Theme.of(context).textTheme.headlineSmall?.copyWith(
                     fontWeight: FontWeight.w600,
@@ -55,16 +55,102 @@ class _FirstRunPanel extends ConsumerWidget {
             ),
             const SizedBox(height: 8),
             Text(
-              '选择你的 scripts 目录作为项目根目录',
+              '先选定项目目录。Comfy 和终端可以进软件后再配。',
               textAlign: TextAlign.center,
               style: TextStyle(
                 color: Theme.of(context).colorScheme.onSurfaceVariant,
               ),
             ),
-            const SizedBox(height: 24),
+            const SizedBox(height: 20),
+            const _FirstRunStep(
+              index: '1',
+              title: '选择项目目录',
+              detail: '本地路径，或已经挂载的网络盘',
+              active: true,
+            ),
+            const _FirstRunStep(
+              index: '2',
+              title: '添加 Comfy 实例',
+              detail: '设置里填写地址，生成页才会出现',
+            ),
+            const _FirstRunStep(
+              index: '3',
+              title: '在顶栏切换工作区',
+              detail: '素材、文档、生成共用这一套项目',
+            ),
+            const SizedBox(height: 8),
             const _ProjectDirPicker(firstRun: true),
           ],
         ),
+      ),
+    );
+  }
+}
+
+class _FirstRunStep extends StatelessWidget {
+  const _FirstRunStep({
+    required this.index,
+    required this.title,
+    required this.detail,
+    this.active = false,
+  });
+
+  final String index;
+  final String title;
+  final String detail;
+  final bool active;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: 22,
+            height: 22,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: active
+                  ? scheme.primary.withValues(alpha: 0.14)
+                  : scheme.surfaceContainerHigh,
+              borderRadius: BorderRadius.circular(6),
+              border: Border.all(
+                color: active ? scheme.primary : scheme.outlineVariant,
+              ),
+            ),
+            child: Text(
+              index,
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+                color: active ? scheme.primary : scheme.onSurfaceVariant,
+              ),
+            ),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                    color: active ? scheme.onSurface : scheme.onSurfaceVariant,
+                  ),
+                ),
+                Text(
+                  detail,
+                  style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant),
+                ),
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -538,6 +624,10 @@ class _ComfySectionState extends ConsumerState<_ComfySection> {
           ),
           FilledButton(
             onPressed: () => Navigator.pop(ctx, true),
+            style: FilledButton.styleFrom(
+              backgroundColor: Theme.of(ctx).colorScheme.error,
+              foregroundColor: Theme.of(ctx).colorScheme.onError,
+            ),
             child: const Text('删除'),
           ),
         ],

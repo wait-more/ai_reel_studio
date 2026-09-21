@@ -604,13 +604,14 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
   }
 
   Widget _buildTabBar(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
     return Container(
       height: kColumnTopBarHeight,
-      decoration: const BoxDecoration(
-        color: Color(0xFF2D2D2D),
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainerHighest,
         border: Border(
-          top: BorderSide(color: Colors.white12, width: 1),
-          bottom: BorderSide(color: Colors.white12, width: 1),
+          top: BorderSide(color: scheme.outlineVariant),
+          bottom: BorderSide(color: scheme.outlineVariant),
         ),
       ),
       child: Row(
@@ -624,7 +625,14 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
                 final tab = _tabs[index];
                 final agentish = tab.launchedAgentHint != null &&
                     tab.launchedAgentHint!.isNotEmpty;
-                return InkWell(
+                return _ShellTabButton(
+                  label: agentish
+                      ? (tab.launchedAgentHint ?? 'Agent')
+                      : '终端 ${index + 1}',
+                  active: isActive,
+                  leading: agentish
+                      ? _agentBrandIcon(tab.launchedAgentHint)
+                      : null,
                   onTap: () {
                     _dismissSessionMenu();
                     final tab = _tabs[index];
@@ -633,43 +641,13 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
                     _registerHost();
                     _schedulePersist();
                   },
-                  child: Container(
-                    margin: const EdgeInsets.symmetric(
-                        vertical: 4, horizontal: 2),
-                    padding: const EdgeInsets.symmetric(horizontal: 10),
-                    decoration: BoxDecoration(
-                      color: isActive
-                          ? const Color(0xFF1E1E1E)
-                          : const Color(0xFF2D2D2D),
-                      borderRadius: BorderRadius.circular(4),
-                    ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        if (agentish) ...[
-                          _agentBrandIcon(tab.launchedAgentHint),
-                          const SizedBox(width: 4),
-                        ],
-                        Text(
-                          agentish
-                              ? (tab.launchedAgentHint ?? 'Agent')
-                              : '终端 ${index + 1}',
-                          style: const TextStyle(
-                              fontSize: 12, color: Colors.white),
-                        ),
-                        const SizedBox(width: 6),
-                        _TerminalTabCloseButton(
-                          onTap: () => _closeTab(index),
-                        ),
-                      ],
-                    ),
-                  ),
+                  onClose: () => _closeTab(index),
                 );
               },
             ),
           ),
           IconButton(
-            icon: const Icon(Icons.add, size: 16, color: Colors.white54),
+            icon: Icon(Icons.add, size: 16, color: scheme.onSurfaceVariant),
             padding: EdgeInsets.zero,
             constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
             tooltip: '新建终端',
@@ -683,6 +661,7 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
   /// 左下角「会话」入口：锚在按钮上方弹出，不挡终端正文。
   Widget _buildSessionEntryButton(BuildContext context) {
     final busy = _switchingSession;
+    final scheme = Theme.of(context).colorScheme;
     return CompositedTransformTarget(
       link: _sessionMenuLink,
       child: Tooltip(
@@ -699,12 +678,21 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
                   }
                 },
           style: TextButton.styleFrom(
-            foregroundColor: Colors.lightGreenAccent.withValues(alpha: 0.9),
-            disabledForegroundColor: Colors.white38,
-            padding: const EdgeInsets.symmetric(horizontal: 8),
+            foregroundColor: scheme.onSurface,
+            disabledForegroundColor: scheme.onSurface.withValues(alpha: 0.38),
+            backgroundColor: scheme.surfaceContainerLowest,
+            side: BorderSide(
+              color: _sessionMenuOpen ? scheme.primary : scheme.outline,
+            ),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(6),
+            ),
+            padding: const EdgeInsets.symmetric(horizontal: 10),
             minimumSize: const Size(0, 28),
             tapTargetSize: MaterialTapTargetSize.shrinkWrap,
             visualDensity: VisualDensity.compact,
+            enabledMouseCursor: SystemMouseCursors.click,
+            disabledMouseCursor: SystemMouseCursors.basic,
           ),
           icon: Icon(
             busy ? Icons.hourglass_top : Icons.forum_outlined,
@@ -1038,20 +1026,27 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
   }
 
   Widget _buildBottomBar(BuildContext context, List<StartCmd> commands) {
+    final scheme = Theme.of(context).colorScheme;
     return Container(
       padding: const EdgeInsets.fromLTRB(6, 6, 8, 6),
-      color: const Color(0xFF2D2D2D),
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainerHigh,
+        border: Border(top: BorderSide(color: scheme.outlineVariant)),
+      ),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.center,
         children: [
           if (_showSessionEntry) ...[
             _buildSessionEntryButton(context),
             if (commands.isNotEmpty)
-              const Padding(
-                padding: EdgeInsets.symmetric(horizontal: 4),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 4),
                 child: SizedBox(
                   height: 18,
-                  child: VerticalDivider(width: 1, color: Colors.white12),
+                  child: VerticalDivider(
+                    width: 1,
+                    color: scheme.outlineVariant,
+                  ),
                 ),
               ),
           ],
@@ -1064,11 +1059,16 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
                       children: [
                         for (final cmd in commands) ...[
                           ActionChip(
-                            avatar: _startCmdAvatar(cmd),
+                            mouseCursor: SystemMouseCursors.click,
+                            avatar: _startCmdAvatar(
+                              cmd,
+                              scheme.onSurfaceVariant,
+                            ),
                             label: Text(cmd.name,
                                 style: const TextStyle(fontSize: 11)),
-                            backgroundColor: const Color(0xFF3D3D3D),
-                            labelStyle: const TextStyle(color: Colors.white),
+                            backgroundColor: scheme.surfaceContainerLowest,
+                            labelStyle: TextStyle(color: scheme.onSurface),
+                            side: BorderSide(color: scheme.outlineVariant),
                             tooltip:
                                 '${cmd.command}\n${cmd.cwd == CwdStrategy.selectedDir ? "cwd: 当前选中目录" : "cwd: 项目根"}',
                             onPressed: () => _runStartCmd(cmd),
@@ -1465,18 +1465,24 @@ class _OpenCodeSessionMenuOverlayState extends State<_OpenCodeSessionMenuOverlay
               followerAnchor: Alignment.bottomLeft,
               offset: const Offset(0, -4),
               child: Material(
-                elevation: 10,
-                color: const Color(0xFF2B2B2B),
-                borderRadius: BorderRadius.circular(8),
+                elevation: 0,
+                color: Theme.of(context).colorScheme.surfaceContainerHigh,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(8),
+                  side: BorderSide(
+                    color: Theme.of(context).colorScheme.outlineVariant,
+                  ),
+                ),
                 // 允许行内悬停提示画出 item 边界；不用系统 Tooltip（会二级 Overlay 闪红屏）。
                 clipBehavior: Clip.none,
-                child: ConstrainedBox(
-                  constraints: BoxConstraints(
-                    minWidth: 280,
-                    maxWidth: 340,
-                    maxHeight: (size.height * 0.55).clamp(220.0, 420.0),
-                  ),
-                  child: Column(
+                child: _SessionMenuTipHost(
+                  child: ConstrainedBox(
+                    constraints: BoxConstraints(
+                      minWidth: 280,
+                      maxWidth: 340,
+                      maxHeight: (size.height * 0.55).clamp(220.0, 420.0),
+                    ),
+                    child: Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
                       Padding(
@@ -1487,12 +1493,14 @@ class _OpenCodeSessionMenuOverlayState extends State<_OpenCodeSessionMenuOverlay
                               child: Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
-                                  const Text(
+                                  Text(
                                     '项目会话',
                                     style: TextStyle(
                                       fontSize: 12,
                                       fontWeight: FontWeight.w600,
-                                      color: Colors.white70,
+                                      color: Theme.of(context)
+                                          .colorScheme
+                                          .onSurface,
                                     ),
                                   ),
                                   if (widget.cwd.trim().isNotEmpty)
@@ -1500,9 +1508,11 @@ class _OpenCodeSessionMenuOverlayState extends State<_OpenCodeSessionMenuOverlay
                                       widget.cwd,
                                       maxLines: 1,
                                       overflow: TextOverflow.ellipsis,
-                                      style: const TextStyle(
+                                      style: TextStyle(
                                         fontSize: 10,
-                                        color: Colors.white30,
+                                        color: Theme.of(context)
+                                            .colorScheme
+                                            .onSurfaceVariant,
                                       ),
                                     ),
                                 ],
@@ -1511,6 +1521,12 @@ class _OpenCodeSessionMenuOverlayState extends State<_OpenCodeSessionMenuOverlay
                             _OverlayHoverTip(
                               message: '刷新',
                               child: IconButton(
+                                mouseCursor: (refreshBusy ||
+                                        _busy ||
+                                        editing ||
+                                        pendingDelete)
+                                    ? SystemMouseCursors.basic
+                                    : SystemMouseCursors.click,
                                 onPressed: (refreshBusy ||
                                         _busy ||
                                         editing ||
@@ -1526,7 +1542,9 @@ class _OpenCodeSessionMenuOverlayState extends State<_OpenCodeSessionMenuOverlay
                                         ),
                                       )
                                     : const Icon(Icons.refresh, size: 16),
-                                color: Colors.white54,
+                                color: Theme.of(context)
+                                    .colorScheme
+                                    .onSurfaceVariant,
                                 padding: EdgeInsets.zero,
                                 constraints: const BoxConstraints(
                                   minWidth: 28,
@@ -1543,19 +1561,23 @@ class _OpenCodeSessionMenuOverlayState extends State<_OpenCodeSessionMenuOverlay
                           controller: _filter,
                           enabled: !editing && !_busy && !pendingDelete,
                           onChanged: (_) => setState(() {}),
-                          style: const TextStyle(
+                          style: TextStyle(
                             fontSize: 12,
-                            color: Colors.white,
+                            color: Theme.of(context).colorScheme.onSurface,
                           ),
                           decoration: InputDecoration(
                             isDense: true,
                             hintText: '筛选会话名称…',
-                            hintStyle: const TextStyle(
+                            hintStyle: TextStyle(
                               fontSize: 12,
-                              color: Colors.white38,
+                              color: Theme.of(context)
+                                  .colorScheme
+                                  .onSurfaceVariant,
                             ),
                             filled: true,
-                            fillColor: Colors.black26,
+                            fillColor: Theme.of(context)
+                                .colorScheme
+                                .surfaceContainerLowest,
                             contentPadding: const EdgeInsets.symmetric(
                               horizontal: 10,
                               vertical: 8,
@@ -1570,10 +1592,14 @@ class _OpenCodeSessionMenuOverlayState extends State<_OpenCodeSessionMenuOverlay
                       _buildNewSessionBar(
                         enabled: !editing && !_busy && !pendingDelete && !_creating,
                       ),
-                      const Divider(height: 1, color: Colors.white12),
+                      Divider(
+                        height: 1,
+                        color: Theme.of(context).colorScheme.outlineVariant,
+                      ),
                       Expanded(child: _buildBody()),
                     ],
                   ),
+                ),
                 ),
               ),
             ),
@@ -1584,13 +1610,14 @@ class _OpenCodeSessionMenuOverlayState extends State<_OpenCodeSessionMenuOverlay
   }
 
   Widget _buildNewSessionBar({required bool enabled}) {
-    const accent = Colors.lightGreenAccent;
+    final scheme = Theme.of(context).colorScheme;
+    final accent = scheme.primary;
     return Padding(
       padding: const EdgeInsets.fromLTRB(10, 0, 10, 8),
       child: Material(
         color: enabled
-            ? Colors.white.withValues(alpha: 0.04)
-            : Colors.white.withValues(alpha: 0.02),
+            ? scheme.onSurface.withValues(alpha: 0.06)
+            : scheme.onSurface.withValues(alpha: 0.03),
         borderRadius: BorderRadius.circular(6),
         child: InkWell(
           onTap: enabled
@@ -1602,7 +1629,7 @@ class _OpenCodeSessionMenuOverlayState extends State<_OpenCodeSessionMenuOverlay
           mouseCursor: enabled
               ? SystemMouseCursors.click
               : SystemMouseCursors.basic,
-          hoverColor: Colors.white.withValues(alpha: 0.06),
+          hoverColor: scheme.onSurface.withValues(alpha: 0.06),
           borderRadius: BorderRadius.circular(6),
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
@@ -1628,7 +1655,9 @@ class _OpenCodeSessionMenuOverlayState extends State<_OpenCodeSessionMenuOverlay
                   style: TextStyle(
                     fontSize: 13,
                     fontWeight: FontWeight.w500,
-                    color: enabled ? Colors.white : Colors.white38,
+                    color: enabled
+                        ? scheme.onSurface
+                        : scheme.onSurfaceVariant,
                   ),
                 ),
               ],
@@ -1668,7 +1697,10 @@ class _OpenCodeSessionMenuOverlayState extends State<_OpenCodeSessionMenuOverlay
                 ? '当前项目暂无会话'
                 : '当前目录下暂无 OpenCode 会话',
             textAlign: TextAlign.center,
-            style: const TextStyle(fontSize: 12, color: Colors.white38),
+            style: TextStyle(
+              fontSize: 12,
+              color: Theme.of(context).colorScheme.onSurfaceVariant,
+            ),
           ),
         ),
       );
@@ -1688,6 +1720,7 @@ class _OpenCodeSessionMenuOverlayState extends State<_OpenCodeSessionMenuOverlay
   }
 
   Widget _buildSessionTile(OpenCodeSessionInfo s, {required int index}) {
+    final scheme = Theme.of(context).colorScheme;
     final time = formatOpenCodeSessionTime(s.updated);
     final isCurrent =
         _currentSessionId != null && s.id == _currentSessionId;
@@ -1700,20 +1733,22 @@ class _OpenCodeSessionMenuOverlayState extends State<_OpenCodeSessionMenuOverlay
       mainAxisSize: MainAxisSize.min,
       children: [
         if (index > 0)
-          const Divider(
+          Divider(
             height: 1,
             thickness: 1,
             indent: 44,
             endIndent: 8,
-            color: Colors.white10,
+            color: scheme.outlineVariant,
           ),
         Material(
           color: isPendingDelete
               ? Colors.redAccent.withValues(alpha: 0.12)
               : isCurrent || isEditing
-                  ? Colors.lightGreenAccent.withValues(alpha: 0.12)
+                  ? scheme.primary.withValues(alpha: 0.12)
                   : Colors.transparent,
           child: InkWell(
+            mouseCursor:
+                _busy ? SystemMouseCursors.basic : SystemMouseCursors.click,
             onTap: _busy
                 ? null
                 : () {
@@ -1741,7 +1776,7 @@ class _OpenCodeSessionMenuOverlayState extends State<_OpenCodeSessionMenuOverlay
                   Container(
                     width: 3,
                     color: isCurrent && !isPendingDelete
-                        ? Colors.lightGreenAccent
+                        ? scheme.primary
                         : Colors.transparent,
                   ),
                   Expanded(
@@ -1766,7 +1801,7 @@ class _OpenCodeSessionMenuOverlayState extends State<_OpenCodeSessionMenuOverlay
                                     borderRadius: BorderRadius.circular(6),
                                     border: isCurrent && !isPendingDelete
                                         ? Border.all(
-                                            color: Colors.lightGreenAccent
+                                            color: scheme.primary
                                                 .withValues(alpha: 0.7),
                                             width: 1.2,
                                           )
@@ -1778,8 +1813,8 @@ class _OpenCodeSessionMenuOverlayState extends State<_OpenCodeSessionMenuOverlay
                                       fontSize: 12,
                                       fontWeight: FontWeight.w700,
                                       color: isPendingDelete
-                                          ? Colors.redAccent.shade100
-                                          : Colors.white,
+                                          ? scheme.error
+                                          : scheme.onSurface,
                                     ),
                                   ),
                                 ),
@@ -1793,19 +1828,19 @@ class _OpenCodeSessionMenuOverlayState extends State<_OpenCodeSessionMenuOverlay
                                         enabled: !_busy,
                                         autofocus: true,
                                         maxLength: 120,
-                                        style: const TextStyle(
+                                        style: TextStyle(
                                           fontSize: 13,
-                                          color: Colors.white,
+                                          color: scheme.onSurface,
                                         ),
-                                        decoration: const InputDecoration(
+                                        decoration: InputDecoration(
                                           isDense: true,
                                           counterText: '',
                                           hintText: '会话标题',
                                           hintStyle: TextStyle(
-                                            color: Colors.white38,
+                                            color: scheme.onSurfaceVariant,
                                           ),
                                           filled: true,
-                                          fillColor: Colors.black38,
+                                          fillColor: scheme.surfaceContainerLowest,
                                           contentPadding: EdgeInsets.symmetric(
                                             horizontal: 8,
                                             vertical: 8,
@@ -1829,10 +1864,10 @@ class _OpenCodeSessionMenuOverlayState extends State<_OpenCodeSessionMenuOverlay
                                         style: TextStyle(
                                           fontSize: 13,
                                           color: isPendingDelete
-                                              ? Colors.redAccent.shade100
+                                              ? scheme.error
                                               : isCurrent
-                                                  ? Colors.white
-                                                  : Colors.white70,
+                                                  ? scheme.onSurface
+                                                  : scheme.onSurfaceVariant,
                                           fontWeight: isCurrent ||
                                                   isPendingDelete
                                               ? FontWeight.w600
@@ -1850,15 +1885,14 @@ class _OpenCodeSessionMenuOverlayState extends State<_OpenCodeSessionMenuOverlay
                                     vertical: 2,
                                   ),
                                   decoration: BoxDecoration(
-                                    color: Colors.lightGreenAccent
-                                        .withValues(alpha: 0.22),
+                                    color: scheme.primary.withValues(alpha: 0.16),
                                     borderRadius: BorderRadius.circular(4),
                                   ),
-                                  child: const Text(
+                                  child: Text(
                                     '当前',
                                     style: TextStyle(
                                       fontSize: 10,
-                                      color: Colors.lightGreenAccent,
+                                      color: scheme.primary,
                                       fontWeight: FontWeight.w600,
                                     ),
                                   ),
@@ -1870,6 +1904,9 @@ class _OpenCodeSessionMenuOverlayState extends State<_OpenCodeSessionMenuOverlay
                                     mainAxisSize: MainAxisSize.min,
                                     children: [
                                       IconButton(
+                                        mouseCursor: _busy
+                                            ? SystemMouseCursors.basic
+                                            : SystemMouseCursors.click,
                                         onPressed: _busy
                                             ? null
                                             : () => unawaited(
@@ -1888,7 +1925,7 @@ class _OpenCodeSessionMenuOverlayState extends State<_OpenCodeSessionMenuOverlay
                                                 Icons.check,
                                                 size: 16,
                                               ),
-                                        color: Colors.lightGreenAccent,
+                                        color: scheme.primary,
                                         padding: EdgeInsets.zero,
                                         visualDensity: VisualDensity.compact,
                                         constraints: const BoxConstraints(
@@ -1897,6 +1934,9 @@ class _OpenCodeSessionMenuOverlayState extends State<_OpenCodeSessionMenuOverlay
                                         ),
                                       ),
                                       IconButton(
+                                        mouseCursor: _busy
+                                            ? SystemMouseCursors.basic
+                                            : SystemMouseCursors.click,
                                         onPressed: _busy
                                             ? null
                                             : _cancelInlineRename,
@@ -1904,7 +1944,7 @@ class _OpenCodeSessionMenuOverlayState extends State<_OpenCodeSessionMenuOverlay
                                           Icons.close,
                                           size: 16,
                                         ),
-                                        color: Colors.white54,
+                                        color: scheme.onSurfaceVariant,
                                         padding: EdgeInsets.zero,
                                         visualDensity: VisualDensity.compact,
                                         constraints: const BoxConstraints(
@@ -1934,6 +1974,12 @@ class _OpenCodeSessionMenuOverlayState extends State<_OpenCodeSessionMenuOverlay
                                         tapTargetSize:
                                             MaterialTapTargetSize.shrinkWrap,
                                         visualDensity: VisualDensity.compact,
+                                      ).copyWith(
+                                        mouseCursor: WidgetStatePropertyAll(
+                                          _busy
+                                              ? SystemMouseCursors.basic
+                                              : SystemMouseCursors.click,
+                                        ),
                                       ),
                                       child: _deletingId == s.id
                                           ? const SizedBox(
@@ -1955,7 +2001,7 @@ class _OpenCodeSessionMenuOverlayState extends State<_OpenCodeSessionMenuOverlay
                                                 () => _pendingDeleteId = null,
                                               ),
                                       style: TextButton.styleFrom(
-                                        foregroundColor: Colors.white54,
+                                        foregroundColor: scheme.onSurfaceVariant,
                                         padding: const EdgeInsets.symmetric(
                                           horizontal: 8,
                                         ),
@@ -1963,6 +2009,12 @@ class _OpenCodeSessionMenuOverlayState extends State<_OpenCodeSessionMenuOverlay
                                         tapTargetSize:
                                             MaterialTapTargetSize.shrinkWrap,
                                         visualDensity: VisualDensity.compact,
+                                      ).copyWith(
+                                        mouseCursor: WidgetStatePropertyAll(
+                                          _busy
+                                              ? SystemMouseCursors.basic
+                                              : SystemMouseCursors.click,
+                                        ),
                                       ),
                                       child: const Text(
                                         '取消',
@@ -1979,6 +2031,9 @@ class _OpenCodeSessionMenuOverlayState extends State<_OpenCodeSessionMenuOverlay
                                       message: '重命名',
                                       preferAbove: true,
                                       child: IconButton(
+                                        mouseCursor: _busy
+                                            ? SystemMouseCursors.basic
+                                            : SystemMouseCursors.click,
                                         onPressed: _busy
                                             ? null
                                             : () => _beginInlineRename(s),
@@ -1986,7 +2041,7 @@ class _OpenCodeSessionMenuOverlayState extends State<_OpenCodeSessionMenuOverlay
                                           Icons.edit_outlined,
                                           size: 14,
                                         ),
-                                        color: Colors.white38,
+                                        color: scheme.onSurfaceVariant,
                                         padding: EdgeInsets.zero,
                                         visualDensity: VisualDensity.compact,
                                         constraints: const BoxConstraints(
@@ -1999,6 +2054,9 @@ class _OpenCodeSessionMenuOverlayState extends State<_OpenCodeSessionMenuOverlay
                                       message: '删除',
                                       preferAbove: true,
                                       child: IconButton(
+                                        mouseCursor: _busy
+                                            ? SystemMouseCursors.basic
+                                            : SystemMouseCursors.click,
                                         onPressed: _busy
                                             ? null
                                             : () {
@@ -2035,9 +2093,7 @@ class _OpenCodeSessionMenuOverlayState extends State<_OpenCodeSessionMenuOverlay
                                 time,
                                 style: TextStyle(
                                   fontSize: 11,
-                                  color: isCurrent
-                                      ? Colors.white54
-                                      : Colors.white38,
+                                  color: scheme.onSurfaceVariant,
                                 ),
                               ),
                             ),
@@ -2079,8 +2135,120 @@ Color _sessionAccentColor(OpenCodeSessionInfo session) {
   return palette[h.abs() % palette.length];
 }
 
-/// Overlay 菜单内的悬停提示：在本组件树里画气泡，不插入系统 [Tooltip] Overlay，
-/// 避免鼠标移出时 `!debugNeedsLayout` 闪红屏。
+/// 会话菜单内的悬停提示宿主。气泡画在菜单内容之后，避免被筛选框和列表盖住。
+/// 仍留在同一条 Overlay 里，不另插系统 [Tooltip]（移出时会闪红屏）。
+class _SessionMenuTipHost extends StatefulWidget {
+  const _SessionMenuTipHost({required this.child});
+
+  final Widget child;
+
+  @override
+  State<_SessionMenuTipHost> createState() => _SessionMenuTipHostState();
+}
+
+class _HoverTipSpec {
+  const _HoverTipSpec({
+    required this.link,
+    required this.message,
+    required this.preferAbove,
+  });
+
+  final LayerLink link;
+  final String message;
+  final bool preferAbove;
+}
+
+class _SessionMenuTipHostState extends State<_SessionMenuTipHost> {
+  final Map<Object, _HoverTipSpec> _tips = {};
+
+  void show(Object id, _HoverTipSpec spec) {
+    if (!mounted) return;
+    setState(() => _tips[id] = spec);
+  }
+
+  void hide(Object id) {
+    if (_tips.remove(id) == null || !mounted) return;
+    setState(() {});
+  }
+
+  /// 子组件销毁时只摘掉记录，避免在卸载过程中 setState。
+  void drop(Object id) {
+    if (_tips.remove(id) == null) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) setState(() {});
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return _SessionMenuTipScope(
+      host: this,
+      child: Stack(
+        clipBehavior: Clip.none,
+        children: [
+          widget.child,
+          for (final spec in _tips.values)
+            Positioned(
+              left: 0,
+              top: 0,
+              child: CompositedTransformFollower(
+                link: spec.link,
+                showWhenUnlinked: false,
+                targetAnchor: spec.preferAbove
+                    ? Alignment.topCenter
+                    : Alignment.bottomCenter,
+                followerAnchor: spec.preferAbove
+                    ? Alignment.bottomCenter
+                    : Alignment.topCenter,
+                offset: Offset(0, spec.preferAbove ? -6 : 6),
+                child: IgnorePointer(
+                  child: Material(
+                    elevation: 4,
+                    color: const Color(0xFF111111),
+                    borderRadius: BorderRadius.circular(4),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 8,
+                        vertical: 4,
+                      ),
+                      child: Text(
+                        spec.message,
+                        style: const TextStyle(
+                          fontSize: 11,
+                          color: Colors.white70,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _SessionMenuTipScope extends InheritedWidget {
+  const _SessionMenuTipScope({
+    required this.host,
+    required super.child,
+  });
+
+  final _SessionMenuTipHostState host;
+
+  static _SessionMenuTipHostState? maybeOf(BuildContext context) {
+    final scope =
+        context.getElementForInheritedWidgetOfExactType<_SessionMenuTipScope>();
+    return (scope?.widget as _SessionMenuTipScope?)?.host;
+  }
+
+  @override
+  bool updateShouldNotify(covariant _SessionMenuTipScope oldWidget) =>
+      host != oldWidget.host;
+}
+
+/// Overlay 菜单内的悬停提示：气泡交给 [_SessionMenuTipHost] 画在最上层。
 class _OverlayHoverTip extends StatefulWidget {
   const _OverlayHoverTip({
     required this.message,
@@ -2097,15 +2265,23 @@ class _OverlayHoverTip extends StatefulWidget {
 }
 
 class _OverlayHoverTipState extends State<_OverlayHoverTip> {
+  final LayerLink _link = LayerLink();
   bool _hovering = false;
-  bool _visible = false;
   Timer? _showTimer;
+  _SessionMenuTipHostState? _host;
 
   static const _wait = Duration(milliseconds: 400);
 
   @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _host = _SessionMenuTipScope.maybeOf(context);
+  }
+
+  @override
   void dispose() {
     _showTimer?.cancel();
+    _host?.drop(this);
     super.dispose();
   }
 
@@ -2113,56 +2289,32 @@ class _OverlayHoverTipState extends State<_OverlayHoverTip> {
     _hovering = true;
     _showTimer?.cancel();
     _showTimer = Timer(_wait, () {
-      if (mounted && _hovering) {
-        setState(() => _visible = true);
-      }
+      if (!mounted || !_hovering) return;
+      _host?.show(
+        this,
+        _HoverTipSpec(
+          link: _link,
+          message: widget.message,
+          preferAbove: widget.preferAbove,
+        ),
+      );
     });
   }
 
   void _hide() {
     _hovering = false;
     _showTimer?.cancel();
-    if (_visible && mounted) {
-      setState(() => _visible = false);
-    }
+    _host?.hide(this);
   }
 
   @override
   Widget build(BuildContext context) {
-    return MouseRegion(
-      onEnter: (_) => _scheduleShow(),
-      onExit: (_) => _hide(),
-      child: Stack(
-        clipBehavior: Clip.none,
-        alignment: Alignment.center,
-        children: [
-          widget.child,
-          if (_visible)
-            Positioned(
-              top: widget.preferAbove ? null : 30,
-              bottom: widget.preferAbove ? 30 : null,
-              child: IgnorePointer(
-                child: Material(
-                  elevation: 4,
-                  color: const Color(0xFF111111),
-                  borderRadius: BorderRadius.circular(4),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 8,
-                      vertical: 4,
-                    ),
-                    child: Text(
-                      widget.message,
-                      style: const TextStyle(
-                        fontSize: 11,
-                        color: Colors.white70,
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            ),
-        ],
+    return CompositedTransformTarget(
+      link: _link,
+      child: MouseRegion(
+        onEnter: (_) => _scheduleShow(),
+        onExit: (_) => _hide(),
+        child: widget.child,
       ),
     );
   }
@@ -2199,7 +2351,7 @@ Widget _agentBrandIcon(String? hint, {double size = 14}) {
   );
 }
 
-Widget _startCmdAvatar(StartCmd cmd) {
+Widget _startCmdAvatar(StartCmd cmd, Color iconColor) {
   final blob = '${cmd.name} ${cmd.command}'.toLowerCase();
   if (blob.contains('opencode')) {
     return _agentBrandIcon('opencode', size: 14);
@@ -2209,7 +2361,7 @@ Widget _startCmdAvatar(StartCmd cmd) {
       blob.contains('deepseek')) {
     return _agentBrandIcon('dsh-tui', size: 14);
   }
-  return const Icon(Icons.play_arrow, size: 14, color: Colors.white70);
+  return Icon(Icons.play_arrow, size: 14, color: iconColor);
 }
 
 /// 单个终端页签。
@@ -2258,6 +2410,80 @@ class _ShellTab {
 }
 
 /// 终端标签上的关闭按钮：悬停时显示可点击底色、手型光标和「关闭」提示。
+/// 终端标签：未选中也有底和描边，悬停加深并显示手型。
+class _ShellTabButton extends StatefulWidget {
+  const _ShellTabButton({
+    required this.label,
+    required this.active,
+    required this.onTap,
+    required this.onClose,
+    this.leading,
+  });
+
+  final String label;
+  final bool active;
+  final VoidCallback onTap;
+  final VoidCallback onClose;
+  final Widget? leading;
+
+  @override
+  State<_ShellTabButton> createState() => _ShellTabButtonState();
+}
+
+class _ShellTabButtonState extends State<_ShellTabButton> {
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final active = widget.active;
+    final borderColor = active
+        ? scheme.primary
+        : _hover
+            ? scheme.outline
+            : scheme.outlineVariant;
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: GestureDetector(
+        onTap: widget.onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 120),
+          margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 2),
+          padding: const EdgeInsets.symmetric(horizontal: 10),
+          decoration: BoxDecoration(
+            color: active || _hover
+                ? scheme.surfaceContainerLowest
+                : scheme.surfaceContainerHigh,
+            borderRadius: BorderRadius.circular(4),
+            border: Border.all(color: borderColor),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (widget.leading != null) ...[
+                widget.leading!,
+                const SizedBox(width: 4),
+              ],
+              Text(
+                widget.label,
+                style: TextStyle(
+                  fontSize: 12,
+                  color: active ? scheme.onSurface : scheme.onSurfaceVariant,
+                  fontWeight: active ? FontWeight.w600 : FontWeight.w500,
+                ),
+              ),
+              const SizedBox(width: 6),
+              _TerminalTabCloseButton(onTap: widget.onClose),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _TerminalTabCloseButton extends StatefulWidget {
   const _TerminalTabCloseButton({required this.onTap});
 
@@ -2290,14 +2516,16 @@ class _TerminalTabCloseButtonState extends State<_TerminalTabCloseButton> {
             alignment: Alignment.center,
             decoration: BoxDecoration(
               color: _hovering
-                  ? Colors.white.withValues(alpha: 0.14)
+                  ? Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.12)
                   : Colors.transparent,
               borderRadius: BorderRadius.circular(4),
             ),
             child: Icon(
               Icons.close,
               size: 13,
-              color: _hovering ? Colors.white : Colors.white38,
+              color: _hovering
+                  ? Theme.of(context).colorScheme.onSurface
+                  : Theme.of(context).colorScheme.onSurfaceVariant,
             ),
           ),
         ),
