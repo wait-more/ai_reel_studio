@@ -27,13 +27,10 @@ bool FlutterWindow::OnCreate() {
   RegisterPlugins(flutter_controller_->engine());
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
 
-  flutter_controller_->engine()->SetNextFrameCallback([&]() {
-    this->Show();
-  });
-
-  // Flutter can complete the first frame before the "show window" callback is
-  // registered. The following call ensures a frame is pending to ensure the
-  // window is shown. It is a no-op if the first frame hasn't completed yet.
+  // Do not call Show() on the first frame. Win32Window::Show uses
+  // SW_SHOWNORMAL, which restores a maximized window back to a normal size.
+  // Visibility is controlled by windowManager.show() on the Dart side.
+  // ForceRedraw still paints the first frame while the window stays hidden.
   flutter_controller_->ForceRedraw();
 
   return true;
