@@ -1720,6 +1720,8 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
         if (j.runStatus != null) j.elapsed = j.runStatus!.elapsed;
         j.runStatus = null;
         j.cancelling = false;
+        // 完成后自动展开，方便直接看输出；进行中默认折叠。
+        _openJobIds.add(j.id);
       });
       if (mounted) showGlobalToast(context, '生成完成：${job.templateName}');
     } on ComfyCancelledException {
