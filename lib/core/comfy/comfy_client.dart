@@ -415,6 +415,10 @@ class ComfyClient {
           emit('执行完成，读取结果…');
           unawaited(completeWithHistory());
         case 'execution_interrupted':
+          // 无 prompt_id 时多为广播；只完成本地已点取消的任务，避免误杀同 URL 其它任务。
+          if (pid == null && cancelToken?.isCancelled != true) {
+            break;
+          }
           if (!completer.isCompleted) {
             completer.completeError(const ComfyCancelledException());
           }
@@ -685,8 +689,12 @@ class ComfyClient {
   }
 
   Future<void> _tryCancelPrompt(String promptId) async {
+    // interrupt 会停掉实例当前正在跑的那条；只对本 prompt 在跑时调用。
     try {
-      await interrupt();
+      final q = await getQueue();
+      if (q.runningIds.contains(promptId)) {
+        await interrupt();
+      }
     } catch (_) {}
     try {
       await deleteFromQueue([promptId]);

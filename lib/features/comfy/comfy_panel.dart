@@ -124,7 +124,7 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
   final Map<String, FocusNode> _textFocus = {};
   /// 用户自定义节点顺序（nodeId 列表）；空则按名称归类排序。
   List<String> _nodeOrder = [];
-  /// 分类分区顺序（sortCategory 整型）；空则 0→4。
+  /// 分类分区顺序（sortCategory 整型）。空则含提示词的分区在前，其余仍按 0→4。
   List<int> _categoryOrder = [];
 
   String? _outputDir;
@@ -136,13 +136,21 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
   final List<_ComfyJob> _jobs = [];
   static const _kMaxJobs = 30;
   final ScrollController _jobListScroll = ScrollController();
+  /// 点开后才展开输出文件的任务。
+  final Set<String> _openJobIds = {};
+  /// 任务区高度（拖分割线直接改高度；内容少时仍可自动收缩到内容高）。
+  double _jobPaneHeight = 180;
+  bool _jobPanePinned = false;
+  final GlobalKey _jobPaneKey = GlobalKey();
 
   Timer? _hotReloadTimer;
   Timer? _serverPingTimer;
   Timer? _sessionPersistTimer;
   Timer? _leftSplitPersistTimer;
+  Timer? _leftRailPersistTimer;
   String _lastSig = '';
   double _leftSplit = AppConfig.instance.comfyLeftSplit;
+  double _leftRailWidth = AppConfig.instance.comfyLeftRailWidth;
   /// 忽略过期的连接检测 / 模板加载，避免切换 URL 时连环闪烁。
   int _connGen = 0;
   int _loadGen = 0;
@@ -168,8 +176,12 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
     _serverPingTimer?.cancel();
     _sessionPersistTimer?.cancel();
     _leftSplitPersistTimer?.cancel();
+    _leftRailPersistTimer?.cancel();
     if (_leftSplit != AppConfig.instance.comfyLeftSplit) {
       unawaited(AppConfig.instance.setComfyLeftSplit(_leftSplit));
+    }
+    if (_leftRailWidth != AppConfig.instance.comfyLeftRailWidth) {
+      unawaited(AppConfig.instance.setComfyLeftRailWidth(_leftRailWidth));
     }
     _jobListScroll.dispose();
     _outputNameCtrl.dispose();
@@ -214,11 +226,6 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
 
   _ServerLinkState _linkOf(String serverId) =>
       _serverLink[serverId] ?? _ServerLinkState.unknown;
-
-  bool get _online {
-    final id = ref.read(comfySelectedServerIdProvider);
-    return _linkOf(id) == _ServerLinkState.online;
-  }
 
   Future<void> _checkConnection() => _pingAllServers(showChecking: true);
 
@@ -492,6 +499,13 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
     });
   }
 
+  void _schedulePersistLeftRail() {
+    _leftRailPersistTimer?.cancel();
+    _leftRailPersistTimer = Timer(const Duration(milliseconds: 250), () {
+      unawaited(AppConfig.instance.setComfyLeftRailWidth(_leftRailWidth));
+    });
+  }
+
   Future<void> _openExpandedTextEditor(
     ComfyExposedField field, {
     required String nodeTitle,
@@ -628,13 +642,14 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
       for (final cat in const [0, 1, 2, 3, 4])
         if (buckets[cat]!.isNotEmpty) cat,
     ];
+    final defaultOrder = _defaultCategoryOrder(buckets, present);
     final orderedCats = <int>[];
     for (final cat in _categoryOrder) {
       if (present.contains(cat) && !orderedCats.contains(cat)) {
         orderedCats.add(cat);
       }
     }
-    for (final cat in present) {
+    for (final cat in defaultOrder) {
       if (!orderedCats.contains(cat)) orderedCats.add(cat);
     }
     return [
@@ -645,6 +660,31 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
           nodes: buckets[cat]!,
         ),
     ];
+  }
+
+  /// 还没拖过分区时：带多行提示词的分组在前，组内仍保持图片→其它的相对顺序。
+  List<int> _defaultCategoryOrder(
+    Map<int, List<ComfyExposedNode>> buckets,
+    List<int> present,
+  ) {
+    final withPrompt = <int>[];
+    final rest = <int>[];
+    for (final cat in present) {
+      final nodes = buckets[cat] ?? const <ComfyExposedNode>[];
+      var hasPrompt = false;
+      for (final node in nodes) {
+        if (node.fields.any((f) => f.widget == ComfyWidgetKind.multiline)) {
+          hasPrompt = true;
+          break;
+        }
+      }
+      if (hasPrompt) {
+        withPrompt.add(cat);
+      } else {
+        rest.add(cat);
+      }
+    }
+    return [...withPrompt, ...rest];
   }
 
   bool _isCategoryExpanded(int category) =>
@@ -1374,25 +1414,29 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
 
   Future<void> _cancelJob(_ComfyJob job) async {
     if (!job.isActive || job.cancelling) return;
-    _mutateJob(job.id, (j) {
+    final jobId = job.id;
+    final promptId = job.promptId;
+    final baseUrl = job.baseUrl;
+    _mutateJob(jobId, (j) {
       j.cancelling = true;
       j.detail = '正在取消…';
     });
+    // 只取消本任务 token；轮询里会按 prompt 决定是否 interrupt。
     job.cancelToken.cancel();
-    final id = job.promptId;
-    if (id == null) return;
-    final client = ComfyClient(baseUrl: job.baseUrl, apiKey: ref.read(comfyApiKeyProvider));
+    if (promptId == null || promptId.isEmpty) return;
+    final client = ComfyClient(
+      baseUrl: baseUrl,
+      apiKey: ref.read(comfyApiKeyProvider),
+    );
     try {
-      // 仅当本任务正在执行时 interrupt，避免误杀其它任务。
-      final running = job.phase == _ComfyJobPhase.running ||
-          job.runStatus?.phase == ComfyRunPhase.running;
-      if (running) {
-        try {
-          await client.interrupt();
-        } catch (_) {}
-      }
       try {
-        await client.deleteFromQueue([id]);
+        final q = await client.getQueue();
+        if (q.runningIds.contains(promptId)) {
+          await client.interrupt();
+        }
+      } catch (_) {}
+      try {
+        await client.deleteFromQueue([promptId]);
       } catch (_) {}
     } finally {
       client.close();
@@ -1400,14 +1444,20 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
   }
 
   void _dismissJob(String jobId) {
-    setState(() => _jobs.removeWhere((j) => j.id == jobId));
+    setState(() {
+      _jobs.removeWhere((j) => j.id == jobId);
+      _openJobIds.remove(jobId);
+    });
   }
 
   void _clearFinishedJobs() {
     final id = _serverId;
-    setState(
-      () => _jobs.removeWhere((j) => j.serverId == id && j.isTerminal),
-    );
+    setState(() {
+      _jobs.removeWhere((j) => j.serverId == id && j.isTerminal);
+      _openJobIds.removeWhere(
+        (jobId) => !_jobs.any((j) => j.id == jobId),
+      );
+    });
   }
 
   Future<void> _deleteJobOutput(_ComfyJob job, String path) async {
@@ -1805,10 +1855,17 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
               ),
             ),
           ),
-          child: Row(
+          child: LayoutBuilder(
+          builder: (context, outer) {
+            const minRail = AppConfig.comfyLeftRailWidthMin;
+            final room = (outer.maxWidth - 280)
+                .clamp(minRail, AppConfig.comfyLeftRailWidthMax)
+                .toDouble();
+            final railW = _leftRailWidth.clamp(minRail, room).toDouble();
+            return Row(
           children: [
             SizedBox(
-              width: 230,
+              width: railW,
               child: Material(
                 color: cs.surfaceContainerLow,
                 child: LayoutBuilder(
@@ -1828,9 +1885,8 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
                             hasConfiguredServers: allServers.isNotEmpty,
                           ),
                         ),
-                        GestureDetector(
-                          behavior: HitTestBehavior.opaque,
-                          onVerticalDragUpdate: (d) {
+                        _ComfyLeftSplitter(
+                          onDragUpdate: (d) {
                             if (avail <= 0) return;
                             setState(() {
                               _leftSplit =
@@ -1841,13 +1897,6 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
                             });
                             _schedulePersistLeftSplit();
                           },
-                          child: MouseRegion(
-                            cursor: SystemMouseCursors.resizeUpDown,
-                            child: Container(
-                              height: dividerH,
-                              color: cs.outlineVariant.withValues(alpha: 0.5),
-                            ),
-                          ),
                         ),
                         SizedBox(
                           height: bottomH,
@@ -1863,7 +1912,23 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
                 ),
               ),
             ),
-            const VerticalDivider(width: 1),
+            _ComfyLeftRailSplitter(
+              onReset: () {
+                setState(() {
+                  _leftRailWidth = AppConfig.defaultComfyLeftRailWidth
+                      .clamp(minRail, room)
+                      .toDouble();
+                });
+                _schedulePersistLeftRail();
+              },
+              onDragDelta: (dx) {
+                setState(() {
+                  _leftRailWidth =
+                      (railW + dx).clamp(minRail, room).toDouble();
+                });
+                _schedulePersistLeftRail();
+              },
+            ),
             Expanded(
               child: _selected == null
                   ? Center(
@@ -1877,6 +1942,8 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
                   : _buildDetail(),
             ),
           ],
+        );
+          },
         ),
         );
       },
@@ -1985,52 +2052,40 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
             ),
             child: Padding(
               padding: const EdgeInsets.fromLTRB(10, 0, 4, 0),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                mainAxisAlignment: MainAxisAlignment.center,
+              child: Row(
                 children: [
-                  Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          'Comfy URL',
-                          style: Theme.of(context).textTheme.titleSmall,
-                        ),
-                      ),
-                      Icon(
-                        _pingingAll ? Icons.hourglass_top : Icons.cloud_done,
-                        size: 14,
-                        color: _pingingAll
-                            ? cs.onSurfaceVariant
-                            : (onlineCount > 0 ? Colors.green : cs.error),
-                      ),
-                      const SizedBox(width: 2),
-                      TextButton(
-                        onPressed: _pingingAll ? null : _checkConnection,
-                        style: TextButton.styleFrom(
-                          visualDensity: VisualDensity.compact,
-                          padding: const EdgeInsets.symmetric(horizontal: 8),
-                          minimumSize: const Size(0, 28),
-                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                        ),
-                        child: Text(_pingingAll ? '检测中' : '重试'),
-                      ),
-                    ],
-                  ),
-                  if (servers.isNotEmpty) ...[
-                    const SizedBox(height: 2),
-                    Text(
-                      _pingingAll
-                          ? '正在检测全部实例…'
-                          : '在线 $onlineCount / ${servers.length} · 当前 ${_online ? '已连接' : '未连接'}',
+                  Expanded(
+                    child: Text(
+                      'Comfy URL',
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.titleSmall,
+                    ),
+                  ),
+                  if (servers.isNotEmpty)
+                    Text(
+                      '$onlineCount/${servers.length}',
                       style: TextStyle(
                         fontSize: 11,
                         color: cs.onSurfaceVariant,
                       ),
                     ),
-                  ],
+                  Tooltip(
+                    message: '立刻再检测全部实例是否在线',
+                    waitDuration: const Duration(milliseconds: 400),
+                    child: TextButton(
+                      onPressed: _pingingAll ? null : _checkConnection,
+                      style: TextButton.styleFrom(
+                        visualDensity: VisualDensity.compact,
+                        padding: const EdgeInsets.symmetric(horizontal: 8),
+                        minimumSize: const Size(0, 28),
+                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        enabledMouseCursor: SystemMouseCursors.click,
+                        disabledMouseCursor: SystemMouseCursors.basic,
+                      ),
+                      child: Text(_pingingAll ? '检测中' : '检测'),
+                    ),
+                  ),
                 ],
               ),
             ),
@@ -2070,111 +2125,106 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
                     final linkColor = _linkColor(link, cs);
                     final oldest = _oldestActiveJob(s.id);
                     final progress = oldest?.runStatus?.progressFraction;
-                    final progressLabel = oldest?.runStatus?.progressLabel ?? '';
-                    return Material(
-                      color: selected
-                          ? cs.surfaceContainerHighest.withValues(alpha: 0.65)
-                          : Colors.transparent,
-                      child: InkWell(
-                        onTap: () => _selectServer(s.id),
-                        child: Padding(
-                          padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Row(
-                                children: [
-                                  Container(
-                                    width: 8,
-                                    height: 8,
-                                    decoration: BoxDecoration(
-                                      shape: BoxShape.circle,
-                                      color: link == _ServerLinkState.online
-                                          ? linkColor
-                                          : Colors.transparent,
-                                      border: Border.all(
-                                        color: linkColor,
-                                        width: 1.5,
+                    final tip = [
+                      s.name,
+                      s.baseUrl,
+                      _linkHint(link),
+                      _serverJobCountLine(s.id),
+                      _serverTaskSummary(s.id),
+                    ].join('\n');
+                    return Tooltip(
+                      message: tip,
+                      waitDuration: const Duration(milliseconds: 400),
+                      child: Material(
+                        color: selected
+                            ? cs.surfaceContainerHighest.withValues(alpha: 0.65)
+                            : Colors.transparent,
+                        child: InkWell(
+                          mouseCursor: SystemMouseCursors.click,
+                          onTap: () => _selectServer(s.id),
+                          child: Padding(
+                            padding: const EdgeInsets.fromLTRB(10, 7, 10, 7),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Row(
+                                  children: [
+                                    Container(
+                                      width: 8,
+                                      height: 8,
+                                      decoration: BoxDecoration(
+                                        shape: BoxShape.circle,
+                                        color: link == _ServerLinkState.online
+                                            ? linkColor
+                                            : Colors.transparent,
+                                        border: Border.all(
+                                          color: linkColor,
+                                          width: 1.5,
+                                        ),
                                       ),
                                     ),
-                                  ),
-                                  const SizedBox(width: 8),
-                                  Expanded(
-                                    child: Text(
-                                      s.name,
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                      style: TextStyle(
-                                        fontWeight: selected
-                                            ? FontWeight.w600
-                                            : FontWeight.w500,
+                                    const SizedBox(width: 8),
+                                    Expanded(
+                                      child: Text(
+                                        s.name,
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(
+                                          fontSize: 13,
+                                          fontWeight: selected
+                                              ? FontWeight.w600
+                                              : FontWeight.w500,
+                                        ),
                                       ),
                                     ),
+                                  ],
+                                ),
+                                const SizedBox(height: 2),
+                                Text(
+                                  s.baseUrl,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    color: cs.onSurfaceVariant,
                                   ),
+                                ),
+                                if (_serverJobCounts(s.id).total > 0) ...[
+                                  const SizedBox(height: 3),
                                   Text(
-                                    _linkHint(link),
-                                    style: TextStyle(
-                                      fontSize: 10,
-                                      color: linkColor,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                              const SizedBox(height: 2),
-                              Text(
-                                s.baseUrl,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: TextStyle(
-                                  fontSize: 11,
-                                  color: cs.onSurfaceVariant,
-                                ),
-                              ),
-                              const SizedBox(height: 3),
-                              Text(
-                                _serverJobCountLine(s.id),
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: TextStyle(
-                                  fontSize: 11,
-                                  color: cs.onSurfaceVariant,
-                                ),
-                              ),
-                              const SizedBox(height: 2),
-                              Text(
-                                _serverTaskSummary(s.id),
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: TextStyle(
-                                  fontSize: 11,
-                                  color: oldest != null
-                                      ? cs.primary
-                                      : cs.onSurfaceVariant,
-                                ),
-                              ),
-                              if (oldest != null) ...[
-                                const SizedBox(height: 5),
-                                ClipRRect(
-                                  borderRadius: BorderRadius.circular(2),
-                                  child: LinearProgressIndicator(
-                                    value: progress,
-                                    minHeight: 3,
-                                  ),
-                                ),
-                                if (progressLabel.isNotEmpty) ...[
-                                  const SizedBox(height: 2),
-                                  Text(
-                                    progressLabel,
+                                    _serverJobCountLine(s.id),
                                     maxLines: 1,
                                     overflow: TextOverflow.ellipsis,
                                     style: TextStyle(
-                                      fontSize: 10,
+                                      fontSize: 11,
                                       color: cs.onSurfaceVariant,
                                     ),
                                   ),
+                                  const SizedBox(height: 1),
+                                  Text(
+                                    _serverTaskSummary(s.id),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: TextStyle(
+                                      fontSize: 11,
+                                      color: oldest != null
+                                          ? cs.primary
+                                          : cs.onSurfaceVariant,
+                                    ),
+                                  ),
+                                  if (oldest != null) ...[
+                                    const SizedBox(height: 4),
+                                    ClipRRect(
+                                      borderRadius: BorderRadius.circular(2),
+                                      child: LinearProgressIndicator(
+                                        value: progress,
+                                        minHeight: 3,
+                                      ),
+                                    ),
+                                  ],
                                 ],
                               ],
-                            ],
+                            ),
                           ),
                         ),
                       ),
@@ -2195,28 +2245,47 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(10, 8, 6, 4),
-          child: Row(
-            children: [
-              Text('已绑模板', style: Theme.of(context).textTheme.titleSmall),
-              const Spacer(),
-              IconButton(
-                tooltip: '绑定模板',
-                icon: const Icon(Icons.link, size: 18),
-                visualDensity: VisualDensity.compact,
-                onPressed: () => _bindMore(all, binding),
+        SizedBox(
+          height: _kComfyHeaderBarHeight,
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              color: cs.surface,
+              border: Border(
+                top: BorderSide(color: cs.outlineVariant),
+                bottom: BorderSide(color: cs.outlineVariant),
               ),
-              IconButton(
-                tooltip: '模板库',
-                icon: const Icon(Icons.library_books_outlined, size: 18),
-                visualDensity: VisualDensity.compact,
-                onPressed: () => showComfyTemplateLibrary(context, ref),
+            ),
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(10, 0, 2, 0),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      '已绑模板',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.titleSmall,
+                    ),
+                  ),
+                  IconButton(
+                    tooltip: '绑定模板',
+                    icon: const Icon(Icons.link, size: 18),
+                    visualDensity: VisualDensity.compact,
+                    mouseCursor: SystemMouseCursors.click,
+                    onPressed: () => _bindMore(all, binding),
+                  ),
+                  IconButton(
+                    tooltip: '模板库',
+                    icon: const Icon(Icons.library_books_outlined, size: 18),
+                    visualDensity: VisualDensity.compact,
+                    mouseCursor: SystemMouseCursors.click,
+                    onPressed: () => showComfyTemplateLibrary(context, ref),
+                  ),
+                ],
               ),
-            ],
+            ),
           ),
         ),
-        const Divider(height: 1),
         Expanded(
           child: bound.isEmpty
               ? Center(
@@ -2244,29 +2313,11 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
                   itemBuilder: (context, i) {
                     final t = bound[i];
                     final active = _selected?.id == t.id;
-                    return ListTile(
-                      dense: true,
+                    return _ComfyBoundTemplateRow(
+                      name: t.name,
                       selected: active,
-                      title: Tooltip(
-                        message: t.name,
-                        waitDuration: const Duration(milliseconds: 400),
-                        child: Text(
-                          t.name,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                      subtitle: Text(
-                        '${t.nodes.length} 个节点',
-                        style: const TextStyle(fontSize: 11),
-                      ),
-                      trailing: IconButton(
-                        tooltip: '从此 URL 移除',
-                        icon: const Icon(Icons.link_off, size: 16),
-                        visualDensity: VisualDensity.compact,
-                        onPressed: () => _unbind(t),
-                      ),
                       onTap: () => _selectTemplate(t),
+                      onUnbind: () => _unbind(t),
                     );
                   },
                 ),
@@ -2359,55 +2410,113 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
           ),
         ),
         Expanded(
-          child: LayoutBuilder(
-            builder: (context, constraints) {
-              final jobMaxH =
-                  (constraints.maxHeight * 0.48).clamp(280.0, 460.0);
-              return Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  _buildRunOutputZone(cs),
-                  if (serverJobs.isNotEmpty)
-                    Container(
-                      width: double.infinity,
-                      decoration: BoxDecoration(
-                        color: cs.surface,
-                        border: Border(
-                          bottom: BorderSide(color: cs.outlineVariant),
-                        ),
-                      ),
-                      padding: const EdgeInsets.fromLTRB(14, 8, 14, 10),
-                      child: _buildJobList(cs, serverJobs, maxHeight: jobMaxH),
-                    ),
-                  _buildZoneDivider(
-                    cs,
-                    icon: Icons.tune,
-                    title: '节点参数',
-                    subtitle: '点选编辑 · 长按拖拽排序 · 拖分区标题调整顺序',
-                    trailing: Row(
-                      mainAxisSize: MainAxisSize.min,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              _buildRunOutputZone(cs),
+              Expanded(
+                child: LayoutBuilder(
+                  builder: (context, constraints) {
+                    Widget nodes() => Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            _buildZoneDivider(
+                              cs,
+                              icon: Icons.tune,
+                              title: '节点参数',
+                              subtitle: '点选编辑 · 长按拖拽排序 · 拖分区标题调整顺序',
+                              trailing: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  TextButton(
+                                    onPressed: () => _setAllExpanded(true),
+                                    style: TextButton.styleFrom(
+                                      visualDensity: VisualDensity.compact,
+                                    ),
+                                    child: const Text('全展开'),
+                                  ),
+                                  TextButton(
+                                    onPressed: () => _setAllExpanded(false),
+                                    style: TextButton.styleFrom(
+                                      visualDensity: VisualDensity.compact,
+                                    ),
+                                    child: const Text('全折叠'),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            Expanded(child: _buildNodeSectionsList()),
+                          ],
+                        );
+                    if (serverJobs.isEmpty) {
+                      _jobPanePinned = false;
+                      return nodes();
+                    }
+                    const splitterH = 14.0;
+                    const nodeHeaderH = 44.0;
+                    const nodeMin = 120.0;
+                    const jobMin = 88.0;
+                    final room = constraints.maxHeight -
+                        splitterH -
+                        nodeHeaderH -
+                        nodeMin;
+                    final jobCap = room < jobMin ? jobMin : room;
+                    final jobH = _jobPaneHeight.clamp(jobMin, jobCap);
+                    // 未拖过：按内容增高，上限用满可用空间；拖过后锁定高度跟手。
+                    final softMax = _jobPanePinned ? jobH : jobCap;
+                    return Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
-                        TextButton(
-                          onPressed: () => _setAllExpanded(true),
-                          style: TextButton.styleFrom(
-                            visualDensity: VisualDensity.compact,
+                        if (_jobPanePinned)
+                          SizedBox(
+                            key: _jobPaneKey,
+                            height: jobH,
+                            child: Container(
+                              width: double.infinity,
+                              color: cs.surface,
+                              padding: const EdgeInsets.fromLTRB(14, 8, 14, 8),
+                              child: _buildJobList(cs, serverJobs),
+                            ),
+                          )
+                        else
+                          ConstrainedBox(
+                            key: _jobPaneKey,
+                            constraints: BoxConstraints(maxHeight: softMax),
+                            child: Container(
+                              width: double.infinity,
+                              color: cs.surface,
+                              padding: const EdgeInsets.fromLTRB(14, 8, 14, 8),
+                              child: _buildJobList(cs, serverJobs),
+                            ),
                           ),
-                          child: const Text('全展开'),
+                        _ComfyJobSplitter(
+                          onReset: () => setState(() => _jobPanePinned = false),
+                          onDragStart: () {
+                            final box = _jobPaneKey.currentContext
+                                ?.findRenderObject() as RenderBox?;
+                            final measured = box?.size.height;
+                            setState(() {
+                              _jobPanePinned = true;
+                              if (measured != null && measured > 0) {
+                                _jobPaneHeight = measured;
+                              }
+                            });
+                          },
+                          onDragDelta: (dy) {
+                            setState(() {
+                              _jobPanePinned = true;
+                              _jobPaneHeight =
+                                  (_jobPaneHeight + dy).clamp(jobMin, jobCap);
+                            });
+                          },
                         ),
-                        TextButton(
-                          onPressed: () => _setAllExpanded(false),
-                          style: TextButton.styleFrom(
-                            visualDensity: VisualDensity.compact,
-                          ),
-                          child: const Text('全折叠'),
-                        ),
+                        Expanded(child: nodes()),
                       ],
-                    ),
-                  ),
-                  Expanded(child: _buildNodeSectionsList()),
-                ],
-              );
-            },
+                    );
+                  },
+                ),
+              ),
+            ],
           ),
         ),
       ],
@@ -2422,124 +2531,73 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
 
     return Container(
       color: cs.surfaceContainerLow,
-      padding: const EdgeInsets.fromLTRB(14, 10, 14, 12),
+      padding: const EdgeInsets.fromLTRB(14, 8, 8, 8),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
             children: [
-              Icon(
-                Icons.folder_special_outlined,
-                size: 16,
-                color: cs.onSurfaceVariant,
-              ),
-              const SizedBox(width: 6),
-              Text(
-                '运行输出',
-                style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                      fontWeight: FontWeight.w700,
-                    ),
-              ),
+              Expanded(flex: 3, child: _buildOutputDirField(cs, dirText)),
               const SizedBox(width: 8),
               Expanded(
-                child: Text(
-                  '生成结果保存位置与文件名',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant),
+                flex: 2,
+                child: TextField(
+                  controller: _outputNameCtrl,
+                  decoration: const InputDecoration(
+                    isDense: true,
+                    labelText: '保存文件名',
+                    hintText: '留空用原名',
+                    prefixIcon: Icon(Icons.insert_drive_file_outlined, size: 18),
+                    border: OutlineInputBorder(),
+                    contentPadding: EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 10,
+                    ),
+                  ),
+                  style: const TextStyle(fontSize: 13),
+                  onChanged: (_) => _schedulePersistSession(),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Tooltip(
+                message: deleteRemote
+                    ? '下载后删除远端输出：开。本地保存成功后清除 Comfy history/output'
+                    : '下载后删除远端输出：关',
+                waitDuration: const Duration(milliseconds: 400),
+                child: OutlinedButton.icon(
+                  onPressed: () async {
+                    final next = !deleteRemote;
+                    ref
+                        .read(comfyDeleteRemoteAfterDownloadProvider.notifier)
+                        .state = next;
+                    await AppConfig.instance
+                        .setComfyDeleteRemoteAfterDownload(next);
+                  },
+                  style: OutlinedButton.styleFrom(
+                    visualDensity: VisualDensity.compact,
+                    minimumSize: const Size(0, 40),
+                    padding: const EdgeInsets.symmetric(horizontal: 10),
+                    foregroundColor:
+                        deleteRemote ? cs.primary : cs.onSurfaceVariant,
+                    side: BorderSide(
+                      color: deleteRemote ? cs.primary : cs.outline,
+                    ),
+                    enabledMouseCursor: SystemMouseCursors.click,
+                  ),
+                  icon: Icon(
+                    deleteRemote
+                        ? Icons.cloud_off_outlined
+                        : Icons.cloud_outlined,
+                    size: 16,
+                  ),
+                  label: Text(
+                    deleteRemote ? '删远端' : '留远端',
+                    style: const TextStyle(fontSize: 12),
+                  ),
                 ),
               ),
             ],
-          ),
-          const SizedBox(height: 10),
-          LayoutBuilder(
-            builder: (context, constraints) {
-              final wide = constraints.maxWidth >= 560;
-              final dirField = _buildOutputDirField(cs, dirText);
-              final nameField = TextField(
-                controller: _outputNameCtrl,
-                decoration: InputDecoration(
-                  isDense: true,
-                  labelText: '保存文件名',
-                  hintText: '留空用 Comfy 原名；多文件自动 _2、_3…',
-                  prefixIcon: const Icon(Icons.insert_drive_file_outlined, size: 18),
-                  border: const OutlineInputBorder(),
-                  contentPadding: const EdgeInsets.symmetric(
-                    horizontal: 10,
-                    vertical: 10,
-                  ),
-                ),
-                style: const TextStyle(fontSize: 13),
-                onChanged: (_) => _schedulePersistSession(),
-              );
-              if (wide) {
-                return Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Expanded(flex: 3, child: dirField),
-                    const SizedBox(width: 10),
-                    Expanded(flex: 2, child: nameField),
-                  ],
-                );
-              }
-              return Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  dirField,
-                  const SizedBox(height: 8),
-                  nameField,
-                ],
-              );
-            },
-          ),
-          const SizedBox(height: 8),
-          Material(
-            color: cs.surface.withValues(alpha: 0.55),
-            borderRadius: BorderRadius.circular(8),
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-              child: Row(
-                children: [
-                  Icon(
-                    deleteRemote
-                        ? Icons.cloud_off_outlined
-                        : Icons.cloud_done_outlined,
-                    size: 18,
-                    color: deleteRemote ? cs.primary : cs.onSurfaceVariant,
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const Text(
-                          '下载后删除远端输出',
-                          style: TextStyle(fontSize: 13),
-                        ),
-                        Text(
-                          '本地保存成功后清除 Comfy history/output，适合云 GPU',
-                          style: TextStyle(
-                            fontSize: 11,
-                            color: cs.onSurfaceVariant,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  Switch(
-                    value: deleteRemote,
-                    onChanged: (v) async {
-                      ref
-                          .read(
-                              comfyDeleteRemoteAfterDownloadProvider.notifier)
-                          .state = v;
-                      await AppConfig.instance
-                          .setComfyDeleteRemoteAfterDownload(v);
-                    },
-                  ),
-                ],
-              ),
-            ),
           ),
           if (_formError != null) ...[
             const SizedBox(height: 8),
@@ -2710,13 +2768,10 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
 
   Widget _buildJobList(
     ColorScheme cs,
-    List<_ComfyJob> jobs, {
-    required double maxHeight,
-  }) {
+    List<_ComfyJob> jobs,
+  ) {
     final activeCount = jobs.where((j) => j.isActive).length;
     final finishedCount = jobs.length - activeCount;
-    const headerH = 32.0;
-    final listMax = (maxHeight - headerH).clamp(80.0, maxHeight);
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -2743,6 +2798,15 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
                       color: cs.onSurfaceVariant,
                     ),
                   ),
+                  const SizedBox(width: 8),
+                  Text(
+                    '点击展开',
+                    style: TextStyle(
+                      fontSize: 11,
+                      height: 1.1,
+                      color: cs.onSurfaceVariant,
+                    ),
+                  ),
                 ],
               ),
             ),
@@ -2757,14 +2821,14 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
           ],
         ),
         const SizedBox(height: 6),
-        ConstrainedBox(
-          constraints: BoxConstraints(maxHeight: listMax),
+        Flexible(
+          fit: FlexFit.loose,
           child: ListView.separated(
             controller: _jobListScroll,
             shrinkWrap: true,
             physics: const ClampingScrollPhysics(),
             itemCount: jobs.length,
-            separatorBuilder: (_, __) => const SizedBox(height: 8),
+            separatorBuilder: (_, __) => const SizedBox(height: 4),
             itemBuilder: (context, i) => _buildJobCard(jobs[i], cs),
           ),
         ),
@@ -2823,26 +2887,28 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
     final timeText =
         '${time.hour.toString().padLeft(2, '0')}:${time.minute.toString().padLeft(2, '0')}';
     final muted = TextStyle(fontSize: 11, color: cs.onSurfaceVariant);
-    final showElapsed = job.displayElapsed > Duration.zero || job.isActive;
-
     final metaBits = <String>[
-      timeText,
-      if (showElapsed) '用时 ${job.elapsedLabel}',
       if (job.runStatus?.progressLabel.isNotEmpty == true)
         job.runStatus!.progressLabel,
       if (job.runStatus?.currentNodeId != null)
         '节点 ${job.runStatus!.currentNodeId}',
     ];
+    final detail = job.detail.trim();
+    final detailAddsInfo = detail.isNotEmpty &&
+        detail != phaseLabel &&
+        detail != '$phaseLabel…' &&
+        !(phaseLabel == '准备中' && detail == '准备中…');
+
+    final open = _openJobIds.contains(job.id);
 
     return Container(
       decoration: BoxDecoration(
         color: cs.surface,
-        borderRadius: BorderRadius.circular(10),
+        borderRadius: BorderRadius.circular(8),
         border: Border.all(
           color: job.isActive
               ? accent.withValues(alpha: 0.7)
               : cs.outlineVariant,
-          width: job.isActive ? 1.2 : 1,
         ),
       ),
       clipBehavior: Clip.antiAlias,
@@ -2855,30 +2921,83 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
             child: ColoredBox(color: accent, child: const SizedBox(width: 3)),
           ),
           Padding(
-            padding: const EdgeInsets.fromLTRB(12, 9, 8, 9),
+            padding: const EdgeInsets.fromLTRB(12, 4, 4, 4),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    _JobPhaseChip(
-                      label: phaseLabel,
-                      color: accent,
-                      busy: job.isActive,
-                      progress: progress,
-                    ),
-                    const SizedBox(width: 8),
                     Expanded(
-                      child: Text(
-                        job.templateName,
-                        style: const TextStyle(
-                          fontWeight: FontWeight.w600,
-                          fontSize: 13,
-                          height: 1.25,
+                      child: InkWell(
+                        mouseCursor: SystemMouseCursors.click,
+                        onTap: () => setState(() {
+                          if (open) {
+                            _openJobIds.remove(job.id);
+                          } else {
+                            _openJobIds.add(job.id);
+                          }
+                        }),
+                        child: Row(
+                          children: [
+                            Icon(
+                              open ? Icons.expand_more : Icons.chevron_right,
+                              size: 18,
+                              color: cs.onSurfaceVariant,
+                            ),
+                            const SizedBox(width: 2),
+                            _JobPhaseChip(
+                              label: phaseLabel,
+                              color: accent,
+                              busy: job.isActive,
+                              progress: progress,
+                            ),
+                            const SizedBox(width: 8),
+                            Text(
+                              timeText,
+                              style: TextStyle(
+                                fontSize: 12,
+                                height: 1.2,
+                                color: cs.onSurfaceVariant,
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Text(
+                              '用时 ${job.elapsedLabel}',
+                              style: TextStyle(
+                                fontSize: 12,
+                                height: 1.2,
+                                color: cs.onSurfaceVariant,
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Text.rich(
+                                TextSpan(
+                                  children: [
+                                    TextSpan(text: job.templateName),
+                                    if (!open &&
+                                        job.outputFileName.isNotEmpty)
+                                      TextSpan(
+                                        text: '  ${job.outputFileName}',
+                                        style: TextStyle(
+                                          fontWeight: FontWeight.w400,
+                                          fontSize: 12,
+                                          color: cs.onSurfaceVariant,
+                                        ),
+                                      ),
+                                  ],
+                                ),
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.w600,
+                                  fontSize: 13,
+                                  height: 1.2,
+                                ),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                          ],
                         ),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
                       ),
                     ),
                     if (job.isActive)
@@ -2890,12 +3009,15 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
                           visualDensity: VisualDensity.compact,
                           tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                           padding: const EdgeInsets.symmetric(horizontal: 8),
+                          enabledMouseCursor: SystemMouseCursors.click,
+                          disabledMouseCursor: SystemMouseCursors.basic,
                         ),
                         child: Text(job.cancelling ? '取消中…' : '取消'),
                       )
                     else
                       IconButton(
                         tooltip: '从列表移除',
+                        mouseCursor: SystemMouseCursors.click,
                         icon: const Icon(Icons.close, size: 16),
                         visualDensity: VisualDensity.compact,
                         constraints: const BoxConstraints(
@@ -2907,118 +3029,145 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
                       ),
                   ],
                 ),
-                const SizedBox(height: 6),
-                Text(
-                  metaBits.join('  ·  '),
-                  style: muted,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
                 if (job.isActive) ...[
-                  const SizedBox(height: 8),
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(999),
-                    child: LinearProgressIndicator(
-                      minHeight: 4,
-                      value: progress,
-                      color: accent,
-                      backgroundColor: cs.surfaceContainerLow,
+                  const SizedBox(height: 4),
+                  Padding(
+                    padding: const EdgeInsets.only(right: 8),
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(999),
+                      child: LinearProgressIndicator(
+                        minHeight: 3,
+                        value: progress,
+                        color: accent,
+                        backgroundColor: cs.surfaceContainerLow,
+                      ),
                     ),
                   ),
                 ],
-                if (job.detail.isNotEmpty) ...[
-                  const SizedBox(height: 6),
-                  Text(
-                    job.detail,
-                    style: TextStyle(
-                      fontSize: 12,
-                      height: 1.3,
-                      color: cs.onSurface.withValues(alpha: 0.88),
-                    ),
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ],
-                const SizedBox(height: 6),
-                InkWell(
-                  onTap: () => _revealJobOutputsInAssets(job),
-                  borderRadius: BorderRadius.circular(6),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 2,
-                      vertical: 2,
-                    ),
-                    child: Row(
+                if (open) ...[
+                  const SizedBox(height: 4),
+                  Padding(
+                    padding: const EdgeInsets.only(left: 22, right: 8),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Icon(
-                          Icons.folder_open_outlined,
-                          size: 14,
-                          color: cs.primary.withValues(alpha: 0.9),
+                        Text(
+                          metaBits.join('  ·  '),
+                          style: muted,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
                         ),
-                        const SizedBox(width: 6),
-                        Expanded(
-                          child: PathEllipsisText(
-                            job.outputDir,
-                            maxLines: 1,
-                            style: muted.copyWith(
-                              color: cs.primary,
-                              decoration: TextDecoration.underline,
-                              decorationColor:
-                                  cs.primary.withValues(alpha: 0.4),
+                        if (detailAddsInfo) ...[
+                          const SizedBox(height: 4),
+                          Text(
+                            detail,
+                            style: TextStyle(
+                              fontSize: 12,
+                              height: 1.3,
+                              color: cs.onSurface.withValues(alpha: 0.88),
+                            ),
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ],
+                        const SizedBox(height: 4),
+                        InkWell(
+                          mouseCursor: SystemMouseCursors.click,
+                          onTap: () => _revealJobOutputsInAssets(job),
+                          borderRadius: BorderRadius.circular(6),
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(vertical: 2),
+                            child: Row(
+                              children: [
+                                Icon(
+                                  Icons.folder_open_outlined,
+                                  size: 14,
+                                  color: cs.primary.withValues(alpha: 0.9),
+                                ),
+                                const SizedBox(width: 6),
+                                Expanded(
+                                  child: PathEllipsisText(
+                                    job.outputFileName.isEmpty
+                                        ? job.outputDir
+                                        : '${job.outputFileName}：${job.outputDir}',
+                                    maxLines: 1,
+                                    style: muted.copyWith(
+                                      color: cs.primary,
+                                      decoration: TextDecoration.underline,
+                                      decorationColor:
+                                          cs.primary.withValues(alpha: 0.4),
+                                    ),
+                                  ),
+                                ),
+                              ],
                             ),
                           ),
                         ),
+                        if (job.error != null) ...[
+                          const SizedBox(height: 6),
+                          SelectableText(
+                            job.error!,
+                            style: TextStyle(color: cs.error, fontSize: 11),
+                          ),
+                        ],
+                        if (job.outputs.isNotEmpty) ...[
+                          const SizedBox(height: 6),
+                          Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Padding(
+                                padding: const EdgeInsets.only(top: 4),
+                                child: Text(
+                                  '生成文件：',
+                                  style: muted.copyWith(
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ),
+                              Expanded(
+                                child: Wrap(
+                                  spacing: 2,
+                                  runSpacing: 2,
+                                  crossAxisAlignment: WrapCrossAlignment.center,
+                                  children: [
+                                    for (var i = 0;
+                                        i < job.outputs.length;
+                                        i++) ...[
+                                      if (i > 0)
+                                        Text('；', style: muted),
+                                      _JobOutputNameChip(
+                                        path: job.outputs[i],
+                                        style: muted,
+                                        onDelete: () => _deleteJobOutput(
+                                          job,
+                                          job.outputs[i],
+                                        ),
+                                      ),
+                                    ],
+                                  ],
+                                ),
+                              ),
+                              TextButton(
+                                onPressed: () => _deleteAllJobOutputs(job),
+                                style: TextButton.styleFrom(
+                                  foregroundColor: cs.error,
+                                  visualDensity: VisualDensity.compact,
+                                  tapTargetSize:
+                                      MaterialTapTargetSize.shrinkWrap,
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 6,
+                                  ),
+                                  enabledMouseCursor: SystemMouseCursors.click,
+                                ),
+                                child: const Text(
+                                  '全部删除',
+                                  style: TextStyle(fontSize: 11),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ],
                       ],
-                    ),
-                  ),
-                ),
-                if (job.outputFileName.isNotEmpty) ...[
-                  const SizedBox(height: 2),
-                  Padding(
-                    padding: const EdgeInsets.only(left: 20),
-                    child: PathEllipsisText(
-                      job.outputFileName,
-                      style: muted,
-                    ),
-                  ),
-                ],
-                if (job.error != null) ...[
-                  const SizedBox(height: 6),
-                  SelectableText(
-                    job.error!,
-                    style: TextStyle(color: cs.error, fontSize: 11),
-                  ),
-                ],
-                if (job.outputs.isNotEmpty) ...[
-                  const SizedBox(height: 8),
-                  Row(
-                    children: [
-                      Text(
-                        '生成文件 ${job.outputs.length}',
-                        style: muted.copyWith(fontWeight: FontWeight.w600),
-                      ),
-                      const Spacer(),
-                      TextButton(
-                        onPressed: () => _deleteAllJobOutputs(job),
-                        style: TextButton.styleFrom(
-                          foregroundColor: cs.error,
-                          visualDensity: VisualDensity.compact,
-                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                          padding: const EdgeInsets.symmetric(horizontal: 6),
-                        ),
-                        child: const Text('全部删除', style: TextStyle(fontSize: 11)),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 4),
-                  ...job.outputs.map(
-                    (path) => Padding(
-                      padding: const EdgeInsets.only(bottom: 4),
-                      child: MediaOutputFileRow(
-                        path: path,
-                        style: muted,
-                        onDelete: () => _deleteJobOutput(job, path),
-                      ),
                     ),
                   ),
                 ],
@@ -3172,8 +3321,8 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
     // 标题/副标题 ellipsis 按剩余宽度计算，不与图标抢宽。
     final tile = Material(
       color: expanded
-          ? cs.primaryContainer.withValues(alpha: 0.45)
-          : cs.surfaceContainerHighest,
+          ? cs.primary.withValues(alpha: 0.16)
+          : cs.surfaceContainerLow,
       borderRadius: BorderRadius.circular(8),
       child: Padding(
         padding: const EdgeInsets.fromLTRB(8, 6, 6, 6),
@@ -3192,9 +3341,10 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
                         displayLabel,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
+                        style: TextStyle(
                           fontWeight: FontWeight.w600,
                           fontSize: 12,
+                          color: expanded ? cs.primary : cs.onSurface,
                         ),
                       ),
                       const SizedBox(height: 2),
@@ -3259,9 +3409,12 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
             duration: const Duration(milliseconds: 120),
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(8),
-              border: hovering
-                  ? Border.all(color: cs.primary, width: 1.5)
-                  : Border.all(color: Colors.transparent),
+              border: Border.all(
+                color: hovering || expanded
+                    ? cs.primary
+                    : cs.outlineVariant.withValues(alpha: 0.55),
+                width: hovering || expanded ? 1.5 : 1,
+              ),
             ),
             child: tile,
           );
@@ -3284,7 +3437,7 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
       decoration: BoxDecoration(
         color: cs.surface,
         borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: cs.outlineVariant),
+        border: Border.all(color: cs.primary.withValues(alpha: 0.7)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -3604,6 +3757,340 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
           ),
         );
     }
+  }
+}
+
+class _JobOutputNameChip extends StatelessWidget {
+  const _JobOutputNameChip({
+    required this.path,
+    required this.style,
+    required this.onDelete,
+  });
+
+  final String path;
+  final TextStyle style;
+  final VoidCallback onDelete;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final name = p.basename(path);
+    final canPreview = MediaHoverPreviewIcon.canPreview(path);
+    final nameLabel = Text(
+      name,
+      style: style,
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+    );
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (canPreview) MediaHoverPreviewIcon(path: path, extent: 22),
+        canPreview
+            ? MediaHoverPreviewAnchor(path: path, child: nameLabel)
+            : nameLabel,
+        IconButton(
+          tooltip: '删除文件',
+          mouseCursor: SystemMouseCursors.click,
+          icon: Icon(Icons.delete_outline, size: 15, color: cs.error),
+          visualDensity: VisualDensity.compact,
+          constraints: const BoxConstraints(minWidth: 26, minHeight: 26),
+          padding: EdgeInsets.zero,
+          onPressed: onDelete,
+        ),
+      ],
+    );
+  }
+}
+
+class _ComfyJobSplitter extends StatefulWidget {
+  const _ComfyJobSplitter({
+    required this.onDragStart,
+    required this.onDragDelta,
+    required this.onReset,
+  });
+
+  final VoidCallback onDragStart;
+  final ValueChanged<double> onDragDelta;
+  final VoidCallback onReset;
+
+  @override
+  State<_ComfyJobSplitter> createState() => _ComfyJobSplitterState();
+}
+
+class _ComfyJobSplitterState extends State<_ComfyJobSplitter> {
+  bool _hover = false;
+  bool _dragging = false;
+  bool _moved = false;
+  double? _lastY;
+  DateTime? _lastTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final active = _hover || _dragging;
+    return MouseRegion(
+      cursor: SystemMouseCursors.resizeUpDown,
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) {
+        if (!_dragging) setState(() => _hover = false);
+      },
+      child: Listener(
+        behavior: HitTestBehavior.opaque,
+        onPointerDown: (e) {
+          final now = DateTime.now();
+          final doubleTap = _lastTap != null &&
+              now.difference(_lastTap!) < const Duration(milliseconds: 280);
+          _lastTap = now;
+          if (doubleTap) {
+            _dragging = false;
+            _moved = false;
+            _lastY = null;
+            widget.onReset();
+            return;
+          }
+          _dragging = true;
+          _moved = false;
+          _lastY = e.position.dy;
+          setState(() {});
+        },
+        onPointerMove: (e) {
+          if (!_dragging || _lastY == null) return;
+          final dy = e.position.dy - _lastY!;
+          if (dy == 0) return;
+          _lastY = e.position.dy;
+          if (!_moved) {
+            _moved = true;
+            widget.onDragStart();
+          }
+          widget.onDragDelta(dy);
+        },
+        onPointerUp: (_) {
+          _dragging = false;
+          _lastY = null;
+          _moved = false;
+          if (mounted) setState(() => _hover = false);
+        },
+        onPointerCancel: (_) {
+          _dragging = false;
+          _lastY = null;
+          _moved = false;
+          if (mounted) setState(() => _hover = false);
+        },
+        child: SizedBox(
+          height: 14,
+          child: Center(
+            child: Container(
+              height: active ? 3 : 1,
+              margin: const EdgeInsets.symmetric(horizontal: 24),
+              decoration: BoxDecoration(
+                color: active
+                    ? cs.primary.withValues(alpha: 0.9)
+                    : cs.outlineVariant.withValues(alpha: 0.55),
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _ComfyLeftRailSplitter extends StatefulWidget {
+  const _ComfyLeftRailSplitter({
+    required this.onDragDelta,
+    required this.onReset,
+  });
+
+  final ValueChanged<double> onDragDelta;
+  final VoidCallback onReset;
+
+  @override
+  State<_ComfyLeftRailSplitter> createState() => _ComfyLeftRailSplitterState();
+}
+
+class _ComfyLeftRailSplitterState extends State<_ComfyLeftRailSplitter> {
+  bool _hover = false;
+  bool _dragging = false;
+  double? _lastX;
+  DateTime? _lastTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final active = _hover || _dragging;
+    return MouseRegion(
+      cursor: SystemMouseCursors.resizeColumn,
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) {
+        if (!_dragging) setState(() => _hover = false);
+      },
+      child: Listener(
+        behavior: HitTestBehavior.opaque,
+        onPointerDown: (e) {
+          final now = DateTime.now();
+          final doubleTap = _lastTap != null &&
+              now.difference(_lastTap!) < const Duration(milliseconds: 280);
+          _lastTap = now;
+          if (doubleTap) {
+            _dragging = false;
+            _lastX = null;
+            widget.onReset();
+            return;
+          }
+          _dragging = true;
+          _lastX = e.position.dx;
+          setState(() {});
+        },
+        onPointerMove: (e) {
+          if (!_dragging || _lastX == null) return;
+          final dx = e.position.dx - _lastX!;
+          if (dx == 0) return;
+          _lastX = e.position.dx;
+          widget.onDragDelta(dx);
+        },
+        onPointerUp: (_) {
+          _dragging = false;
+          _lastX = null;
+          if (mounted) setState(() => _hover = false);
+        },
+        onPointerCancel: (_) {
+          _dragging = false;
+          _lastX = null;
+          if (mounted) setState(() => _hover = false);
+        },
+        child: SizedBox(
+          width: 8,
+          child: Center(
+            child: Container(
+              width: active ? 3 : 1,
+              color: active
+                  ? cs.primary.withValues(alpha: 0.9)
+                  : cs.outlineVariant.withValues(alpha: 0.7),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _ComfyLeftSplitter extends StatefulWidget {
+  const _ComfyLeftSplitter({required this.onDragUpdate});
+
+  final GestureDragUpdateCallback onDragUpdate;
+
+  @override
+  State<_ComfyLeftSplitter> createState() => _ComfyLeftSplitterState();
+}
+
+class _ComfyLeftSplitterState extends State<_ComfyLeftSplitter> {
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return MouseRegion(
+      cursor: SystemMouseCursors.resizeUpDown,
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onVerticalDragUpdate: widget.onDragUpdate,
+        child: SizedBox(
+          height: 6,
+          child: Center(
+            child: Container(
+              height: _hover ? 2 : 1,
+              color: _hover
+                  ? cs.primary.withValues(alpha: 0.85)
+                  : cs.outlineVariant.withValues(alpha: 0.45),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _ComfyBoundTemplateRow extends StatefulWidget {
+  const _ComfyBoundTemplateRow({
+    required this.name,
+    required this.selected,
+    required this.onTap,
+    required this.onUnbind,
+  });
+
+  final String name;
+  final bool selected;
+  final VoidCallback onTap;
+  final VoidCallback onUnbind;
+
+  @override
+  State<_ComfyBoundTemplateRow> createState() => _ComfyBoundTemplateRowState();
+}
+
+class _ComfyBoundTemplateRowState extends State<_ComfyBoundTemplateRow> {
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: Material(
+        color: widget.selected
+            ? cs.surfaceContainerHighest.withValues(alpha: 0.65)
+            : Colors.transparent,
+        child: InkWell(
+          mouseCursor: SystemMouseCursors.click,
+          onTap: widget.onTap,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(10, 10, 8, 10),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Tooltip(
+                    message: widget.name,
+                    waitDuration: const Duration(milliseconds: 400),
+                    child: Text(
+                      widget.name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: widget.selected
+                            ? FontWeight.w600
+                            : FontWeight.w500,
+                      ),
+                    ),
+                  ),
+                ),
+                if (_hover)
+                  IconButton(
+                    tooltip: '从此 URL 移除',
+                    mouseCursor: SystemMouseCursors.click,
+                    icon: Icon(
+                      Icons.link_off,
+                      size: 18,
+                      color: cs.onSurface,
+                    ),
+                  visualDensity: VisualDensity.compact,
+                  constraints: const BoxConstraints(
+                    minWidth: 36,
+                    minHeight: 36,
+                  ),
+                  padding: const EdgeInsets.all(6),
+                  onPressed: widget.onUnbind,
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
   }
 }
 

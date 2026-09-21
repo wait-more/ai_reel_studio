@@ -74,12 +74,17 @@ class AppConfig {
   static const _kComfyDeleteRemoteAfterDownload =
       'comfyDeleteRemoteAfterDownload';
   static const _kComfyLeftSplit = 'comfyLeftSplit';
+  static const _kComfyLeftRailWidth = 'comfyLeftRailWidth';
 
   static const defaultComfyBaseUrl = 'http://127.0.0.1:8188';
-  /// 生成面板左侧：URL 列表占比（相对模板绑定区）。
-  static const defaultComfyLeftSplit = 0.38;
+  /// 生成面板左侧：URL 列表占比（相对模板绑定区）。模板更常点，默认少给实例。
+  static const defaultComfyLeftSplit = 0.28;
   static const comfyLeftSplitMin = 0.22;
   static const comfyLeftSplitMax = 0.7;
+  /// 生成面板左侧实例/模板栏宽度。
+  static const defaultComfyLeftRailWidth = 230.0;
+  static const comfyLeftRailWidthMin = 180.0;
+  static const comfyLeftRailWidthMax = 480.0;
 
   static const defaultStartCmds = <StartCmd>[
     StartCmd(name: 'opencode', command: 'opencode'),
@@ -122,6 +127,7 @@ class AppConfig {
   String _comfySelectedServerId = 'local';
   bool _comfyDeleteRemoteAfterDownload = true;
   double _comfyLeftSplit = defaultComfyLeftSplit;
+  double _comfyLeftRailWidth = defaultComfyLeftRailWidth;
   AssetPanelPrefs _assetPanelPrefs = AssetPanelPrefs.defaults();
 
   String get projectRoot => _projectRoot;
@@ -136,6 +142,8 @@ class AppConfig {
   bool get comfyDeleteRemoteAfterDownload => _comfyDeleteRemoteAfterDownload;
   /// 生成面板左侧 URL / 模板绑定 分隔比例。
   double get comfyLeftSplit => _comfyLeftSplit;
+  /// 生成面板左侧实例/模板栏宽度。
+  double get comfyLeftRailWidth => _comfyLeftRailWidth;
   /// 素材栏偏好整包（视图 / 列宽 / 排序）。
   AssetPanelPrefs get assetPanelPrefs => _assetPanelPrefs;
   /// `grid` | `list`
@@ -197,6 +205,9 @@ class AppConfig {
         prefs.getBool(_kComfyDeleteRemoteAfterDownload) ?? true;
     _comfyLeftSplit = (prefs.getDouble(_kComfyLeftSplit) ?? defaultComfyLeftSplit)
         .clamp(comfyLeftSplitMin, comfyLeftSplitMax);
+    _comfyLeftRailWidth =
+        (prefs.getDouble(_kComfyLeftRailWidth) ?? defaultComfyLeftRailWidth)
+            .clamp(comfyLeftRailWidthMin, comfyLeftRailWidthMax);
     _assetPanelPrefs = await _loadAssetPanelPrefs(prefs);
   }
 
@@ -389,6 +400,13 @@ class AppConfig {
         value.clamp(comfyLeftSplitMin, comfyLeftSplitMax).toDouble();
     final prefs = await SharedPreferences.getInstance();
     await prefs.setDouble(_kComfyLeftSplit, _comfyLeftSplit);
+  }
+
+  Future<void> setComfyLeftRailWidth(double value) async {
+    _comfyLeftRailWidth =
+        value.clamp(comfyLeftRailWidthMin, comfyLeftRailWidthMax).toDouble();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setDouble(_kComfyLeftRailWidth, _comfyLeftRailWidth);
   }
 
   static List<ComfyServer> _loadComfyServers(
