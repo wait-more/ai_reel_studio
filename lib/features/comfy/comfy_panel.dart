@@ -29,7 +29,7 @@ String _formatJobElapsed(Duration elapsed) {
 }
 
 /// Comfy 面板左右顶栏统一高度（标题行 + 副文案/操作）。
-const double _kComfyHeaderBarHeight = 56;
+const double _kComfyHeaderBarHeight = 48;
 
 class _ComfyBundle {
   final List<ComfyTemplate> templates;
