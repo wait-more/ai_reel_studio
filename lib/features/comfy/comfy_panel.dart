@@ -133,6 +133,11 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
   List<String> _nodeOrder = [];
   /// 分类分区顺序（sortCategory 整型）。空则含提示词的分区在前，其余仍按 0→4。
   List<int> _categoryOrder = [];
+  /// 节点瓦片长按拖拽排序：当前拖起的分区与源下标。
+  int? _nodeDragCategory;
+  int? _nodeDragFromIndex;
+  /// 插入点：放到该下标之前（0=最前，nodes.length=最后）。
+  int? _nodeInsertBefore;
 
   String? _outputDir;
   final TextEditingController _outputNameCtrl = TextEditingController();
@@ -737,20 +742,51 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
     _schedulePersistSession();
   }
 
-  void _moveNodeInCategory(int category, int fromIndex, int toIndex) {
-    if (fromIndex == toIndex) return;
+  void _clearNodeReorderDrag() {
+    if (_nodeDragCategory == null &&
+        _nodeDragFromIndex == null &&
+        _nodeInsertBefore == null) {
+      return;
+    }
+    setState(() {
+      _nodeDragCategory = null;
+      _nodeDragFromIndex = null;
+      _nodeInsertBefore = null;
+    });
+  }
+
+  void _clearNodeInsertHint() {
+    if (_nodeInsertBefore == null) return;
+    setState(() => _nodeInsertBefore = null);
+  }
+
+  /// 仅更新同组插入点；[_nodeDragCategory] 在起拖时锁定为源分区，不被其它组 onMove 改写。
+  void _setNodeInsertBefore(int category, int fromIndex, int insertBefore) {
+    if (_nodeDragCategory != category || _nodeDragFromIndex != fromIndex) {
+      return;
+    }
+    if (_nodeInsertBefore == insertBefore) return;
+    setState(() => _nodeInsertBefore = insertBefore);
+  }
+
+  /// [insertBefore]：插入到该下标之前（含 0 与 length）。
+  void _moveNodeInCategory(int category, int fromIndex, int insertBefore) {
+    if (fromIndex == insertBefore || fromIndex + 1 == insertBefore) return;
     final sections = _nodeSections();
     final idx = sections.indexWhere((s) => s.category == category);
     if (idx < 0) return;
     final nodes = List<ComfyExposedNode>.of(sections[idx].nodes);
     if (fromIndex < 0 ||
         fromIndex >= nodes.length ||
-        toIndex < 0 ||
-        toIndex >= nodes.length) {
+        insertBefore < 0 ||
+        insertBefore > nodes.length) {
       return;
     }
     final item = nodes.removeAt(fromIndex);
-    nodes.insert(toIndex, item);
+    var to = insertBefore;
+    if (fromIndex < insertBefore) to -= 1;
+    to = to.clamp(0, nodes.length);
+    nodes.insert(to, item);
     final rebuilt = <String>[];
     for (final s in sections) {
       if (s.category == category) {
@@ -759,7 +795,12 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
         rebuilt.addAll(s.nodes.map((e) => e.nodeId));
       }
     }
-    setState(() => _nodeOrder = rebuilt);
+    setState(() {
+      _nodeOrder = rebuilt;
+      _nodeDragCategory = null;
+      _nodeDragFromIndex = null;
+      _nodeInsertBefore = null;
+    });
     _schedulePersistSession();
   }
 
@@ -2748,7 +2789,7 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
                               cs,
                               icon: Icons.tune,
                               title: '节点参数',
-                              subtitle: '点选编辑 · 长按拖拽排序 · 拖分区标题调整顺序',
+                              subtitle: '点选编辑 · 长按拖到竖线处插入 · 拖分区标题调顺序',
                               trailing: Row(
                                 mainAxisSize: MainAxisSize.min,
                                 children: [
@@ -3094,17 +3135,30 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
                           (constraints.maxWidth / minTile).floor().clamp(1, 6);
                       final tileW =
                           (constraints.maxWidth - gap * (cols - 1)) / cols;
+                      final nodeCount = section.nodes.length;
+                      final draggingHere =
+                          _nodeDragCategory == section.category;
                       return Wrap(
                         spacing: gap,
                         runSpacing: gap,
+                        crossAxisAlignment: WrapCrossAlignment.center,
                         children: [
-                          for (var i = 0; i < section.nodes.length; i++)
+                          for (var i = 0; i < nodeCount; i++)
                             SizedBox(
                               width: tileW,
                               child: _buildNodeTile(
                                 section.nodes[i],
                                 category: section.category,
                                 index: i,
+                                nodeCount: nodeCount,
+                              ),
+                            ),
+                          if (draggingHere)
+                            SizedBox(
+                              width: tileW,
+                              child: _buildNodeEndInsertSlot(
+                                category: section.category,
+                                insertBefore: nodeCount,
                               ),
                             ),
                         ],
@@ -3644,6 +3698,7 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
     ComfyExposedNode node, {
     required int category,
     required int index,
+    required int nodeCount,
   }) {
     final cs = Theme.of(context).colorScheme;
     final canBypass = node.bypassWhenDisabled;
@@ -3732,7 +3787,10 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
                   ),
                 ),
               ),
-              if (!dropHot && !dropBlocked) ...[
+              // 节点排序拖拽中隐藏媒体预览，避免遮挡插入竖线。
+              if (!dropHot &&
+                  !dropBlocked &&
+                  _nodeDragCategory == null) ...[
                 for (final path in mediaPaths.take(3))
                   MediaHoverPreviewIcon(path: path),
                 if (mediaPaths.length > 3)
@@ -3762,6 +3820,19 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
       );
     }
 
+    final insertBefore = _nodeInsertBefore;
+    final fromIdx = _nodeDragFromIndex;
+    final draggingHere = _nodeDragCategory == category && insertBefore != null;
+    final insertNoOp = fromIdx != null &&
+        insertBefore != null &&
+        (fromIdx == insertBefore || fromIdx + 1 == insertBefore);
+    final showInsertLeft =
+        draggingHere && insertBefore == index && !insertNoOp;
+    final showInsertRight = draggingHere &&
+        insertBefore == index + 1 &&
+        index == nodeCount - 1 &&
+        !insertNoOp;
+
     return _wrapFsDropTarget(
       canAccept: (item) => _nodeCanAcceptMediaDrop(node, item),
       onAccept: (item) => _applyMediaDropToNode(node, item),
@@ -3769,47 +3840,122 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
         final tile = buildTile(dropHot: dropHot, dropBlocked: dropBlocked);
         return LongPressDraggable<({int category, int index})>(
           data: (category: category, index: index),
+          onDragStarted: () {
+            dismissActiveMediaHoverPreview();
+            setState(() {
+              _nodeDragCategory = category;
+              _nodeDragFromIndex = index;
+              _nodeInsertBefore = null;
+            });
+          },
+          onDragEnd: (_) => _clearNodeReorderDrag(),
           feedback: Material(
-            elevation: 6,
+            elevation: 10,
+            shadowColor: Colors.black.withValues(alpha: 0.35),
             borderRadius: BorderRadius.circular(8),
             child: SizedBox(
-              width: 160,
-              child: Opacity(
-                opacity: 0.92,
-                child: buildTile(dropHot: false, dropBlocked: false),
+              width: 168,
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(
+                    color: cs.primary.withValues(alpha: 0.75),
+                    width: 1.5,
+                  ),
+                ),
+                child: Opacity(
+                  opacity: 0.95,
+                  child: buildTile(dropHot: false, dropBlocked: false),
+                ),
               ),
             ),
           ),
           childWhenDragging: Opacity(
-            opacity: 0.35,
+            opacity: 0.28,
             child: buildTile(dropHot: false, dropBlocked: false),
           ),
-          child: DragTarget<({int category, int index})>(
-            onWillAcceptWithDetails: (details) =>
-                details.data.category == category && details.data.index != index,
-            onAcceptWithDetails: (details) {
-              _moveNodeInCategory(category, details.data.index, index);
+          child: _NodeReorderDropTarget(
+            category: category,
+            index: index,
+            showInsertLeft: showInsertLeft,
+            showInsertRight: showInsertRight,
+            dropHot: dropHot,
+            dropBlocked: dropBlocked,
+            expanded: expanded,
+            onHoverInsert: (fromIndex, insertBefore) {
+              _setNodeInsertBefore(category, fromIndex, insertBefore);
             },
-            builder: (context, candidate, rejected) {
-              final hovering = candidate.isNotEmpty;
-              return AnimatedContainer(
-                duration: const Duration(milliseconds: 120),
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(8),
-                  border: Border.all(
-                    color: dropBlocked
-                        ? cs.error
-                        : hovering || expanded || dropHot
-                            ? cs.primary
-                            : cs.outlineVariant.withValues(alpha: 0.55),
-                    width: hovering || expanded || dropHot || dropBlocked
-                        ? 1.5
-                        : 1,
-                  ),
-                ),
-                child: tile,
+            onLeaveInsert: _clearNodeInsertHint,
+            onAccept: (fromIndex, insertBefore) {
+              // 必须以源分区落点为准；避免悬停过其它组后残留错误 insertBefore。
+              if (_nodeDragCategory != category) return;
+              _moveNodeInCategory(
+                category,
+                fromIndex,
+                _nodeInsertBefore ?? insertBefore,
               );
             },
+            child: tile,
+          ),
+        );
+      },
+    );
+  }
+
+  /// 分区网格末尾的落点：拖到空白处也可插到最后。
+  Widget _buildNodeEndInsertSlot({
+    required int category,
+    required int insertBefore,
+  }) {
+    final cs = Theme.of(context).colorScheme;
+    final active = _nodeDragCategory == category &&
+        _nodeInsertBefore == insertBefore &&
+        _nodeDragFromIndex != null &&
+        _nodeDragFromIndex != insertBefore &&
+        _nodeDragFromIndex! + 1 != insertBefore;
+
+    return DragTarget<({int category, int index})>(
+      onWillAcceptWithDetails: (details) => details.data.category == category,
+      onMove: (details) {
+        // Flutter 在 willAccept=false 时仍可能回调 onMove，必须再挡一层。
+        if (details.data.category != category) return;
+        _setNodeInsertBefore(category, details.data.index, insertBefore);
+      },
+      onLeave: (_) => _clearNodeInsertHint(),
+      onAcceptWithDetails: (details) {
+        if (details.data.category != category) return;
+        _moveNodeInCategory(
+          category,
+          details.data.index,
+          _nodeInsertBefore ?? insertBefore,
+        );
+      },
+      builder: (context, candidate, rejected) {
+        // 与节点瓦片同高量级，并在 Wrap 里垂直居中对齐，避免「靠上」。
+        return AnimatedContainer(
+          duration: const Duration(milliseconds: 140),
+          curve: Curves.easeOutCubic,
+          constraints: const BoxConstraints(minHeight: 48),
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(8),
+            color: active
+                ? cs.primary.withValues(alpha: 0.1)
+                : Colors.transparent,
+            border: Border.all(
+              color: active
+                  ? cs.primary.withValues(alpha: 0.65)
+                  : cs.outlineVariant.withValues(alpha: 0.4),
+              width: active ? 1.5 : 1,
+            ),
+          ),
+          // 竖线由上一张卡的右侧 caret 承担（缝隙正中）；此处只作落点框。
+          child: Icon(
+            Icons.add,
+            size: 18,
+            color: active
+                ? cs.primary.withValues(alpha: 0.85)
+                : cs.onSurfaceVariant.withValues(alpha: 0.45),
           ),
         );
       },
@@ -4287,6 +4433,145 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
           ),
         );
     }
+  }
+}
+
+/// 节点排序落点：按左右半区决定插到卡前/卡后，用竖线 caret 指示，不做整卡「替换」高亮。
+/// 仅接受同分区拖放；其它分区的 onMove 也忽略，避免误显示插入线。
+class _NodeReorderDropTarget extends StatelessWidget {
+  const _NodeReorderDropTarget({
+    required this.category,
+    required this.index,
+    required this.showInsertLeft,
+    required this.showInsertRight,
+    required this.dropHot,
+    required this.dropBlocked,
+    required this.expanded,
+    required this.onHoverInsert,
+    required this.onLeaveInsert,
+    required this.onAccept,
+    required this.child,
+  });
+
+  final int category;
+  final int index;
+  final bool showInsertLeft;
+  final bool showInsertRight;
+  final bool dropHot;
+  final bool dropBlocked;
+  final bool expanded;
+  final void Function(int fromIndex, int insertBefore) onHoverInsert;
+  final VoidCallback onLeaveInsert;
+  final void Function(int fromIndex, int insertBefore) onAccept;
+  final Widget child;
+
+  int _insertBeforeFor(Offset global, RenderBox box) {
+    final local = box.globalToLocal(global);
+    return local.dx < box.size.width * 0.5 ? index : index + 1;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return DragTarget<({int category, int index})>(
+      onWillAcceptWithDetails: (details) => details.data.category == category,
+      onMove: (details) {
+        // willAccept=false 时 Flutter 仍可能回调 onMove。
+        if (details.data.category != category) return;
+        final box = context.findRenderObject() as RenderBox?;
+        if (box == null || !box.hasSize) return;
+        onHoverInsert(
+          details.data.index,
+          _insertBeforeFor(details.offset, box),
+        );
+      },
+      onLeave: (_) => onLeaveInsert(),
+      onAcceptWithDetails: (details) {
+        if (details.data.category != category) return;
+        final box = context.findRenderObject() as RenderBox?;
+        final insertBefore = box != null && box.hasSize
+            ? _insertBeforeFor(details.offset, box)
+            : index;
+        onAccept(details.data.index, insertBefore);
+      },
+      builder: (context, candidate, rejected) {
+        return Stack(
+          clipBehavior: Clip.none,
+          children: [
+            AnimatedContainer(
+              duration: const Duration(milliseconds: 120),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(
+                  color: dropBlocked
+                      ? cs.error
+                      : expanded || dropHot
+                          ? cs.primary
+                          : cs.outlineVariant.withValues(alpha: 0.55),
+                  width: expanded || dropHot || dropBlocked ? 1.5 : 1,
+                ),
+              ),
+              child: child,
+            ),
+            if (showInsertLeft)
+              Positioned(
+                // 卡缝 gap=6、线宽=3 → 线心落在 -3，左缘应在 -4.5
+                left: -(_NodeInsertCaret.gap + _NodeInsertCaret.width) / 2,
+                top: 6,
+                bottom: 6,
+                child: const _NodeInsertCaret(),
+              ),
+            if (showInsertRight)
+              Positioned(
+                right: -(_NodeInsertCaret.gap + _NodeInsertCaret.width) / 2,
+                top: 6,
+                bottom: 6,
+                child: const _NodeInsertCaret(),
+              ),
+          ],
+        );
+      },
+    );
+  }
+}
+
+/// 插入位置指示：细竖线 + 轻光晕，居中落在两卡 spacing 缝隙正中。
+class _NodeInsertCaret extends StatelessWidget {
+  const _NodeInsertCaret();
+
+  /// 与节点 Wrap 的 spacing 保持一致。
+  static const double gap = 6;
+  static const double width = 3;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return IgnorePointer(
+      child: SizedBox(
+        width: width,
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(2),
+            gradient: LinearGradient(
+              begin: Alignment.topCenter,
+              end: Alignment.bottomCenter,
+              colors: [
+                cs.primary.withValues(alpha: 0.35),
+                cs.primary,
+                cs.primary.withValues(alpha: 0.35),
+              ],
+            ),
+            boxShadow: [
+              BoxShadow(
+                color: cs.primary.withValues(alpha: 0.45),
+                blurRadius: 6,
+                spreadRadius: 0.5,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 }
 
