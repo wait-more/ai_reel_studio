@@ -246,7 +246,7 @@ final draftContentsProvider =
 final discardUnsavedEditsTickProvider = StateProvider<int>((ref) => 0);
 
 /// 剧本/季/集 → 创作进度状态。setter 同步写回 SharedPreferences
-/// （key: episode_status:<path>）。
+/// （key: `episode_status:<path>`）。
 final episodeStatusesProvider = StateProvider<Map<String, String>>((ref) => {});
 
 /// 左侧目录树当前已展开的节点路径（供持久化）。
@@ -254,6 +254,11 @@ final expandedTreePathsProvider = StateProvider<List<String>>((ref) => []);
 
 /// 目录树/物料网格结构变更 tick（递增即触发双方刷新）。
 final treeRefreshTickProvider = StateProvider<int>((ref) => 0);
+
+/// 是否显示隐藏文件（目录树与素材栏共用，与 [AppConfig] 同步）。
+final showHiddenFilesProvider = StateProvider<bool>(
+  (ref) => AppConfig.instance.showHiddenFiles,
+);
 
 /// 外观 / 字号 / 快捷启动等用户偏好（与 [AppConfig] 同步持久化）。
 final themeModeProvider = StateProvider<ThemeMode>(

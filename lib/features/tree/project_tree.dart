@@ -728,6 +728,29 @@ class _ProjectTreeState extends ConsumerState<ProjectTree> {
                     onPressed: _createScript,
                   ),
                   IconButton(
+                    icon: Icon(
+                      ref.watch(showHiddenFilesProvider)
+                          ? Icons.visibility
+                          : Icons.visibility_off_outlined,
+                      size: 18,
+                    ),
+                    tooltip: ref.watch(showHiddenFilesProvider)
+                        ? '隐藏文件：开（点击关闭）'
+                        : '隐藏文件：关（点击显示）',
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(
+                      minWidth: 32,
+                      minHeight: 32,
+                    ),
+                    onPressed: () {
+                      final next = !ref.read(showHiddenFilesProvider);
+                      ref.read(showHiddenFilesProvider.notifier).state = next;
+                      unawaited(AppConfig.instance.setShowHiddenFiles(next));
+                      // 触发目录树与素材栏一并按新规则重载。
+                      ref.read(treeRefreshTickProvider.notifier).state++;
+                    },
+                  ),
+                  IconButton(
                     icon: const Icon(Icons.refresh, size: 18),
                     tooltip: '手动刷新目录',
                     padding: EdgeInsets.zero,

@@ -77,6 +77,7 @@ class AppConfig {
   static const _kComfyLeftRailWidth = 'comfyLeftRailWidth';
   static const _kMainTreeWidth = 'mainTreeWidth';
   static const _kMainShellWidth = 'mainShellWidth';
+  static const _kShowHiddenFiles = 'showHiddenFiles';
 
   static const defaultComfyBaseUrl = 'http://127.0.0.1:8188';
   /// 生成面板左侧：URL 列表占比（相对模板绑定区）。模板更常点，默认少给实例。
@@ -140,6 +141,7 @@ class AppConfig {
   double _mainTreeWidth = defaultMainTreeWidth;
   /// null：尚未记忆，主界面首次布局按 [defaultMainShellRatio] 计算。
   double? _mainShellWidth;
+  bool _showHiddenFiles = false;
   AssetPanelPrefs _assetPanelPrefs = AssetPanelPrefs.defaults();
 
   String get projectRoot => _projectRoot;
@@ -160,6 +162,8 @@ class AppConfig {
   double get mainTreeWidth => _mainTreeWidth;
   /// 主界面右栏（终端）宽度；null 表示按默认比例。
   double? get mainShellWidth => _mainShellWidth;
+  /// 是否显示隐藏文件（`.` 开头等）；目录树与素材栏共用。
+  bool get showHiddenFiles => _showHiddenFiles;
   /// 素材栏偏好整包（视图 / 列宽 / 排序）。
   AssetPanelPrefs get assetPanelPrefs => _assetPanelPrefs;
   /// `grid` | `list`
@@ -231,6 +235,7 @@ class AppConfig {
         .getDouble(_kMainShellWidth)
         ?.clamp(mainShellWidthMin, 2400.0)
         .toDouble();
+    _showHiddenFiles = prefs.getBool(_kShowHiddenFiles) ?? false;
     _assetPanelPrefs = await _loadAssetPanelPrefs(prefs);
   }
 
@@ -444,6 +449,12 @@ class AppConfig {
         value.clamp(mainShellWidthMin, 2400.0).toDouble();
     final prefs = await SharedPreferences.getInstance();
     await prefs.setDouble(_kMainShellWidth, _mainShellWidth!);
+  }
+
+  Future<void> setShowHiddenFiles(bool value) async {
+    _showHiddenFiles = value;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_kShowHiddenFiles, value);
   }
 
   static List<ComfyServer> _loadComfyServers(

@@ -14,6 +14,7 @@ import '../../core/editor_tabs.dart';
 import '../../core/file_actions.dart';
 import '../../core/fs_context_menu.dart';
 import '../../core/fs_drag.dart';
+import '../../core/fs_hidden.dart';
 import '../../core/fresh_file_image.dart';
 import '../../core/inline_fs_edit.dart';
 import '../../core/media_types.dart';
@@ -491,9 +492,11 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
       final entries = <FileSystemEntity>[];
       final meta = <String, _EntryMeta>{};
       if (await Directory(dirPath).exists()) {
+        final showHidden = ref.read(showHiddenFilesProvider);
         await for (final e in Directory(dirPath).list()) {
-          entries.add(e);
           final name = e.path.split(Platform.pathSeparator).last;
+          if (!showHidden && isHiddenFsName(name)) continue;
+          entries.add(e);
           final isDir = e is Directory;
           DateTime? modified;
           int? sizeBytes;
@@ -1102,7 +1105,10 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
     var fileCount = 0;
     var imageCount = 0;
     try {
+      final showHidden = ref.read(showHiddenFilesProvider);
       await for (final e in Directory(dir).list()) {
+        final name = e.path.split(Platform.pathSeparator).last;
+        if (!showHidden && isHiddenFsName(name)) continue;
         if (e is Directory) {
           subDirs.add(e.path);
         } else {
@@ -1121,7 +1127,10 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
     for (final d in subDirs) {
       var n = 0;
       try {
-        await for (final _ in Directory(d).list()) {
+        final showHidden = ref.read(showHiddenFilesProvider);
+        await for (final e in Directory(d).list()) {
+          final name = e.path.split(Platform.pathSeparator).last;
+          if (!showHidden && isHiddenFsName(name)) continue;
           n++;
         }
       } catch (_) {}

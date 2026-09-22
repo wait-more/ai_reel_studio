@@ -1,5 +1,8 @@
 import 'dart:io';
 
+import 'config.dart';
+import 'fs_hidden.dart';
+
 class ScriptNode {
   final String name;
   final String path;
@@ -51,8 +54,10 @@ class DirectoryParser {
   /// 策略：完整构建结构树到"集"层级（script→season→episode），
   /// 所有物料文件夹（folder）只列出其直接子项并标记 isLoaded=false，
   /// 展开时才通过 [loadChildrenAsync] 热加载更深内容。
+  /// 根目录同时列出文件与文件夹。
   static Future<ScriptNode> parseRootAsync(String rootPath) async {
     final root = Directory(rootPath);
+    final showHidden = AppConfig.instance.showHiddenFiles;
     try {
       if (!await root.exists()) {
         return ScriptNode(
@@ -61,12 +66,20 @@ class DirectoryParser {
 
       final children = <ScriptNode>[];
       await for (final entry in root.list()) {
+        final name = entry.path.split(Platform.pathSeparator).last;
+        if (!showHidden && isHiddenFsName(name)) continue;
         if (entry is Directory) {
           children.add(
               await _parseDirectoryAsync(entry.path, Inherit.script));
+        } else if (entry is File) {
+          children.add(ScriptNode(
+            name: name,
+            path: entry.path,
+            type: ScriptNodeType.file,
+          ));
         }
       }
-      children.sort((a, b) => a.name.compareTo(b.name));
+      children.sort((a, b) => _sortByTypeAndName(a, b));
 
       return ScriptNode(
         name: 'scripts',
@@ -89,15 +102,16 @@ class DirectoryParser {
     final dir = Directory(dirPath);
     final name = dirPath.split(Platform.pathSeparator).last;
     final type = _typeFor(dirPath, inherit);
+    final showHidden = AppConfig.instance.showHiddenFiles;
 
     // 物料文件夹：浅层列一遍，子内容按需热加载
     final isShallow = inherit == Inherit.folder;
     final children = <ScriptNode>[];
     try {
       await for (final entry in dir.list()) {
+        final childName = entry.path.split(Platform.pathSeparator).last;
+        if (!showHidden && isHiddenFsName(childName)) continue;
         if (entry is Directory) {
-          final childName =
-              entry.path.split(Platform.pathSeparator).last;
           if (!isShallow) {
             // 结构链上：继续递归推断
             children.add(await _parseDirectoryAsync(
@@ -114,7 +128,7 @@ class DirectoryParser {
           }
         } else if (entry is File) {
           children.add(ScriptNode(
-            name: entry.path.split(Platform.pathSeparator).last,
+            name: childName,
             path: entry.path,
             type: ScriptNodeType.file,
           ));
@@ -139,12 +153,15 @@ class DirectoryParser {
   /// [node] 通常是一个 isLoaded=false 的物料文件夹。
   static Future<void> loadChildrenAsync(ScriptNode node) async {
     final dir = Directory(node.path);
+    final showHidden = AppConfig.instance.showHiddenFiles;
     final children = <ScriptNode>[];
     try {
       await for (final entry in dir.list()) {
+        final childName = entry.path.split(Platform.pathSeparator).last;
+        if (!showHidden && isHiddenFsName(childName)) continue;
         if (entry is Directory) {
           children.add(ScriptNode(
-            name: entry.path.split(Platform.pathSeparator).last,
+            name: childName,
             path: entry.path,
             type: ScriptNodeType.folder,
             children: const [],
@@ -152,7 +169,7 @@ class DirectoryParser {
           ));
         } else if (entry is File) {
           children.add(ScriptNode(
-            name: entry.path.split(Platform.pathSeparator).last,
+            name: childName,
             path: entry.path,
             type: ScriptNodeType.file,
           ));
@@ -174,8 +191,6 @@ class DirectoryParser {
 
   /// 根据继承上下文推断目录类型
   static ScriptNodeType _typeFor(String dirPath, Inherit inherit) {
-    final name = dirPath.split(Platform.pathSeparator).last;
-
     switch (inherit) {
       // scripts/ 下直接子目录 = 剧本
       case Inherit.script:
