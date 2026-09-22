@@ -225,6 +225,16 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
 
   String get _serverId => ref.read(comfySelectedServerIdProvider);
 
+  String _serverDisplayName(String serverId) {
+    for (final s in ref.read(comfyServersProvider)) {
+      if (s.id == serverId) {
+        final name = s.name.trim();
+        return name.isNotEmpty ? name : s.baseUrl;
+      }
+    }
+    return serverId;
+  }
+
   /// 任务按 Comfy URL（serverId）隔离；其它 URL 上的任务仍在后台跑，切回去还能看到。
   List<_ComfyJob> _jobsForServer(String serverId) =>
       _jobs.where((j) => j.serverId == serverId).toList(growable: false);
@@ -1862,7 +1872,12 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
         // 完成后自动展开，方便直接看输出；进行中默认折叠。
         _openJobIds.add(j.id);
       });
-      if (mounted) showGlobalToast(context, '生成完成：${job.templateName}');
+      if (mounted) {
+        showGlobalToast(
+          context,
+          '生成完成：${_serverDisplayName(job.serverId)} · ${job.templateName}',
+        );
+      }
     } on ComfyCancelledException {
       _mutateJob(job.id, (j) {
         j.phase = _ComfyJobPhase.cancelled;
