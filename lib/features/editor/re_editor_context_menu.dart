@@ -7,8 +7,8 @@ import '../../core/agent_bridge.dart';
 import '../../core/comfy_prompt_bridge.dart';
 import '../../core/providers.dart';
 
-/// re_editor 右键菜单：AdaptiveTextSelectionToolbar 紧凑样式 +
-/// Comfy 悬停二级菜单；左键点空白 / Esc 可关闭。
+/// re_editor 右键菜单：与目录树 [showFsContextMenu] 同一套表面
+/// （surfaceContainerHigh + elevation，无描边）+ Comfy 悬停二级菜单。
 class ReEditorContextMenuController implements SelectionToolbarController {
   ReEditorContextMenuController({
     required this.hostContext,
@@ -85,69 +85,120 @@ class ReEditorContextMenuController implements SelectionToolbarController {
     _menu.show(
       context: context,
       contextMenuBuilder: (menuContext) {
+        final children = <Widget>[
+          ...AdaptiveTextSelectionToolbar.getAdaptiveButtons(
+            menuContext,
+            [
+              ContextMenuButtonItem(
+                label: '剪切',
+                onPressed: () {
+                  _dismiss();
+                  controller.cut();
+                },
+              ),
+              ContextMenuButtonItem(
+                label: '复制',
+                onPressed: () {
+                  _dismiss();
+                  controller.copy();
+                },
+              ),
+              ContextMenuButtonItem(
+                label: '粘贴',
+                onPressed: () {
+                  _dismiss();
+                  controller.paste();
+                },
+              ),
+            ],
+          ),
+          const Divider(height: 8),
+          ...AdaptiveTextSelectionToolbar.getAdaptiveButtons(
+            menuContext,
+            [
+              ContextMenuButtonItem(
+                label: '填入智能体 (${chord.label})',
+                onPressed: () {
+                  _dismiss();
+                  if (!hostContext.mounted) return;
+                  sendAgentReferenceToShell(hostContext, ref);
+                },
+              ),
+            ],
+          ),
+          if (hasSel)
+            ComfyPromptFillSubmenuButton(
+              selectedText: selected,
+              hostContext: hostContext,
+            ),
+        ];
+
         return Stack(
           fit: StackFit.expand,
           children: [
-            // 点空白关闭；二级 Comfy 菜单自带全屏吸收层，不会点穿到这里。
             Positioned.fill(
               child: GestureDetector(
                 behavior: HitTestBehavior.translucent,
                 onTap: _dismiss,
               ),
             ),
-            AdaptiveTextSelectionToolbar(
-              anchors: anchors,
-              children: [
-                ...AdaptiveTextSelectionToolbar.getAdaptiveButtons(
-                  menuContext,
-                  [
-                    ContextMenuButtonItem(
-                      label: '剪切',
-                      onPressed: () {
-                        _dismiss();
-                        controller.cut();
-                      },
-                    ),
-                    ContextMenuButtonItem(
-                      label: '复制',
-                      onPressed: () {
-                        _dismiss();
-                        controller.copy();
-                      },
-                    ),
-                    ContextMenuButtonItem(
-                      label: '粘贴',
-                      onPressed: () {
-                        _dismiss();
-                        controller.paste();
-                      },
-                    ),
-                  ],
-                ),
-                const Divider(height: 8),
-                ...AdaptiveTextSelectionToolbar.getAdaptiveButtons(
-                  menuContext,
-                  [
-                    ContextMenuButtonItem(
-                      label: '填入智能体 (${chord.label})',
-                      onPressed: () {
-                        _dismiss();
-                        if (!hostContext.mounted) return;
-                        sendAgentReferenceToShell(hostContext, ref);
-                      },
-                    ),
-                  ],
-                ),
-                if (hasSel)
-                  ComfyPromptFillSubmenuButton(
-                    selectedText: selected,
-                    hostContext: hostContext,
-                  ),
-              ],
+            _DesktopContextMenuPanel(
+              anchor: anchors.primaryAnchor,
+              children: children,
             ),
           ],
         );
       },
+    );
+  }
+}
+
+/// 布局同 [DesktopTextSelectionToolbar]，外观对齐目录树右键：
+/// surfaceContainerHigh + elevation 8，无描边。
+class _DesktopContextMenuPanel extends StatelessWidget {
+  const _DesktopContextMenuPanel({
+    required this.anchor,
+    required this.children,
+  });
+
+  final Offset anchor;
+  final List<Widget> children;
+
+  static const double _screenPadding = 8;
+  static const double _toolbarWidth = 222;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final paddingAbove =
+        MediaQuery.paddingOf(context).top + _screenPadding;
+    final localAdjustment = Offset(_screenPadding, paddingAbove);
+
+    return Padding(
+      padding: EdgeInsets.fromLTRB(
+        _screenPadding,
+        paddingAbove,
+        _screenPadding,
+        _screenPadding,
+      ),
+      child: CustomSingleChildLayout(
+        delegate: DesktopTextSelectionToolbarLayoutDelegate(
+          anchor: anchor - localAdjustment,
+        ),
+        child: SizedBox(
+          width: _toolbarWidth,
+          child: Material(
+            color: cs.surfaceContainerHigh,
+            elevation: 8,
+            borderRadius: BorderRadius.circular(8),
+            clipBehavior: Clip.antiAlias,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: children,
+            ),
+          ),
+        ),
+      ),
     );
   }
 }

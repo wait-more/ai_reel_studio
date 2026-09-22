@@ -806,7 +806,6 @@ class _ComfyPromptFillSubmenuButtonState
         Overlay.maybeOf(context);
     if (box == null || !box.hasSize || overlayState == null) return;
 
-    final topLeft = box.localToGlobal(Offset(box.size.width - 2, 0));
     final last = ref.read(comfyPromptLastTargetProvider);
     final enabledIds = {
       for (final s in ref.read(comfyServersProvider))
@@ -824,6 +823,34 @@ class _ComfyPromptFillSubmenuButtonState
     final shortLabel = fullLabel.length > 36
         ? '${fullLabel.substring(0, 36)}…'
         : fullLabel;
+
+    // 窗口客户区通常已在任务栏之上；勿再扣 viewPadding.bottom，否则会多留一大截空档。
+    // 先按一级项顶部对齐打开，布局后再按实际高度只上移「刚好露出最后一项」的距离。
+    const menuW = 280.0;
+    const menuMaxH = 360.0;
+    const edge = 4.0;
+
+    final mqSize = MediaQuery.sizeOf(context);
+    final pad = MediaQuery.paddingOf(context);
+    final safeL = pad.left + edge;
+    final safeT = pad.top + edge;
+    final safeR = mqSize.width - pad.right - edge;
+    final safeB = mqSize.height - pad.bottom - edge;
+
+    final anchorOrigin = box.localToGlobal(Offset.zero);
+    final openRight = box.localToGlobal(Offset(box.size.width - 2, 0));
+
+    var left = openRight.dx;
+    if (left + menuW > safeR) {
+      left = anchorOrigin.dx - menuW + 2;
+    }
+    final maxLeft = (safeR - menuW).clamp(safeL, double.infinity);
+    left = left.clamp(safeL, maxLeft).toDouble();
+
+    var top = openRight.dy;
+    if (top < safeT) top = safeT;
+    var didNudge = false;
+    final maxH = (safeB - safeT).clamp(48.0, menuMaxH).toDouble();
 
     _entry = OverlayEntry(
       builder: (ctx) {
@@ -850,77 +877,101 @@ class _ComfyPromptFillSubmenuButtonState
               ),
             ),
             Positioned(
-              left: topLeft.dx,
-              top: topLeft.dy,
-              child: CodeEditorTapRegion(
-                child: MouseRegion(
-                  onEnter: (_) {
-                    _overMenu = true;
-                    _cancelClose();
-                    if (mounted) setState(() {});
-                  },
-                  onExit: (_) {
-                    _overMenu = false;
-                    _scheduleClose();
-                    if (mounted) setState(() {});
-                  },
-                  child: Material(
-                    borderRadius: const BorderRadius.all(Radius.circular(7)),
-                    clipBehavior: Clip.antiAlias,
-                    elevation: 1,
-                    type: MaterialType.card,
-                    child: SizedBox(
-                      width: 280,
-                      child: ConstrainedBox(
-                        constraints: const BoxConstraints(maxHeight: 360),
-                        child: SingleChildScrollView(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.stretch,
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              if (hasLast) ...[
-                                Tooltip(
-                                  message: fullLabel,
-                                  waitDuration:
-                                      const Duration(milliseconds: 250),
-                                  child: DesktopTextSelectionToolbarButton(
-                                    onPressed: () => _run(useLast: true),
-                                    child: Text(
-                                      '填入上次：$shortLabel',
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                      style: labelStyle.copyWith(color: fg),
+              left: left,
+              top: top,
+              child: Builder(
+                builder: (menuCtx) {
+                  WidgetsBinding.instance.addPostFrameCallback((_) {
+                    if (!mounted || _entry == null || didNudge) return;
+                    final menuBox =
+                        menuCtx.findRenderObject() as RenderBox?;
+                    if (menuBox == null || !menuBox.hasSize) return;
+                    didNudge = true;
+                    final overflow = top + menuBox.size.height - safeB;
+                    if (overflow <= 0.5) return;
+                    top = top - overflow;
+                    if (top < safeT) top = safeT;
+                    _entry?.markNeedsBuild();
+                  });
+                  return CodeEditorTapRegion(
+                    child: MouseRegion(
+                      onEnter: (_) {
+                        _overMenu = true;
+                        _cancelClose();
+                        if (mounted) setState(() {});
+                      },
+                      onExit: (_) {
+                        _overMenu = false;
+                        _scheduleClose();
+                        if (mounted) setState(() {});
+                      },
+                      child: Material(
+                        // 与目录树 / 一级菜单同色；靠更高 elevation 叠在一级之上时靠阴影分界。
+                        color: Theme.of(ctx).colorScheme.surfaceContainerHigh,
+                        elevation: 12,
+                        borderRadius: BorderRadius.circular(8),
+                        clipBehavior: Clip.antiAlias,
+                        child: SizedBox(
+                          width: menuW,
+                          child: ConstrainedBox(
+                            constraints: BoxConstraints(maxHeight: maxH),
+                            child: SingleChildScrollView(
+                              child: Column(
+                                crossAxisAlignment:
+                                    CrossAxisAlignment.stretch,
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  if (hasLast) ...[
+                                    Tooltip(
+                                      message: fullLabel,
+                                      waitDuration: const Duration(
+                                          milliseconds: 250),
+                                      child:
+                                          DesktopTextSelectionToolbarButton(
+                                        onPressed: () =>
+                                            _run(useLast: true),
+                                        child: Text(
+                                          '填入上次：$shortLabel',
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: labelStyle.copyWith(
+                                              color: fg),
+                                        ),
+                                      ),
                                     ),
-                                  ),
-                                ),
-                                _menuDivider(fg),
-                              ],
-                              for (final shortcut in shortcuts)
-                                Tooltip(
-                                  message: shortcut.displayLabel,
-                                  waitDuration:
-                                      const Duration(milliseconds: 250),
-                                  child: DesktopTextSelectionToolbarButton(
-                                    onPressed: () => _run(explicit: shortcut),
-                                    child: _shortcutMenuLabel(
-                                      shortcut,
-                                      labelStyle.copyWith(color: fg),
+                                    _menuDivider(fg),
+                                  ],
+                                  for (final shortcut in shortcuts)
+                                    Tooltip(
+                                      message: shortcut.displayLabel,
+                                      waitDuration: const Duration(
+                                          milliseconds: 250),
+                                      child:
+                                          DesktopTextSelectionToolbarButton(
+                                        onPressed: () =>
+                                            _run(explicit: shortcut),
+                                        child: _shortcutMenuLabel(
+                                          shortcut,
+                                          labelStyle.copyWith(color: fg),
+                                        ),
+                                      ),
                                     ),
+                                  if (shortcuts.isNotEmpty)
+                                    _menuDivider(fg),
+                                  DesktopTextSelectionToolbarButton.text(
+                                    context: ctx,
+                                    onPressed: () => _run(useLast: false),
+                                    text: '选择目标…',
                                   ),
-                                ),
-                              if (shortcuts.isNotEmpty) _menuDivider(fg),
-                              DesktopTextSelectionToolbarButton.text(
-                                context: ctx,
-                                onPressed: () => _run(useLast: false),
-                                text: '选择目标…',
+                                ],
                               ),
-                            ],
+                            ),
                           ),
                         ),
                       ),
                     ),
-                  ),
-                ),
+                  );
+                },
               ),
             ),
           ],
