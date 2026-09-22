@@ -8,6 +8,7 @@ import 'package:flterm/flterm.dart';
 import 'package:path/path.dart' as p;
 import 'package:window_manager/window_manager.dart';
 import '../../core/agent_bridge.dart';
+import '../../core/config.dart';
 import '../../core/editor_tab_menu.dart';
 import '../../core/fs_context_menu.dart';
 import '../../core/providers.dart';
@@ -29,11 +30,14 @@ class MainLayout extends ConsumerStatefulWidget {
 }
 
 class _MainLayoutState extends ConsumerState<MainLayout> with WindowListener {
-  double _treeWidth = 280;
-  double? _shellWidth; // null = 未初始化，首次布局时默认中间栏/Shell = 6/4
+  double _treeWidth = AppConfig.instance.mainTreeWidth;
+  /// null = 未记忆，首次布局按默认比例；拖过或重置后写入绝对值。
+  double? _shellWidth = AppConfig.instance.mainShellWidth;
   WorkspaceSnapshot? _lastWorkspaceSnap;
   int _fsShortcutNonce = 0;
   bool _closePromptOpen = false;
+  Timer? _panelWidthPersistTimer;
+  bool _panelWidthsDirty = false;
 
   @override
   void initState() {
@@ -45,12 +49,32 @@ class _MainLayoutState extends ConsumerState<MainLayout> with WindowListener {
   @override
   void dispose() {
     windowManager.removeListener(this);
+    _panelWidthPersistTimer?.cancel();
+    _flushPanelWidths();
     final snap = _lastWorkspaceSnap;
     if (snap != null) {
       // 关闭前立刻落盘，避免去抖窗口内退出丢失最后一次状态
       WorkspaceMemory.instance.saveNow(snap);
     }
     super.dispose();
+  }
+
+  void _schedulePersistPanelWidths() {
+    _panelWidthsDirty = true;
+    _panelWidthPersistTimer?.cancel();
+    _panelWidthPersistTimer = Timer(const Duration(milliseconds: 250), () {
+      _flushPanelWidths();
+    });
+  }
+
+  void _flushPanelWidths() {
+    if (!_panelWidthsDirty) return;
+    _panelWidthsDirty = false;
+    unawaited(AppConfig.instance.setMainTreeWidth(_treeWidth));
+    final shell = _shellWidth;
+    if (shell != null) {
+      unawaited(AppConfig.instance.setMainShellWidth(shell));
+    }
   }
 
   @override
@@ -370,11 +394,11 @@ class _MainLayoutState extends ConsumerState<MainLayout> with WindowListener {
         child: LayoutBuilder(
       builder: (context, constraints) {
         final maxWidth = constraints.maxWidth;
-        // 首次布局：中间栏 / Shell = 6 / 4，并保证中间栏不低于最小宽度。
+        // 未记忆过右栏宽度时：中间 / Shell ≈ 6 / 4。
         if (_shellWidth == null) {
           final dividers = shellVisible ? _dividerWidth * 2 : _dividerWidth;
           final avail = maxWidth - _treeWidth - dividers;
-          _shellWidth = avail * 0.4;
+          _shellWidth = avail * AppConfig.defaultMainShellRatio;
         }
         _ensurePanelWidths(maxWidth, shellVisible: shellVisible);
         final shellW = shellVisible ? (_shellWidth ?? 0) : 0.0;
@@ -433,9 +457,9 @@ class _MainLayoutState extends ConsumerState<MainLayout> with WindowListener {
     );
   }
 
-  static const double _treeMinWidth = 180;
-  static const double _treeMaxWidth = 500;
-  static const double _shellMinWidth = 280;
+  static const double _treeMinWidth = AppConfig.mainTreeWidthMin;
+  static const double _treeMaxWidth = AppConfig.mainTreeWidthMax;
+  static const double _shellMinWidth = AppConfig.mainShellWidthMin;
   static const double _dividerWidth = 3;
 
   /// 拖拽与窗口缩放后，保证中间栏宽度 ≥ 左右按钮块贴齐时的宽度。
@@ -718,6 +742,22 @@ class _MainLayoutState extends ConsumerState<MainLayout> with WindowListener {
   }) {
     final shellVisible = ref.read(shellVisibleProvider);
     return _ColumnSplitter(
+      tooltip: resizeTree ? '拖动调节目录树宽度 · 双击重置' : '拖动调节终端宽度 · 双击重置',
+      onDoubleTap: () {
+        setState(() {
+          if (resizeTree) {
+            _treeWidth = AppConfig.defaultMainTreeWidth;
+          } else {
+            final avail =
+                maxWidth - _treeWidth - _dividerWidth * 2;
+            _shellWidth = (avail * AppConfig.defaultMainShellRatio)
+                .clamp(_shellMinWidth, avail)
+                .toDouble();
+          }
+          _ensurePanelWidths(maxWidth, shellVisible: shellVisible);
+        });
+        _schedulePersistPanelWidths();
+      },
       onPanUpdate: (details) {
         setState(() {
           if (resizeTree) {
@@ -745,6 +785,7 @@ class _MainLayoutState extends ConsumerState<MainLayout> with WindowListener {
           }
           _ensurePanelWidths(maxWidth, shellVisible: shellVisible);
         });
+        _schedulePersistPanelWidths();
       },
     );
   }
@@ -757,11 +798,17 @@ class _MainLayoutState extends ConsumerState<MainLayout> with WindowListener {
   }
 }
 
-/// 平时几乎看不见，悬停时用强调色标出可拖区域。
+/// 平时几乎看不见，悬停时用强调色标出可拖区域；双击重置默认宽度。
 class _ColumnSplitter extends StatefulWidget {
-  const _ColumnSplitter({required this.onPanUpdate});
+  const _ColumnSplitter({
+    required this.onPanUpdate,
+    this.onDoubleTap,
+    this.tooltip,
+  });
 
   final GestureDragUpdateCallback onPanUpdate;
+  final VoidCallback? onDoubleTap;
+  final String? tooltip;
 
   @override
   State<_ColumnSplitter> createState() => _ColumnSplitterState();
@@ -773,12 +820,14 @@ class _ColumnSplitterState extends State<_ColumnSplitter> {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    return MouseRegion(
+    Widget bar = MouseRegion(
       cursor: SystemMouseCursors.resizeColumn,
       onEnter: (_) => setState(() => _hover = true),
       onExit: (_) => setState(() => _hover = false),
       child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
         onPanUpdate: widget.onPanUpdate,
+        onDoubleTap: widget.onDoubleTap,
         child: Container(
           width: 3,
           color: _hover
@@ -787,5 +836,10 @@ class _ColumnSplitterState extends State<_ColumnSplitter> {
         ),
       ),
     );
+    final tip = widget.tooltip;
+    if (tip != null && tip.isNotEmpty) {
+      bar = Tooltip(message: tip, waitDuration: const Duration(milliseconds: 600), child: bar);
+    }
+    return bar;
   }
 }

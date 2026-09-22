@@ -75,6 +75,8 @@ class AppConfig {
       'comfyDeleteRemoteAfterDownload';
   static const _kComfyLeftSplit = 'comfyLeftSplit';
   static const _kComfyLeftRailWidth = 'comfyLeftRailWidth';
+  static const _kMainTreeWidth = 'mainTreeWidth';
+  static const _kMainShellWidth = 'mainShellWidth';
 
   static const defaultComfyBaseUrl = 'http://127.0.0.1:8188';
   /// 生成面板左侧：URL 列表占比（相对模板绑定区）。模板更常点，默认少给实例。
@@ -85,6 +87,13 @@ class AppConfig {
   static const defaultComfyLeftRailWidth = 230.0;
   static const comfyLeftRailWidthMin = 180.0;
   static const comfyLeftRailWidthMax = 480.0;
+  /// 主界面左栏（目录树）宽度。
+  static const defaultMainTreeWidth = 280.0;
+  static const mainTreeWidthMin = 180.0;
+  static const mainTreeWidthMax = 500.0;
+  /// 主界面右栏（终端）默认占「中+右」可用宽度的比例（未记忆过绝对值时）。
+  static const defaultMainShellRatio = 0.4;
+  static const mainShellWidthMin = 280.0;
 
   static const defaultStartCmds = <StartCmd>[
     StartCmd(name: 'opencode', command: 'opencode'),
@@ -128,6 +137,9 @@ class AppConfig {
   bool _comfyDeleteRemoteAfterDownload = true;
   double _comfyLeftSplit = defaultComfyLeftSplit;
   double _comfyLeftRailWidth = defaultComfyLeftRailWidth;
+  double _mainTreeWidth = defaultMainTreeWidth;
+  /// null：尚未记忆，主界面首次布局按 [defaultMainShellRatio] 计算。
+  double? _mainShellWidth;
   AssetPanelPrefs _assetPanelPrefs = AssetPanelPrefs.defaults();
 
   String get projectRoot => _projectRoot;
@@ -144,6 +156,10 @@ class AppConfig {
   double get comfyLeftSplit => _comfyLeftSplit;
   /// 生成面板左侧实例/模板栏宽度。
   double get comfyLeftRailWidth => _comfyLeftRailWidth;
+  /// 主界面左栏（目录树）宽度。
+  double get mainTreeWidth => _mainTreeWidth;
+  /// 主界面右栏（终端）宽度；null 表示按默认比例。
+  double? get mainShellWidth => _mainShellWidth;
   /// 素材栏偏好整包（视图 / 列宽 / 排序）。
   AssetPanelPrefs get assetPanelPrefs => _assetPanelPrefs;
   /// `grid` | `list`
@@ -208,6 +224,13 @@ class AppConfig {
     _comfyLeftRailWidth =
         (prefs.getDouble(_kComfyLeftRailWidth) ?? defaultComfyLeftRailWidth)
             .clamp(comfyLeftRailWidthMin, comfyLeftRailWidthMax);
+    _mainTreeWidth =
+        (prefs.getDouble(_kMainTreeWidth) ?? defaultMainTreeWidth)
+            .clamp(mainTreeWidthMin, mainTreeWidthMax);
+    _mainShellWidth = prefs
+        .getDouble(_kMainShellWidth)
+        ?.clamp(mainShellWidthMin, 2400.0)
+        .toDouble();
     _assetPanelPrefs = await _loadAssetPanelPrefs(prefs);
   }
 
@@ -407,6 +430,20 @@ class AppConfig {
         value.clamp(comfyLeftRailWidthMin, comfyLeftRailWidthMax).toDouble();
     final prefs = await SharedPreferences.getInstance();
     await prefs.setDouble(_kComfyLeftRailWidth, _comfyLeftRailWidth);
+  }
+
+  Future<void> setMainTreeWidth(double value) async {
+    _mainTreeWidth =
+        value.clamp(mainTreeWidthMin, mainTreeWidthMax).toDouble();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setDouble(_kMainTreeWidth, _mainTreeWidth);
+  }
+
+  Future<void> setMainShellWidth(double value) async {
+    _mainShellWidth =
+        value.clamp(mainShellWidthMin, 2400.0).toDouble();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setDouble(_kMainShellWidth, _mainShellWidth!);
   }
 
   static List<ComfyServer> _loadComfyServers(

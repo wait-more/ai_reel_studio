@@ -4920,65 +4920,69 @@ class _ComfyJobSplitterState extends State<_ComfyJobSplitter> {
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
     final active = _hover || _dragging;
-    return MouseRegion(
-      cursor: SystemMouseCursors.resizeUpDown,
-      onEnter: (_) => setState(() => _hover = true),
-      onExit: (_) {
-        if (!_dragging) setState(() => _hover = false);
-      },
-      child: Listener(
-        behavior: HitTestBehavior.opaque,
-        onPointerDown: (e) {
-          final now = DateTime.now();
-          final doubleTap = _lastTap != null &&
-              now.difference(_lastTap!) < const Duration(milliseconds: 280);
-          _lastTap = now;
-          if (doubleTap) {
-            _dragging = false;
+    return Tooltip(
+      message: '拖动调节任务区高度 · 双击重置',
+      waitDuration: const Duration(milliseconds: 600),
+      child: MouseRegion(
+        cursor: SystemMouseCursors.resizeUpDown,
+        onEnter: (_) => setState(() => _hover = true),
+        onExit: (_) {
+          if (!_dragging) setState(() => _hover = false);
+        },
+        child: Listener(
+          behavior: HitTestBehavior.opaque,
+          onPointerDown: (e) {
+            final now = DateTime.now();
+            final doubleTap = _lastTap != null &&
+                now.difference(_lastTap!) < const Duration(milliseconds: 280);
+            _lastTap = now;
+            if (doubleTap) {
+              _dragging = false;
+              _moved = false;
+              _lastY = null;
+              widget.onReset();
+              return;
+            }
+            _dragging = true;
             _moved = false;
+            _lastY = e.position.dy;
+            setState(() {});
+          },
+          onPointerMove: (e) {
+            if (!_dragging || _lastY == null) return;
+            final dy = e.position.dy - _lastY!;
+            if (dy == 0) return;
+            _lastY = e.position.dy;
+            if (!_moved) {
+              _moved = true;
+              widget.onDragStart();
+            }
+            widget.onDragDelta(dy);
+          },
+          onPointerUp: (_) {
+            _dragging = false;
             _lastY = null;
-            widget.onReset();
-            return;
-          }
-          _dragging = true;
-          _moved = false;
-          _lastY = e.position.dy;
-          setState(() {});
-        },
-        onPointerMove: (e) {
-          if (!_dragging || _lastY == null) return;
-          final dy = e.position.dy - _lastY!;
-          if (dy == 0) return;
-          _lastY = e.position.dy;
-          if (!_moved) {
-            _moved = true;
-            widget.onDragStart();
-          }
-          widget.onDragDelta(dy);
-        },
-        onPointerUp: (_) {
-          _dragging = false;
-          _lastY = null;
-          _moved = false;
-          if (mounted) setState(() => _hover = false);
-        },
-        onPointerCancel: (_) {
-          _dragging = false;
-          _lastY = null;
-          _moved = false;
-          if (mounted) setState(() => _hover = false);
-        },
-        child: SizedBox(
-          height: 14,
-          child: Center(
-            child: Container(
-              height: active ? 3 : 1,
-              margin: const EdgeInsets.symmetric(horizontal: 24),
-              decoration: BoxDecoration(
-                color: active
-                    ? cs.primary.withValues(alpha: 0.9)
-                    : cs.outlineVariant.withValues(alpha: 0.55),
-                borderRadius: BorderRadius.circular(2),
+            _moved = false;
+            if (mounted) setState(() => _hover = false);
+          },
+          onPointerCancel: (_) {
+            _dragging = false;
+            _lastY = null;
+            _moved = false;
+            if (mounted) setState(() => _hover = false);
+          },
+          child: SizedBox(
+            height: 14,
+            child: Center(
+              child: Container(
+                height: active ? 3 : 1,
+                margin: const EdgeInsets.symmetric(horizontal: 24),
+                decoration: BoxDecoration(
+                  color: active
+                      ? cs.primary.withValues(alpha: 0.9)
+                      : cs.outlineVariant.withValues(alpha: 0.55),
+                  borderRadius: BorderRadius.circular(2),
+                ),
               ),
             ),
           ),
@@ -5011,54 +5015,58 @@ class _ComfyLeftRailSplitterState extends State<_ComfyLeftRailSplitter> {
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
     final active = _hover || _dragging;
-    return MouseRegion(
-      cursor: SystemMouseCursors.resizeColumn,
-      onEnter: (_) => setState(() => _hover = true),
-      onExit: (_) {
-        if (!_dragging) setState(() => _hover = false);
-      },
-      child: Listener(
-        behavior: HitTestBehavior.opaque,
-        onPointerDown: (e) {
-          final now = DateTime.now();
-          final doubleTap = _lastTap != null &&
-              now.difference(_lastTap!) < const Duration(milliseconds: 280);
-          _lastTap = now;
-          if (doubleTap) {
+    return Tooltip(
+      message: '拖动调节左侧栏宽度 · 双击重置',
+      waitDuration: const Duration(milliseconds: 600),
+      child: MouseRegion(
+        cursor: SystemMouseCursors.resizeColumn,
+        onEnter: (_) => setState(() => _hover = true),
+        onExit: (_) {
+          if (!_dragging) setState(() => _hover = false);
+        },
+        child: Listener(
+          behavior: HitTestBehavior.opaque,
+          onPointerDown: (e) {
+            final now = DateTime.now();
+            final doubleTap = _lastTap != null &&
+                now.difference(_lastTap!) < const Duration(milliseconds: 280);
+            _lastTap = now;
+            if (doubleTap) {
+              _dragging = false;
+              _lastX = null;
+              widget.onReset();
+              return;
+            }
+            _dragging = true;
+            _lastX = e.position.dx;
+            setState(() {});
+          },
+          onPointerMove: (e) {
+            if (!_dragging || _lastX == null) return;
+            final dx = e.position.dx - _lastX!;
+            if (dx == 0) return;
+            _lastX = e.position.dx;
+            widget.onDragDelta(dx);
+          },
+          onPointerUp: (_) {
             _dragging = false;
             _lastX = null;
-            widget.onReset();
-            return;
-          }
-          _dragging = true;
-          _lastX = e.position.dx;
-          setState(() {});
-        },
-        onPointerMove: (e) {
-          if (!_dragging || _lastX == null) return;
-          final dx = e.position.dx - _lastX!;
-          if (dx == 0) return;
-          _lastX = e.position.dx;
-          widget.onDragDelta(dx);
-        },
-        onPointerUp: (_) {
-          _dragging = false;
-          _lastX = null;
-          if (mounted) setState(() => _hover = false);
-        },
-        onPointerCancel: (_) {
-          _dragging = false;
-          _lastX = null;
-          if (mounted) setState(() => _hover = false);
-        },
-        child: SizedBox(
-          width: 8,
-          child: Center(
-            child: Container(
-              width: active ? 3 : 1,
-              color: active
-                  ? cs.primary.withValues(alpha: 0.9)
-                  : cs.outlineVariant.withValues(alpha: 0.7),
+            if (mounted) setState(() => _hover = false);
+          },
+          onPointerCancel: (_) {
+            _dragging = false;
+            _lastX = null;
+            if (mounted) setState(() => _hover = false);
+          },
+          child: SizedBox(
+            width: 8,
+            child: Center(
+              child: Container(
+                width: active ? 3 : 1,
+                color: active
+                    ? cs.primary.withValues(alpha: 0.9)
+                    : cs.outlineVariant.withValues(alpha: 0.7),
+              ),
             ),
           ),
         ),
