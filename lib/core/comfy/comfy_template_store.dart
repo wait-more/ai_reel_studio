@@ -272,7 +272,10 @@ class ComfyTemplateStore {
     final dir = ensureTemplatesDir();
     if (dir == null) throw StateError('未配置项目根');
 
-    final safeBase = _sanitizeFileBase(name);
+    final trimmed = name.trim().isEmpty ? 'template' : name.trim();
+    await _ensureUniqueDisplayName(trimmed, exceptId: existingId);
+
+    final safeBase = _sanitizeFileBase(trimmed);
     final id = existingId ?? 'tpl_${DateTime.now().millisecondsSinceEpoch}';
     final workflowFile = existingWorkflowFile ?? '$safeBase.workflow.json';
     final workflowText = ComfyTemplate.prettyJson(workflow);
@@ -282,7 +285,7 @@ class ComfyTemplateStore {
 
     final template = ComfyTemplate(
       id: id,
-      name: name.trim().isEmpty ? safeBase : name.trim(),
+      name: trimmed,
       workflowFile: workflowFile,
       workflowHash: hash,
       nodes: nodes,
@@ -307,6 +310,45 @@ class ComfyTemplateStore {
     }
     final bindings = await loadBindings();
     await saveBindings(bindings.withoutTemplate(template.id));
+  }
+
+  /// 仅改显示名：id / 磁盘文件名 / workflow 引用均不变。同名则抛错（大小写敏感）。
+  static Future<ComfyTemplate> renameTemplate({
+    required ComfyTemplate template,
+    required String newName,
+  }) async {
+    final name = newName.trim();
+    if (name.isEmpty) {
+      throw StateError('名称不能为空');
+    }
+    final path = template.templatePath;
+    if (path == null || path.isEmpty) {
+      throw StateError('模板文件路径未知');
+    }
+    final file = File(path);
+    if (!await file.exists()) {
+      throw StateError('找不到模板文件：$path');
+    }
+
+    await _ensureUniqueDisplayName(name, exceptId: template.id);
+
+    final updated = template.copyWith(name: name);
+    await file.writeAsString(ComfyTemplate.prettyJson(updated.toJson()));
+    return updated;
+  }
+
+  static Future<void> _ensureUniqueDisplayName(
+    String name, {
+    String? exceptId,
+  }) async {
+    final trimmed = name.trim();
+    if (trimmed.isEmpty) throw StateError('名称不能为空');
+    for (final t in await loadTemplates()) {
+      if (exceptId != null && t.id == exceptId) continue;
+      if (t.name.trim() == trimmed) {
+        throw StateError('已存在同名模板「${t.name}」');
+      }
+    }
   }
 
   static Future<ComfyBindings> bindTemplates({

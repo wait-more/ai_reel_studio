@@ -96,6 +96,89 @@ class _ComfyTemplateLibraryDialogState
     if (mounted) showGlobalToast(context, '已更新模板「${updated.name}」');
   }
 
+  Future<void> _rename(ComfyTemplate t) async {
+    final ctrl = TextEditingController(text: t.name);
+    String? error;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (ctx, setLocal) {
+            return AlertDialog(
+              title: const Text('重命名模板'),
+              content: SizedBox(
+                width: 360,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    TextField(
+                      controller: ctrl,
+                      autofocus: true,
+                      decoration: InputDecoration(
+                        labelText: '显示名称',
+                        errorText: error,
+                        border: const OutlineInputBorder(),
+                        isDense: true,
+                      ),
+                      onSubmitted: (_) => Navigator.pop(ctx, true),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      '仅改显示名，不改磁盘文件名与模板 id；绑定不受影响。',
+                      style: Theme.of(ctx).textTheme.bodySmall?.copyWith(
+                            color: Theme.of(ctx).colorScheme.onSurfaceVariant,
+                          ),
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx, false),
+                  child: const Text('取消'),
+                ),
+                FilledButton(
+                  onPressed: () {
+                    final next = ctrl.text.trim();
+                    if (next.isEmpty) {
+                      setLocal(() => error = '名称不能为空');
+                      return;
+                    }
+                    if (next == t.name.trim()) {
+                      Navigator.pop(ctx, false);
+                      return;
+                    }
+                    final clash = _templates.any(
+                      (o) => o.id != t.id && o.name.trim() == next,
+                    );
+                    if (clash) {
+                      setLocal(() => error = '已存在同名模板');
+                      return;
+                    }
+                    Navigator.pop(ctx, true);
+                  },
+                  child: const Text('确定'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+    final next = ctrl.text.trim();
+    ctrl.dispose();
+    if (ok != true || next.isEmpty || next == t.name.trim()) return;
+    try {
+      final updated =
+          await ComfyTemplateStore.renameTemplate(template: t, newName: next);
+      await _reload();
+      if (mounted) showGlobalToast(context, '已重命名为「${updated.name}」');
+    } catch (e) {
+      if (mounted) showGlobalToast(context, '$e');
+    }
+  }
+
   Future<void> _delete(ComfyTemplate t) async {
     final ok = await showDialog<bool>(
       context: context,
@@ -165,7 +248,7 @@ class _ComfyTemplateLibraryDialogState
             Padding(
               padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
               child: Text(
-                '在此管理模板的导入、暴露配置与删除。生成面板只负责把模板绑定到 URL。',
+                '在此管理模板的导入、重命名、暴露配置与删除。生成面板只负责把模板绑定到 URL。',
                 style: Theme.of(context).textTheme.bodySmall?.copyWith(
                       color: cs.onSurfaceVariant,
                     ),
@@ -199,6 +282,10 @@ class _ComfyTemplateLibraryDialogState
                                   trailing: Row(
                                     mainAxisSize: MainAxisSize.min,
                                     children: [
+                                      TextButton(
+                                        onPressed: () => _rename(t),
+                                        child: const Text('重命名'),
+                                      ),
                                       TextButton(
                                         onPressed: () => _reconfigure(t),
                                         child: const Text('重新配置'),
