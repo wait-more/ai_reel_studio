@@ -18,6 +18,7 @@ import '../../core/fs_drag.dart';
 import '../../core/path_ellipsis_text.dart';
 import '../../core/providers.dart';
 import '../../core/toast.dart';
+import '../../core/ui_palette.dart';
 import '../media/media_hover_preview.dart';
 import 'comfy_template_library.dart';
 
@@ -876,6 +877,33 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
     }
   }
 
+  /// 当前文件所在目录中、符合该字段类型的文件（按文件名排序）。
+  List<String> _siblingMediaPaths(ComfyExposedField field, String currentPath) {
+    final trimmed = currentPath.trim();
+    if (trimmed.isEmpty) return const [];
+    final dirPath = p.dirname(trimmed);
+    if (dirPath.isEmpty || dirPath == '.') return const [];
+    final dir = Directory(dirPath);
+    if (!dir.existsSync()) return const [];
+    final out = <String>[];
+    try {
+      for (final ent in dir.listSync(followLinks: false)) {
+        if (ent is! File) continue;
+        if (!_mediaMatches(field.widget, ent.path)) continue;
+        out.add(ent.path);
+      }
+    } catch (_) {
+      return const [];
+    }
+    out.sort(
+      (a, b) => p
+          .basename(a)
+          .toLowerCase()
+          .compareTo(p.basename(b).toLowerCase()),
+    );
+    return out;
+  }
+
   bool _nodeCanAcceptMediaDrop(ComfyExposedNode node, FsDragItem item) {
     for (final e in item.items) {
       if (e.isDir) continue;
@@ -1310,6 +1338,7 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
     required BuildContext anchorContext,
     required double width,
     required Widget Function(BuildContext context, ColorScheme cs) builder,
+    double estimatedHeight = 220,
   }) {
     final box = anchorContext.findRenderObject() as RenderBox?;
     final overlay = Overlay.of(anchorContext).context.findRenderObject()
@@ -1323,8 +1352,7 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
     final overlaySize = overlay.size;
     const gap = 6.0;
     const margin = 8.0;
-    // 预估高度：尽量贴按钮下方；空间不够则翻到上方。
-    const estimatedHeight = 220.0;
+    final estH = estimatedHeight.clamp(120.0, overlaySize.height - margin * 2);
 
     var left = topLeft.dx + size.width - width;
     if (left < margin) left = margin;
@@ -1333,8 +1361,8 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
     }
 
     var top = topLeft.dy + size.height + gap;
-    if (top + estimatedHeight > overlaySize.height - margin) {
-      top = topLeft.dy - estimatedHeight - gap;
+    if (top + estH > overlaySize.height - margin) {
+      top = topLeft.dy - estH - gap;
       if (top < margin) top = margin;
     }
 
@@ -1351,7 +1379,7 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
                 top: top,
                 width: width,
                 child: Material(
-                  color: cs.surface,
+                  color: cs.surfaceContainerHigh,
                   elevation: 10,
                   shadowColor: Colors.black.withValues(alpha: 0.28),
                   borderRadius: BorderRadius.circular(12),
@@ -1913,7 +1941,147 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
     if (result == null || result.files.isEmpty) return;
     final path = result.files.single.path;
     if (path == null) return;
+    if (!_mediaMatches(field.widget, path)) {
+      if (mounted) showGlobalToast(context, '文件类型与字段不匹配');
+      return;
+    }
     _setFieldValue(field.id, path);
+  }
+
+  String _mediaKindLabel(ComfyWidgetKind kind) => switch (kind) {
+        ComfyWidgetKind.image => '图片',
+        ComfyWidgetKind.audio => '音频',
+        ComfyWidgetKind.video => '视频',
+        _ => '文件',
+      };
+
+  IconData _mediaKindIcon(ComfyWidgetKind kind) => switch (kind) {
+        ComfyWidgetKind.image => Icons.image_outlined,
+        ComfyWidgetKind.audio => Icons.audiotrack,
+        ComfyWidgetKind.video => Icons.videocam_outlined,
+        _ => Icons.insert_drive_file_outlined,
+      };
+
+  /// 锚定在操作按钮旁，列出同目录内符合类型的文件供切换。
+  Future<void> _openSiblingMediaPicker({
+    required BuildContext anchorContext,
+    required ComfyExposedField field,
+    required String currentPath,
+  }) async {
+    final siblings = _siblingMediaPaths(field, currentPath);
+    final folderName = p.basename(p.dirname(currentPath));
+    final folderPath = p.dirname(currentPath);
+    final kindLabel = _mediaKindLabel(field.widget);
+    final kindIcon = _mediaKindIcon(field.widget);
+    final currentIndex = siblings.indexOf(currentPath);
+
+    final picked = await _showAnchoredPopup<String>(
+      anchorContext: anchorContext,
+      width: 300,
+      estimatedHeight: 320,
+      builder: (ctx, cs) {
+        return Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 10, 12, 4),
+              child: Row(
+                children: [
+                  Icon(kindIcon, size: 16, color: cs.primary),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      '同目录$kindLabel',
+                      style: Theme.of(ctx).textTheme.titleSmall?.copyWith(
+                            fontWeight: FontWeight.w700,
+                          ),
+                    ),
+                  ),
+                  Text(
+                    siblings.isEmpty ? '0' : '${siblings.length}',
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: cs.onSurfaceVariant,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    folderName.isEmpty ? folderPath : folderName,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                      color: cs.onSurface,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  PathEllipsisText(
+                    folderPath,
+                    style: TextStyle(
+                      fontSize: 10.5,
+                      color: cs.onSurfaceVariant,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const Divider(height: 1),
+            if (siblings.isEmpty)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(14, 16, 14, 18),
+                child: Text(
+                  '此目录没有其它可匹配的$kindLabel文件',
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: cs.onSurfaceVariant,
+                  ),
+                ),
+              )
+            else
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxHeight: 260),
+                child: ListView.separated(
+                  shrinkWrap: true,
+                  padding: const EdgeInsets.fromLTRB(8, 8, 8, 8),
+                  itemCount: siblings.length,
+                  controller: currentIndex > 2
+                      ? ScrollController(
+                          initialScrollOffset:
+                              ((currentIndex - 1) * 44.0).clamp(0, 9999),
+                        )
+                      : null,
+                  separatorBuilder: (_, _) => const SizedBox(height: 4),
+                  itemBuilder: (ctx, i) {
+                    final file = siblings[i];
+                    final selected = file == currentPath;
+                    final name = p.basename(file);
+                    final tint = UiPalette.forPath(file, isDir: false);
+                    return _HoverChoiceTile(
+                      selected: selected,
+                      icon: kindIcon,
+                      iconColor: tint,
+                      title: name,
+                      trailing: selected ? '当前' : null,
+                      onTap: () => Navigator.of(ctx).pop(file),
+                    );
+                  },
+                ),
+              ),
+          ],
+        );
+      },
+    );
+    if (picked == null || picked == currentPath || !mounted) return;
+    _setFieldValue(field.id, picked);
   }
 
   /// 当前字段已有媒体路径时，返回其父目录（须存在）；否则让系统沿用默认目录。
@@ -3961,6 +4129,30 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
                                         ),
                                       ),
                       ),
+                      if (!dropHot && !dropBlocked && path.isNotEmpty)
+                        Builder(
+                          builder: (btnCtx) => TextButton(
+                            style: TextButton.styleFrom(
+                              visualDensity: VisualDensity.compact,
+                              padding:
+                                  const EdgeInsets.symmetric(horizontal: 6),
+                              minimumSize: const Size(0, 32),
+                              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                            ),
+                            onPressed: () => _openSiblingMediaPicker(
+                              anchorContext: btnCtx,
+                              field: field,
+                              currentPath: path,
+                            ),
+                            child: const Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Text('同目录', style: TextStyle(fontSize: 12)),
+                                Icon(Icons.arrow_drop_down, size: 16),
+                              ],
+                            ),
+                          ),
+                        ),
                       if (!dropHot && !dropBlocked && canPreview)
                         MediaHoverPreviewIcon(path: path),
                       TextButton(
@@ -4100,6 +4292,102 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
 
 /// 生成面板媒体/路径拖入：可接收时立即提示；不可接收时悬停片刻再提示原因。
 /// 拖拽中指针按下，系统 [Tooltip] 往往不弹出，故用自绘浮层。
+/// 锚定选择列表项：悬停时抬高表面与描边，预选对比足够明显。
+class _HoverChoiceTile extends StatefulWidget {
+  const _HoverChoiceTile({
+    required this.selected,
+    required this.icon,
+    required this.iconColor,
+    required this.title,
+    required this.onTap,
+    this.trailing,
+  });
+
+  final bool selected;
+  final IconData icon;
+  final Color iconColor;
+  final String title;
+  final String? trailing;
+  final VoidCallback onTap;
+
+  @override
+  State<_HoverChoiceTile> createState() => _HoverChoiceTileState();
+}
+
+class _HoverChoiceTileState extends State<_HoverChoiceTile> {
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final selected = widget.selected;
+    final Color bg;
+    final Color border;
+    if (selected) {
+      bg = cs.primary.withValues(alpha: _hover ? 0.22 : 0.14);
+      border = cs.primary.withValues(alpha: _hover ? 0.9 : 0.65);
+    } else if (_hover) {
+      bg = cs.surfaceContainerHighest;
+      border = cs.outline.withValues(alpha: 0.9);
+    } else {
+      bg = cs.surfaceContainerLow.withValues(alpha: 0.75);
+      border = cs.outlineVariant.withValues(alpha: 0.5);
+    }
+
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: Material(
+        color: bg,
+        borderRadius: BorderRadius.circular(8),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(8),
+          hoverColor: Colors.transparent,
+          splashColor: cs.primary.withValues(alpha: 0.12),
+          onTap: widget.onTap,
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 90),
+            padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: border),
+            ),
+            child: Row(
+              children: [
+                Icon(widget.icon, size: 15, color: widget.iconColor),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    widget.title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight:
+                          selected || _hover ? FontWeight.w600 : FontWeight.w500,
+                      color: selected ? cs.primary : cs.onSurface,
+                    ),
+                  ),
+                ),
+                if (widget.trailing != null)
+                  Text(
+                    widget.trailing!,
+                    style: TextStyle(
+                      fontSize: 10.5,
+                      fontWeight: FontWeight.w600,
+                      color: cs.primary,
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _ComfyFsDropTarget extends StatefulWidget {
   const _ComfyFsDropTarget({
     required this.canAccept,
