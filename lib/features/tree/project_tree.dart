@@ -46,6 +46,7 @@ class _ProjectTreeState extends ConsumerState<ProjectTree> {
   final FocusNode _panelFocus = FocusNode(debugLabel: 'projectTree');
   final ScrollController _treeScrollController = ScrollController();
   String _searchText = '';
+  Offset _backgroundMenuPos = Offset.zero;
 
   /// 目录树单行大约高度（图标 16 + 上下 padding 4*2），用于估算滚动偏移。
   static const double _kTreeRowExtent = 28.0;
@@ -414,6 +415,60 @@ class _ProjectTreeState extends ConsumerState<ProjectTree> {
     if (!_panelFocus.hasFocus) _panelFocus.requestFocus();
   }
 
+  /// 指针是否落在某一树行上（空白处右键时用来避开条目自己的菜单）。
+  bool _hitTestTreeRow(Offset global) {
+    final root = ref.read(treeRootProvider);
+    if (root == null) return false;
+
+    bool walk(ScriptNode node) {
+      final box = _TreeRowKey(node.path)
+          .currentContext
+          ?.findRenderObject() as RenderBox?;
+      if (box != null && box.hasSize && box.attached) {
+        final rect = box.localToGlobal(Offset.zero) & box.size;
+        if (rect.contains(global)) return true;
+      }
+      if (node.isExpanded) {
+        for (final c in node.children) {
+          if (walk(c)) return true;
+        }
+      }
+      return false;
+    }
+
+    for (final c in root.children) {
+      if (walk(c)) return true;
+    }
+    return false;
+  }
+
+  Future<void> _showBackgroundMenu(BuildContext context) async {
+    final rootPath = AppConfig.instance.projectRoot.trim();
+    if (rootPath.isEmpty) return;
+    _ensurePanelFocus();
+    ref.read(treeSelectionProvider.notifier).state = [];
+    ref.read(treeSelectionByCtrlProvider.notifier).state = false;
+    final name = rootPath
+        .split(Platform.pathSeparator)
+        .where((e) => e.isNotEmpty)
+        .lastOrNull;
+    await showFsContextMenu(
+      context: context,
+      globalPosition: _backgroundMenuPos,
+      path: rootPath,
+      isDir: true,
+      displayName: (name == null || name.isEmpty) ? rootPath : name,
+      background: true,
+      surface: FsShortcutPane.tree,
+      onOpen: () async {},
+      onChanged: () {
+        ref.read(treeSelectionProvider.notifier).state = [];
+        ref.read(treeSelectionByCtrlProvider.notifier).state = false;
+        _handleTreeChanged('');
+      },
+    );
+  }
+
   void _whenNotTyping(VoidCallback action) {
     if (_isTypingInTextField()) return;
     action();
@@ -704,6 +759,12 @@ class _ProjectTreeState extends ConsumerState<ProjectTree> {
                   : GestureDetector(
                       behavior: HitTestBehavior.translucent,
                       onTapDown: (_) => _ensurePanelFocus(),
+                      onSecondaryTapDown: (d) =>
+                          _backgroundMenuPos = d.globalPosition,
+                      onSecondaryTap: () {
+                        if (_hitTestTreeRow(_backgroundMenuPos)) return;
+                        unawaited(_showBackgroundMenu(context));
+                      },
                       child: _buildTree(context, root),
                     ),
             ),
@@ -726,7 +787,12 @@ class _ProjectTreeState extends ConsumerState<ProjectTree> {
     final rootCreateEdit = creatingAtRoot ? inline : null;
 
     if (visibleRoots.isEmpty && rootCreateEdit == null) {
-      return const Center(child: Text('无匹配结果'));
+      return GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onSecondaryTapDown: (d) => _backgroundMenuPos = d.globalPosition,
+        onSecondaryTap: () => unawaited(_showBackgroundMenu(context)),
+        child: const Center(child: Text('无匹配结果')),
+      );
     }
 
     return ListView.builder(
