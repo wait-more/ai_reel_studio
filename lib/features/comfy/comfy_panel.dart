@@ -87,7 +87,7 @@ class _ComfyJob {
   _ComfyJobPhase phase = _ComfyJobPhase.preparing;
   String detail = '准备中…';
   ComfyRunStatus? runStatus;
-  /// 累计用时；运行中跟 [runStatus]，结束后固化。
+  /// 结束后固化的用时；进行中由 [displayElapsed] 按 [createdAt] 实时计算。
   Duration elapsed = Duration.zero;
   String? error;
   List<String> outputs = const [];
@@ -99,9 +99,14 @@ class _ComfyJob {
 
   bool get isTerminal => !isActive;
 
-  Duration get displayElapsed => runStatus?.elapsed ?? elapsed;
+  Duration get displayElapsed =>
+      isActive ? DateTime.now().difference(createdAt) : elapsed;
 
   String get elapsedLabel => _formatJobElapsed(displayElapsed);
+
+  void freezeElapsed() {
+    elapsed = DateTime.now().difference(createdAt);
+  }
 }
 
 enum _ServerLinkState { unknown, checking, online, offline }
@@ -146,6 +151,7 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
 
   Timer? _hotReloadTimer;
   Timer? _serverPingTimer;
+  Timer? _jobTickTimer;
   Timer? _sessionPersistTimer;
   Timer? _leftSplitPersistTimer;
   Timer? _leftRailPersistTimer;
@@ -166,6 +172,11 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
     _serverPingTimer = Timer.periodic(const Duration(seconds: 12), (_) {
       unawaited(_pingAllServers());
     });
+    // 进行中任务的「用时」本地每秒刷新，不依赖远端节点状态回调。
+    _jobTickTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted) return;
+      if (_jobs.any((j) => j.isActive)) setState(() {});
+    });
     WidgetsBinding.instance.addPostFrameCallback((_) {
       unawaited(_pingAllServers(showChecking: true));
     });
@@ -175,6 +186,7 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
   void dispose() {
     _hotReloadTimer?.cancel();
     _serverPingTimer?.cancel();
+    _jobTickTimer?.cancel();
     _sessionPersistTimer?.cancel();
     _leftSplitPersistTimer?.cancel();
     _leftRailPersistTimer?.cancel();
@@ -1802,7 +1814,6 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
         onStatus: (s) {
           _mutateJob(job.id, (j) {
             j.runStatus = s;
-            j.elapsed = s.elapsed;
             j.detail = s.detail;
             j.phase = switch (s.phase) {
               ComfyRunPhase.queued => _ComfyJobPhase.queued,
@@ -1811,6 +1822,7 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
               ComfyRunPhase.waiting => _ComfyJobPhase.queued,
               ComfyRunPhase.cancelled => _ComfyJobPhase.cancelled,
             };
+            if (j.isTerminal) j.freezeElapsed();
           });
         },
       );
@@ -1819,7 +1831,6 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
       _mutateJob(job.id, (j) {
         j.phase = _ComfyJobPhase.downloading;
         j.detail = '正在下载结果…';
-        if (j.runStatus != null) j.elapsed = j.runStatus!.elapsed;
       });
       final saved = await client.saveOutputsToDir(
         historyEntry: history,
@@ -1845,7 +1856,7 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
         j.phase = _ComfyJobPhase.completed;
         j.detail = detail;
         j.outputs = saved;
-        if (j.runStatus != null) j.elapsed = j.runStatus!.elapsed;
+        j.freezeElapsed();
         j.runStatus = null;
         j.cancelling = false;
         // 完成后自动展开，方便直接看输出；进行中默认折叠。
@@ -1857,7 +1868,7 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
         j.phase = _ComfyJobPhase.cancelled;
         j.detail = '已取消';
         j.error = null;
-        if (j.runStatus != null) j.elapsed = j.runStatus!.elapsed;
+        j.freezeElapsed();
         j.runStatus = null;
         j.cancelling = false;
       });
@@ -1866,7 +1877,7 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
         j.phase = _ComfyJobPhase.failed;
         j.detail = '失败';
         j.error = '$e';
-        if (j.runStatus != null) j.elapsed = j.runStatus!.elapsed;
+        j.freezeElapsed();
         j.runStatus = null;
         j.cancelling = false;
       });
