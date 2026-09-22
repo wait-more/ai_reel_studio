@@ -93,13 +93,48 @@ class ComfyPromptSendTarget {
 
 class ComfyPromptSendMemory {
   ComfyPromptSendMemory._();
-  static const _kKey = 'comfy_prompt_send_target_v1';
-  static const _kShortcuts = 'comfy_prompt_shortcuts_v1';
+  static const _legacyKey = 'comfy_prompt_send_target_v1';
+  static const _legacyShortcuts = 'comfy_prompt_shortcuts_v1';
+  static const _kKeyPrefix = 'comfy_prompt_send_target_v1:';
+  static const _kShortcutsPrefix = 'comfy_prompt_shortcuts_v1:';
+
+  static String _targetKey([String? projectRoot]) =>
+      '$_kKeyPrefix${prefsRootKey(projectRoot ?? AppConfig.instance.projectRoot)}';
+
+  static String _shortcutsKey([String? projectRoot]) =>
+      '$_kShortcutsPrefix${prefsRootKey(projectRoot ?? AppConfig.instance.projectRoot)}';
+
+  /// 旧全局键 → 当前项目根；只迁一次并删除全局键。
+  static Future<void> _migrateLegacyIfNeeded(SharedPreferences prefs) async {
+    final root = AppConfig.instance.projectRoot.trim();
+    if (root.isEmpty) return;
+    final targetKey = _targetKey(root);
+    final shortcutsKey = _shortcutsKey(root);
+
+    final scopedTarget = prefs.getString(targetKey);
+    if (scopedTarget == null || scopedTarget.isEmpty) {
+      final legacy = prefs.getString(_legacyKey);
+      if (legacy != null && legacy.isNotEmpty) {
+        await prefs.setString(targetKey, legacy);
+        await prefs.remove(_legacyKey);
+      }
+    }
+
+    final scopedShortcuts = prefs.getString(shortcutsKey);
+    if (scopedShortcuts == null || scopedShortcuts.isEmpty) {
+      final legacy = prefs.getString(_legacyShortcuts);
+      if (legacy != null && legacy.isNotEmpty) {
+        await prefs.setString(shortcutsKey, legacy);
+        await prefs.remove(_legacyShortcuts);
+      }
+    }
+  }
 
   static Future<ComfyPromptSendTarget?> load() async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      final raw = prefs.getString(_kKey);
+      await _migrateLegacyIfNeeded(prefs);
+      final raw = prefs.getString(_targetKey());
       if (raw == null || raw.isEmpty) return null;
       final map = jsonDecode(raw);
       if (map is! Map) return null;
@@ -113,14 +148,15 @@ class ComfyPromptSendMemory {
   static Future<void> save(ComfyPromptSendTarget target) async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      await prefs.setString(_kKey, jsonEncode(target.toJson()));
+      await prefs.setString(_targetKey(), jsonEncode(target.toJson()));
     } catch (_) {}
   }
 
   static Future<List<ComfyPromptSendTarget>> loadShortcuts() async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      final raw = prefs.getString(_kShortcuts);
+      await _migrateLegacyIfNeeded(prefs);
+      final raw = prefs.getString(_shortcutsKey());
       if (raw == null || raw.isEmpty) return const [];
       final list = jsonDecode(raw);
       if (list is! List) return const [];
@@ -138,7 +174,7 @@ class ComfyPromptSendMemory {
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString(
-        _kShortcuts,
+        _shortcutsKey(),
         jsonEncode(items.map((e) => e.toJson()).toList()),
       );
     } catch (_) {}
@@ -153,49 +189,68 @@ class ComfyPromptSendMemory {
       ref.read(comfyPromptLastTargetProvider.notifier).state = null;
       return;
     }
-    var t = loaded;
-    // 旧数据可能没有 displayLabel，尽量补全。
-    if (t.displayLabel.trim().isEmpty) {
-      try {
-        final servers = AppConfig.instance.comfyServers;
-        final templates = await ComfyTemplateStore.loadTemplates();
-        ComfyServer? server;
-        for (final s in servers) {
-          if (s.id == t.serverId) {
-            server = s;
-            break;
-          }
-        }
-        ComfyTemplate? template;
-        for (final x in templates) {
-          if (x.id == t.templateId) {
-            template = x;
-            break;
-          }
-        }
-        if (server != null && template != null) {
-          final srv = server;
-          final tpl = template;
-          for (final f in comfyPromptFieldsOf(tpl)) {
-            if (f.id == t.fieldId) {
-              t = ComfyPromptSendTarget(
-                serverId: t.serverId,
-                templateId: t.templateId,
-                fieldId: t.fieldId,
-                displayLabel: _displayLabelFor(
-                  server: srv,
-                  template: tpl,
-                  field: f,
-                ),
-              );
-              await save(t);
-              break;
-            }
-          }
-        }
-      } catch (_) {}
+    ref.read(comfyPromptLastTargetProvider.notifier).state =
+        await _withDisplayLabel(loaded);
+  }
+
+  static Future<void> hydrateProviderContainer(
+    ProviderContainer container,
+  ) async {
+    final loaded = await load();
+    final shortcuts = await loadShortcuts();
+    container.read(comfyPromptShortcutsProvider.notifier).state = shortcuts;
+    if (loaded == null) {
+      container.read(comfyPromptLastTargetProvider.notifier).state = null;
+      return;
     }
-    ref.read(comfyPromptLastTargetProvider.notifier).state = t;
+    container.read(comfyPromptLastTargetProvider.notifier).state =
+        await _withDisplayLabel(loaded);
+  }
+
+  static Future<ComfyPromptSendTarget> _withDisplayLabel(
+    ComfyPromptSendTarget loaded,
+  ) async {
+    var t = loaded;
+    if (t.displayLabel.trim().isNotEmpty) return t;
+    try {
+      final servers = AppConfig.instance.comfyServers;
+      final templates = await ComfyTemplateStore.loadTemplates();
+      ComfyServer? server;
+      for (final s in servers) {
+        if (s.id == t.serverId) {
+          server = s;
+          break;
+        }
+      }
+      ComfyTemplate? template;
+      for (final x in templates) {
+        if (x.id == t.templateId) {
+          template = x;
+          break;
+        }
+      }
+      if (server != null && template != null) {
+        final srv = server;
+        final tpl = template;
+        for (final f in comfyPromptFieldsOf(tpl)) {
+          if (f.id == t.fieldId) {
+            t = ComfyPromptSendTarget(
+              serverId: t.serverId,
+              templateId: t.templateId,
+              fieldId: t.fieldId,
+              displayLabel: _displayLabelFor(
+                server: srv,
+                template: tpl,
+                field: f,
+              ),
+            );
+            await save(t);
+            break;
+          }
+        }
+      }
+    } catch (_) {}
+    return t;
   }
 }
 

@@ -34,6 +34,8 @@ class _MainLayoutState extends ConsumerState<MainLayout> with WindowListener {
   /// null = 未记忆，首次布局按默认比例；拖过或重置后写入绝对值。
   double? _shellWidth = AppConfig.instance.mainShellWidth;
   WorkspaceSnapshot? _lastWorkspaceSnap;
+  /// 快照所属项目根；换根重建时 dispose 仍写回此根，避免污染新根桶。
+  String _workspaceRoot = AppConfig.instance.projectRoot;
   int _fsShortcutNonce = 0;
   bool _closePromptOpen = false;
   Timer? _panelWidthPersistTimer;
@@ -54,7 +56,7 @@ class _MainLayoutState extends ConsumerState<MainLayout> with WindowListener {
     final snap = _lastWorkspaceSnap;
     if (snap != null) {
       // 关闭前立刻落盘，避免去抖窗口内退出丢失最后一次状态
-      WorkspaceMemory.instance.saveNow(snap);
+      WorkspaceMemory.instance.saveNow(snap, projectRoot: _workspaceRoot);
     }
     super.dispose();
   }
@@ -241,7 +243,8 @@ class _MainLayoutState extends ConsumerState<MainLayout> with WindowListener {
       fileViews: ref.read(editorViewStatesProvider),
     );
     _lastWorkspaceSnap = snap;
-    WorkspaceMemory.instance.scheduleSave(snap);
+    _workspaceRoot = AppConfig.instance.projectRoot;
+    WorkspaceMemory.instance.scheduleSave(snap, projectRoot: _workspaceRoot);
   }
 
   void _sendAgentReference() {

@@ -116,9 +116,9 @@ class WorkspaceSnapshot {
     );
   }
 
-  /// 丢弃不存在或不在当前项目根下的路径。
-  WorkspaceSnapshot sanitized() {
-    final root = AppConfig.instance.projectRoot;
+  /// 丢弃不存在或不在 [root] 下的路径；[root] 默认当前项目根。
+  WorkspaceSnapshot sanitized({String? projectRoot}) {
+    final root = (projectRoot ?? AppConfig.instance.projectRoot).trim();
 
     bool alive(String path) {
       if (!isPathUnderRoot(path, root)) return false;
@@ -166,41 +166,65 @@ class WorkspaceSnapshot {
   }
 }
 
-/// 工作区记忆：读写 SharedPreferences，变更去抖写入。
+/// 工作区记忆：按项目根分桶读写 SharedPreferences，变更去抖写入。
 class WorkspaceMemory {
   WorkspaceMemory._();
   static final WorkspaceMemory instance = WorkspaceMemory._();
 
-  static const _prefsKey = 'workspace_snapshot_v1';
+  /// 旧版全局单 key；首次按根加载时迁到当前根并删除。
+  static const _legacyPrefsKey = 'workspace_snapshot_v1';
+  static const _prefsKeyPrefix = 'workspace_snapshot_v1:';
   Timer? _debounce;
 
-  Future<WorkspaceSnapshot> load() async {
+  String _keyFor(String projectRoot) =>
+      '$_prefsKeyPrefix${prefsRootKey(projectRoot)}';
+
+  Future<WorkspaceSnapshot> load({String? projectRoot}) async {
+    final root =
+        (projectRoot ?? AppConfig.instance.projectRoot).trim();
     final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getString(_prefsKey);
+    final key = _keyFor(root);
+    var raw = prefs.getString(key);
+    if ((raw == null || raw.isEmpty) && root.isNotEmpty) {
+      final legacy = prefs.getString(_legacyPrefsKey);
+      if (legacy != null && legacy.isNotEmpty) {
+        await prefs.setString(key, legacy);
+        await prefs.remove(_legacyPrefsKey);
+        raw = legacy;
+      }
+    }
     if (raw == null || raw.isEmpty) return const WorkspaceSnapshot();
     try {
       final map = jsonDecode(raw) as Map<String, dynamic>;
-      return WorkspaceSnapshot.fromJson(map).sanitized();
+      return WorkspaceSnapshot.fromJson(map).sanitized(projectRoot: root);
     } catch (_) {
       return const WorkspaceSnapshot();
     }
   }
 
-  /// 立刻写入（启动恢复后的首次、或关闭前可调用）。
-  Future<void> saveNow(WorkspaceSnapshot snap) async {
+  /// 立刻写入（启动恢复后的首次、或关闭前 / 换根前可调用）。
+  Future<void> saveNow(
+    WorkspaceSnapshot snap, {
+    String? projectRoot,
+  }) async {
     _debounce?.cancel();
+    final root =
+        (projectRoot ?? AppConfig.instance.projectRoot).trim();
+    if (root.isEmpty) return;
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(
-      _prefsKey,
-      jsonEncode(snap.sanitized().toJson()),
+      _keyFor(root),
+      jsonEncode(snap.sanitized(projectRoot: root).toJson()),
     );
   }
 
   /// 去抖保存，避免连续点选狂写磁盘。
-  void scheduleSave(WorkspaceSnapshot snap) {
+  void scheduleSave(WorkspaceSnapshot snap, {String? projectRoot}) {
+    final root =
+        (projectRoot ?? AppConfig.instance.projectRoot).trim();
     _debounce?.cancel();
     _debounce = Timer(const Duration(milliseconds: 450), () {
-      saveNow(snap);
+      saveNow(snap, projectRoot: root);
     });
   }
 }

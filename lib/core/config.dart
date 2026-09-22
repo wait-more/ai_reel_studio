@@ -56,6 +56,13 @@ class StartCmd {
   }
 }
 
+/// SharedPreferences 按项目根分桶用的后缀（分隔符统一 + 小写）。
+String prefsRootKey(String projectRoot) {
+  final root = projectRoot.trim();
+  if (root.isEmpty) return '_default';
+  return root.replaceAll('/', Platform.pathSeparator).toLowerCase();
+}
+
 class AppConfig {
   AppConfig._();
   static final AppConfig instance = AppConfig._();

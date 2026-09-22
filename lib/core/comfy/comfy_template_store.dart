@@ -35,9 +35,7 @@ class ComfyTemplateStore {
   static String? _bindingsPrefsKey() {
     final root = AppConfig.instance.projectRoot.trim();
     if (root.isEmpty) return null;
-    final normalized =
-        root.replaceAll('/', Platform.pathSeparator).toLowerCase();
-    return '$_kBindingsPrefix$normalized';
+    return '$_kBindingsPrefix${prefsRootKey(root)}';
   }
 
   static Directory? ensureTemplatesDir() {

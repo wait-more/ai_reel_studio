@@ -7,8 +7,10 @@ import '../../core/comfy/comfy_models.dart';
 import '../../core/comfy_prompt_bridge.dart';
 import '../../core/config.dart';
 import '../../core/key_chord.dart';
+import '../../core/project_registry.dart';
+import '../../core/project_reload.dart';
 import '../../core/providers.dart';
-import '../layout/main_layout.dart';
+import '../../core/toast.dart';
 
 class SettingsPage extends ConsumerWidget {
   final bool firstRun;
@@ -29,9 +31,38 @@ class SettingsPage extends ConsumerWidget {
   }
 }
 
-class _FirstRunPanel extends ConsumerWidget {
+class _FirstRunPanel extends StatefulWidget {
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  State<_FirstRunPanel> createState() => _FirstRunPanelState();
+}
+
+class _FirstRunPanelState extends State<_FirstRunPanel> {
+  List<ProjectEntry> _recent = const [];
+
+  @override
+  void initState() {
+    super.initState();
+    ProjectRegistry.instance.list().then((list) {
+      if (!mounted) return;
+      setState(() => _recent = list);
+    });
+  }
+
+  Future<void> _openRecent(ProjectEntry entry) async {
+    if (!entry.exists) {
+      showGlobalToast(context, '目录不存在，可到设置里移出列表');
+      return;
+    }
+    await switchProjectRootAndRebuild(
+      context,
+      newRoot: entry.path,
+      firstRun: true,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
     return Center(
       child: Container(
         constraints: const BoxConstraints(maxWidth: 520),
@@ -43,7 +74,7 @@ class _FirstRunPanel extends ConsumerWidget {
             Icon(
               Icons.movie_filter_outlined,
               size: 40,
-              color: Theme.of(context).colorScheme.primary,
+              color: scheme.primary,
             ),
             const SizedBox(height: 16),
             Text(
@@ -57,9 +88,7 @@ class _FirstRunPanel extends ConsumerWidget {
             Text(
               '先选定项目目录。Comfy 和终端可以进软件后再配。',
               textAlign: TextAlign.center,
-              style: TextStyle(
-                color: Theme.of(context).colorScheme.onSurfaceVariant,
-              ),
+              style: TextStyle(color: scheme.onSurfaceVariant),
             ),
             const SizedBox(height: 20),
             const _FirstRunStep(
@@ -80,6 +109,34 @@ class _FirstRunPanel extends ConsumerWidget {
             ),
             const SizedBox(height: 8),
             const _ProjectDirPicker(firstRun: true),
+            if (_recent.isNotEmpty) ...[
+              const SizedBox(height: 20),
+              Text(
+                '最近项目',
+                style: Theme.of(context).textTheme.titleSmall,
+              ),
+              const SizedBox(height: 8),
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxHeight: 180),
+                child: ListView(
+                  shrinkWrap: true,
+                  children: [
+                    for (final entry in _recent.take(8))
+                      _RecentProjectTile(
+                        entry: entry,
+                        isCurrent: false,
+                        onOpen: () => _openRecent(entry),
+                        onRemove: () async {
+                          await ProjectRegistry.instance.remove(entry.path);
+                          final list = await ProjectRegistry.instance.list();
+                          if (!mounted) return;
+                          setState(() => _recent = list);
+                        },
+                      ),
+                  ],
+                ),
+              ),
+            ],
           ],
         ),
       ),
@@ -255,11 +312,71 @@ class _SettingsShellState extends ConsumerState<_SettingsShell> {
   }
 }
 
-class _ProjectSection extends StatelessWidget {
+class _ProjectSection extends StatefulWidget {
   const _ProjectSection();
 
   @override
+  State<_ProjectSection> createState() => _ProjectSectionState();
+}
+
+class _ProjectSectionState extends State<_ProjectSection> {
+  List<ProjectEntry> _recent = const [];
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _reload();
+  }
+
+  Future<void> _reload() async {
+    final list = await ProjectRegistry.instance.list();
+    if (!mounted) return;
+    setState(() {
+      _recent = list;
+      _loading = false;
+    });
+  }
+
+  Future<void> _prune() async {
+    final n = await ProjectRegistry.instance.pruneMissing();
+    await _reload();
+    if (!mounted) return;
+    showGlobalToast(
+      context,
+      n == 0 ? '没有失效项' : '已移出 $n 个失效项',
+    );
+  }
+
+  Future<void> _remove(ProjectEntry entry) async {
+    await ProjectRegistry.instance.remove(entry.path);
+    await _reload();
+  }
+
+  Future<void> _open(ProjectEntry entry) async {
+    if (!entry.exists) {
+      showGlobalToast(context, '目录不存在，可移出列表');
+      return;
+    }
+    final current = AppConfig.instance.projectRoot.trim();
+    if (current.isNotEmpty &&
+        prefsRootKey(current) == prefsRootKey(entry.path)) {
+      if (mounted) Navigator.of(context).maybePop();
+      return;
+    }
+    await switchProjectRootAndRebuild(
+      context,
+      newRoot: entry.path,
+      firstRun: false,
+    );
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final current = AppConfig.instance.projectRoot.trim();
+    final currentKey = prefsRootKey(current);
+
     return ListView(
       children: [
         Text('项目目录', style: Theme.of(context).textTheme.titleMedium),
@@ -267,14 +384,165 @@ class _ProjectSection extends StatelessWidget {
         Text(
           '本地路径或已挂载的 UNC（如 \\\\nas\\share\\scripts）。',
           style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                color: Theme.of(context).colorScheme.onSurfaceVariant,
+                color: scheme.onSurfaceVariant,
               ),
         ),
         const SizedBox(height: 12),
         const _ProjectDirPicker(firstRun: false),
+        const SizedBox(height: 20),
+        Row(
+          children: [
+            Expanded(
+              child: Text(
+                '最近项目',
+                style: Theme.of(context).textTheme.titleMedium,
+              ),
+            ),
+            TextButton(
+              onPressed: _loading ? null : _prune,
+              child: const Text('清理失效项'),
+            ),
+          ],
+        ),
+        const SizedBox(height: 4),
+        Text(
+          '只记路径与最近打开时间；移出列表不会删除该项目下的本机记忆。',
+          style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                color: scheme.onSurfaceVariant,
+              ),
+        ),
+        const SizedBox(height: 8),
+        if (_loading)
+          const Padding(
+            padding: EdgeInsets.symmetric(vertical: 16),
+            child: Center(
+              child: SizedBox(
+                width: 20,
+                height: 20,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+            ),
+          )
+        else if (_recent.isEmpty)
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 12),
+            child: Text(
+              '还没有最近项目。选择目录后会自动出现在这里。',
+              style: TextStyle(fontSize: 13, color: scheme.onSurfaceVariant),
+            ),
+          )
+        else
+          for (final entry in _recent)
+            _RecentProjectTile(
+              entry: entry,
+              isCurrent: current.isNotEmpty &&
+                  prefsRootKey(entry.path) == currentKey,
+              onOpen: () => _open(entry),
+              onRemove: () => _remove(entry),
+            ),
       ],
     );
   }
+}
+
+class _RecentProjectTile extends StatelessWidget {
+  final ProjectEntry entry;
+  final bool isCurrent;
+  final VoidCallback onOpen;
+  final VoidCallback onRemove;
+
+  const _RecentProjectTile({
+    required this.entry,
+    required this.isCurrent,
+    required this.onOpen,
+    required this.onRemove,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final missing = !entry.exists;
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: missing ? null : onOpen,
+        borderRadius: BorderRadius.circular(8),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              Icon(
+                missing ? Icons.folder_off_outlined : Icons.folder_outlined,
+                size: 18,
+                color: missing
+                    ? scheme.outline
+                    : (isCurrent ? scheme.primary : scheme.onSurfaceVariant),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      entry.path,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 13,
+                        color: missing ? scheme.outline : scheme.onSurface,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      missing
+                          ? '目录不存在 · ${_formatOpenedAt(entry.lastOpenedAt)}'
+                          : _formatOpenedAt(entry.lastOpenedAt),
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: scheme.outline,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              if (isCurrent)
+                Padding(
+                  padding: const EdgeInsets.only(left: 6, right: 2),
+                  child: Text(
+                    '当前',
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: scheme.primary,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+              IconButton(
+                tooltip: '移出列表',
+                icon: const Icon(Icons.close, size: 16),
+                visualDensity: VisualDensity.compact,
+                onPressed: onRemove,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+String _formatOpenedAt(DateTime utc) {
+  final local = utc.toLocal();
+  final now = DateTime.now();
+  final diff = now.difference(local);
+  if (diff.inMinutes < 1) return '刚刚打开';
+  if (diff.inMinutes < 60) return '${diff.inMinutes} 分钟前';
+  if (diff.inHours < 24) return '${diff.inHours} 小时前';
+  if (diff.inDays < 7) return '${diff.inDays} 天前';
+  String two(int n) => n.toString().padLeft(2, '0');
+  return '${local.year}-${two(local.month)}-${two(local.day)} '
+      '${two(local.hour)}:${two(local.minute)}';
 }
 
 class _AppearanceSection extends ConsumerWidget {
@@ -1216,27 +1484,21 @@ class _AboutSectionState extends State<_AboutSection> {
   }
 }
 
-class _ProjectDirPicker extends ConsumerWidget {
+class _ProjectDirPicker extends StatelessWidget {
   final bool firstRun;
   const _ProjectDirPicker({required this.firstRun});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  Widget build(BuildContext context) {
     return InkWell(
       onTap: () async {
         final result = await FilePicker.getDirectoryPath();
-        if (result == null) return;
-        await AppConfig.instance.setProjectRoot(result);
-        if (!context.mounted) return;
-        if (firstRun) {
-          Navigator.of(context).pushAndRemoveUntil(
-            MaterialPageRoute(builder: (_) => const MainLayout()),
-            (route) => false,
-          );
-        } else {
-          // 触发项目树与物料网格按新根目录重建
-          ref.read(treeRefreshTickProvider.notifier).state++;
-        }
+        if (result == null || !context.mounted) return;
+        await switchProjectRootAndRebuild(
+          context,
+          newRoot: result,
+          firstRun: firstRun,
+        );
       },
       child: Container(
         padding: const EdgeInsets.all(12),

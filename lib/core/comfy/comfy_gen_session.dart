@@ -2,7 +2,9 @@ import 'dart:convert';
 
 import 'package:shared_preferences/shared_preferences.dart';
 
-/// 生成面板会话记忆（按「服务器 URL + 模板」一份，同键读写）。
+import '../config.dart';
+
+/// 生成面板会话记忆（按「项目根 + 服务器 + 模板」一份，同键读写）。
 ///
 /// 一并保存：
 /// - 节点排序 / 分类分区顺序
@@ -40,8 +42,20 @@ class ComfyGenSession {
   static const _kLegacyOrder = 'comfy_gen_node_order_v1:';
   static const _kLegacyEnabled = 'comfy_gen_node_enabled_v1:';
 
-  static String key(String serverId, String templateId) =>
+  /// 旧版无项目根：`comfy_gen_session_v1:server:template`。
+  static String _legacyKey(String serverId, String templateId) =>
       '$_kSessionPrefix$serverId:$templateId';
+
+  static String key(
+    String serverId,
+    String templateId, {
+    String? projectRoot,
+  }) {
+    final root = prefsRootKey(
+      projectRoot ?? AppConfig.instance.projectRoot,
+    );
+    return '$_kSessionPrefix$root:$serverId:$templateId';
+  }
 
   Map<String, dynamic> toJson() => {
         'order': order,
@@ -108,22 +122,43 @@ class ComfyGenSession {
     );
   }
 
+  static ComfyGenSession? _decode(String? raw) {
+    if (raw == null || raw.isEmpty) return null;
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is Map<String, dynamic>) {
+        return ComfyGenSession.fromJson(decoded);
+      }
+      if (decoded is Map) {
+        return ComfyGenSession.fromJson(Map<String, dynamic>.from(decoded));
+      }
+    } catch (_) {}
+    return null;
+  }
+
   static Future<ComfyGenSession> load({
     required String serverId,
     required String templateId,
   }) async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      final raw = prefs.getString(key(serverId, templateId));
-      if (raw != null && raw.isNotEmpty) {
-        final decoded = jsonDecode(raw);
-        if (decoded is Map<String, dynamic>) {
-          return ComfyGenSession.fromJson(decoded);
-        }
-        if (decoded is Map) {
-          return ComfyGenSession.fromJson(Map<String, dynamic>.from(decoded));
-        }
+      final scoped = key(serverId, templateId);
+      final fromScoped = _decode(prefs.getString(scoped));
+      if (fromScoped != null) return fromScoped;
+
+      // 旧版无 root：迁到当前项目根后删掉全局键，避免其它项目再吃到同一份。
+      final legacyRaw = prefs.getString(_legacyKey(serverId, templateId));
+      final fromLegacy = _decode(legacyRaw);
+      if (fromLegacy != null) {
+        await save(
+          serverId: serverId,
+          templateId: templateId,
+          session: fromLegacy,
+        );
+        await prefs.remove(_legacyKey(serverId, templateId));
+        return fromLegacy;
       }
+
       return await _migrateLegacy(prefs, serverId, templateId);
     } catch (_) {
       return const ComfyGenSession();
@@ -171,6 +206,10 @@ class ComfyGenSession {
         }
       }
     } catch (_) {}
+
+    if (order.isEmpty && expanded.isEmpty && enabled.isEmpty) {
+      return const ComfyGenSession();
+    }
 
     final session = ComfyGenSession(
       order: order,
