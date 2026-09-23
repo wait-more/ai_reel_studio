@@ -1008,21 +1008,25 @@ class _ComfyPromptShortcutsState extends ConsumerState<_ComfyPromptShortcuts> {
                       : '${shortcuts[i].name.trim()}：',
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: enabledIds.contains(shortcuts[i].serverId)
-                      ? null
-                      : TextStyle(color: cs.onSurface.withValues(alpha: 0.45)),
+                  style: (!enabledIds.contains(shortcuts[i].serverId) ||
+                          shortcuts[i].displayLabel.startsWith('已失效'))
+                      ? TextStyle(color: cs.onSurface.withValues(alpha: 0.45))
+                      : null,
                 ),
                 subtitle: () {
-                  final lines = [
+                  final lines = <String>[
                     if (shortcuts[i].name.trim().isNotEmpty)
                       shortcuts[i].displayLabel,
-                    if (!enabledIds.contains(shortcuts[i].serverId))
-                      '实例已关闭，菜单中隐藏',
                   ];
+                  if (!enabledIds.contains(shortcuts[i].serverId)) {
+                    lines.add('实例已关闭，菜单中隐藏');
+                  } else if (shortcuts[i].displayLabel.startsWith('已失效')) {
+                    lines.add('模板已删除或未绑定，请更新或删除此路径');
+                  }
                   if (lines.isEmpty) return null;
                   return Text(
                     lines.join('\n'),
-                    maxLines: 2,
+                    maxLines: 3,
                     overflow: TextOverflow.ellipsis,
                   );
                 }(),

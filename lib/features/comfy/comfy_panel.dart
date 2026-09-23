@@ -1084,6 +1084,7 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
       addTemplateIds: picked,
     );
     ref.read(comfyActionsTickProvider.notifier).state++;
+    await ComfyPromptSendMemory.refreshLabelsIntoRef(ref);
     if (mounted) showGlobalToast(context, '已绑定 ${picked.length} 个模板');
   }
 
@@ -1097,6 +1098,7 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
       setState(() => _selected = null);
     }
     ref.read(comfyActionsTickProvider.notifier).state++;
+    await ComfyPromptSendMemory.refreshLabelsIntoRef(ref);
   }
 
   /// 将当前模板的节点参数与 bypass 使能复制到其它 Comfy 实例，便于并行同跑。

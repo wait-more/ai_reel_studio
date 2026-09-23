@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/comfy/comfy_models.dart';
 import '../../core/comfy/comfy_template_store.dart';
+import '../../core/comfy_prompt_bridge.dart';
 import '../../core/providers.dart';
 import '../../core/toast.dart';
 import 'comfy_import_wizard.dart';
@@ -15,8 +16,9 @@ Future<void> showComfyTemplateLibrary(
   return showDialog<void>(
     context: context,
     builder: (ctx) => const _ComfyTemplateLibraryDialog(),
-  ).then((_) {
+  ).then((_) async {
     ref.read(comfyActionsTickProvider.notifier).state++;
+    await ComfyPromptSendMemory.refreshLabelsIntoRef(ref);
   });
 }
 
@@ -173,6 +175,7 @@ class _ComfyTemplateLibraryDialogState
       final updated =
           await ComfyTemplateStore.renameTemplate(template: t, newName: next);
       await _reload();
+      await ComfyPromptSendMemory.refreshLabelsIntoRef(ref);
       if (mounted) showGlobalToast(context, '已重命名为「${updated.name}」');
     } catch (e) {
       if (mounted) showGlobalToast(context, '$e');
@@ -206,6 +209,7 @@ class _ComfyTemplateLibraryDialogState
     if (ok != true) return;
     await ComfyTemplateStore.deleteTemplate(t);
     await _reload();
+    await ComfyPromptSendMemory.refreshLabelsIntoRef(ref);
     if (mounted) showGlobalToast(context, '已删除模板');
   }
 

@@ -182,75 +182,126 @@ class ComfyPromptSendMemory {
 
   /// 启动时/进入编辑器时灌入 provider，供右键菜单同步读取。
   static Future<void> hydrateProvider(WidgetRef ref) async {
-    final loaded = await load();
-    final shortcuts = await loadShortcuts();
-    ref.read(comfyPromptShortcutsProvider.notifier).state = shortcuts;
-    if (loaded == null) {
-      ref.read(comfyPromptLastTargetProvider.notifier).state = null;
-      return;
-    }
-    ref.read(comfyPromptLastTargetProvider.notifier).state =
-        await _withDisplayLabel(loaded);
+    await refreshLabelsIntoRef(ref);
   }
 
   static Future<void> hydrateProviderContainer(
     ProviderContainer container,
   ) async {
-    final loaded = await load();
-    final shortcuts = await loadShortcuts();
-    container.read(comfyPromptShortcutsProvider.notifier).state = shortcuts;
-    if (loaded == null) {
-      container.read(comfyPromptLastTargetProvider.notifier).state = null;
-      return;
-    }
-    container.read(comfyPromptLastTargetProvider.notifier).state =
-        await _withDisplayLabel(loaded);
+    await refreshLabelsIntoContainer(container);
   }
 
-  static Future<ComfyPromptSendTarget> _withDisplayLabel(
-    ComfyPromptSendTarget loaded,
+  /// 按当前实例 / 模板 / 绑定重算展示文案（重命名、删除、解绑后调用）。
+  static Future<void> refreshLabelsIntoRef(WidgetRef ref) async {
+    final result = await _refreshAllStored();
+    ref.read(comfyPromptShortcutsProvider.notifier).state = result.shortcuts;
+    ref.read(comfyPromptLastTargetProvider.notifier).state = result.last;
+  }
+
+  static Future<void> refreshLabelsIntoContainer(
+    ProviderContainer container,
   ) async {
-    var t = loaded;
-    if (t.displayLabel.trim().isNotEmpty) return t;
-    try {
-      final servers = AppConfig.instance.comfyServers;
-      final templates = await ComfyTemplateStore.loadTemplates();
-      ComfyServer? server;
-      for (final s in servers) {
-        if (s.id == t.serverId) {
-          server = s;
+    final result = await _refreshAllStored();
+    container.read(comfyPromptShortcutsProvider.notifier).state =
+        result.shortcuts;
+    container.read(comfyPromptLastTargetProvider.notifier).state = result.last;
+  }
+
+  static Future<
+      ({
+        ComfyPromptSendTarget? last,
+        List<ComfyPromptSendTarget> shortcuts,
+      })> _refreshAllStored() async {
+    final servers = AppConfig.instance.comfyServers;
+    final templates = await ComfyTemplateStore.loadTemplates();
+    final bindings = await ComfyTemplateStore.loadBindings();
+
+    final loadedLast = await load();
+    ComfyPromptSendTarget? last;
+    if (loadedLast != null) {
+      last = _refreshOne(
+        loadedLast,
+        servers: servers,
+        templates: templates,
+        bindings: bindings,
+      );
+      if (last.displayLabel != loadedLast.displayLabel) {
+        await save(last);
+      }
+    }
+
+    final loadedShortcuts = await loadShortcuts();
+    final shortcuts = [
+      for (final s in loadedShortcuts)
+        _refreshOne(
+          s,
+          servers: servers,
+          templates: templates,
+          bindings: bindings,
+        ),
+    ];
+    var shortcutsDirty = shortcuts.length != loadedShortcuts.length;
+    if (!shortcutsDirty) {
+      for (var i = 0; i < shortcuts.length; i++) {
+        if (shortcuts[i].displayLabel != loadedShortcuts[i].displayLabel) {
+          shortcutsDirty = true;
           break;
         }
       }
-      ComfyTemplate? template;
-      for (final x in templates) {
-        if (x.id == t.templateId) {
-          template = x;
-          break;
-        }
-      }
-      if (server != null && template != null) {
-        final srv = server;
-        final tpl = template;
-        for (final f in comfyPromptFieldsOf(tpl)) {
-          if (f.id == t.fieldId) {
-            t = ComfyPromptSendTarget(
-              serverId: t.serverId,
-              templateId: t.templateId,
-              fieldId: t.fieldId,
-              displayLabel: _displayLabelFor(
-                server: srv,
-                template: tpl,
-                field: f,
-              ),
-            );
-            await save(t);
-            break;
-          }
-        }
-      }
-    } catch (_) {}
-    return t;
+    }
+    if (shortcutsDirty) {
+      await saveShortcuts(shortcuts);
+    }
+
+    return (last: last, shortcuts: shortcuts);
+  }
+
+  static ComfyPromptSendTarget _refreshOne(
+    ComfyPromptSendTarget t, {
+    required List<ComfyServer> servers,
+    required List<ComfyTemplate> templates,
+    required ComfyBindings bindings,
+  }) {
+    final resolved = _resolveTarget(
+      last: t,
+      servers: servers,
+      templates: templates,
+      bindings: bindings,
+    );
+    if (resolved != null) {
+      final fresh = _displayLabelFor(
+        server: resolved.server,
+        template: resolved.template,
+        field: resolved.field,
+      );
+      if (fresh == t.displayLabel) return t;
+      return ComfyPromptSendTarget(
+        serverId: t.serverId,
+        templateId: t.templateId,
+        fieldId: t.fieldId,
+        displayLabel: fresh,
+        name: t.name,
+      );
+    }
+    return ComfyPromptSendTarget(
+      serverId: t.serverId,
+      templateId: t.templateId,
+      fieldId: t.fieldId,
+      displayLabel: _invalidDisplayLabel(t),
+      name: t.name,
+    );
+  }
+
+  static String _invalidDisplayLabel(ComfyPromptSendTarget t) {
+    var base = t.displayLabel.trim();
+    const prefix = '已失效 · ';
+    while (base.startsWith(prefix)) {
+      base = base.substring(prefix.length).trim();
+    }
+    if (base.isEmpty) {
+      base = '${t.serverId} · ${t.templateId} · ${t.fieldId}';
+    }
+    return '$prefix$base';
   }
 }
 
