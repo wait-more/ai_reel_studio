@@ -847,10 +847,30 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
     await _selectTemplate(template, persistCurrent: false);
     if (!mounted) return;
 
+    ComfyExposedNode? targetNode;
+    for (final n in _orderedNodes()) {
+      if (n.nodeId == req.nodeId) {
+        targetNode = n;
+        break;
+      }
+    }
+    final category = targetNode == null
+        ? null
+        : ComfyNodeGroup.sortCategory(targetNode.classType);
+
     setState(() {
       _values[req.fieldId] = req.text;
       _enabled[req.nodeId] = true;
-      _expanded[req.nodeId] = true;
+      // 展开所在分组，并在同组内只展开目标节点（与点击手风琴一致）。
+      if (category != null) {
+        _categoryExpanded['$category'] = true;
+        for (final n in _orderedNodes()) {
+          if (ComfyNodeGroup.sortCategory(n.classType) != category) continue;
+          _expanded[n.nodeId] = n.nodeId == req.nodeId;
+        }
+      } else {
+        _expanded[req.nodeId] = true;
+      }
       final ctrl = _textCtrls[req.fieldId];
       if (ctrl != null && ctrl.text != req.text) {
         ctrl.text = req.text;
@@ -858,24 +878,29 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
       }
     });
     _schedulePersistSession();
+    _focusInjectedPromptField(req.fieldId);
+  }
 
-    final focus = _textFocus[req.fieldId];
-    if (focus != null) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted) return;
-        focus.requestFocus();
-        final ctrl = _textCtrls[req.fieldId];
-        if (ctrl != null) {
-          ctrl.selection = TextSelection.collapsed(offset: ctrl.text.length);
-        }
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (!mounted || !focus.hasFocus) return;
-          final c = _textCtrls[req.fieldId];
-          if (c == null) return;
-          c.selection = TextSelection.collapsed(offset: c.text.length);
-        });
-      });
+  /// 填入后聚焦目标字段。分组刚展开时编辑器尚未挂载，多等几帧再要焦点。
+  void _focusInjectedPromptField(String fieldId) {
+    void tryFocus() {
+      if (!mounted) return;
+      final focus = _textFocus[fieldId];
+      if (focus == null) return;
+      focus.requestFocus();
+      final ctrl = _textCtrls[fieldId];
+      if (ctrl != null) {
+        ctrl.selection = TextSelection.collapsed(offset: ctrl.text.length);
+      }
     }
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      tryFocus();
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        tryFocus();
+        WidgetsBinding.instance.addPostFrameCallback((_) => tryFocus());
+      });
+    });
   }
 
   void _setAllExpanded(bool value) {
