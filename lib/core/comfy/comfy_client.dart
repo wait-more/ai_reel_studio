@@ -12,12 +12,67 @@ class ComfyClient {
   ComfyClient({
     required this.baseUrl,
     this.apiKey,
-  });
+  }) : _http = _newHttpClient();
 
   final String baseUrl;
   final String? apiKey;
 
-  final _http = HttpClient();
+  HttpClient _http;
+
+  /// 短 idle：经反向代理 / 跨网段时，过久复用半开连接会出现
+  /// 「Connection closed before full header」或 Windows「信号灯超时」。
+  static HttpClient _newHttpClient() {
+    return HttpClient()
+      ..connectionTimeout = const Duration(seconds: 20)
+      ..idleTimeout = const Duration(seconds: 2);
+  }
+
+  void _resetHttp() {
+    try {
+      _http.close(force: true);
+    } catch (_) {}
+    _http = _newHttpClient();
+  }
+
+  /// 是否像「连接被掐断 / 超时」这类可重试瞬时错误。
+  static bool isTransientTransportError(Object e) {
+    if (e is TimeoutException) return true;
+    if (e is SocketException) return true;
+    if (e is HttpException) {
+      final m = e.message.toLowerCase();
+      return m.contains('connection closed') ||
+          m.contains('connection reset') ||
+          m.contains('broken pipe') ||
+          m.contains('信号灯') ||
+          m.contains('semaphore') ||
+          m.contains('timed out') ||
+          m.contains('timeout');
+    }
+    final s = '$e'.toLowerCase();
+    return s.contains('connection closed') ||
+        s.contains('信号灯') ||
+        s.contains('semaphore timeout');
+  }
+
+  Future<T> _withTransportRetry<T>(
+    Future<T> Function() action, {
+    int maxAttempts = 3,
+  }) async {
+    Object? last;
+    for (var attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        return await action();
+      } catch (e) {
+        last = e;
+        if (attempt >= maxAttempts || !isTransientTransportError(e)) {
+          rethrow;
+        }
+        _resetHttp();
+        await Future<void>.delayed(Duration(milliseconds: 120 * attempt));
+      }
+    }
+    throw last ?? StateError('transport retry failed');
+  }
 
   String get _root {
     var u = baseUrl.trim();
@@ -25,7 +80,11 @@ class ComfyClient {
     return u;
   }
 
-  void close() => _http.close(force: true);
+  void close() {
+    try {
+      _http.close(force: true);
+    } catch (_) {}
+  }
 
   Uri _uri(String path, [Map<String, String>? query]) {
     final root = _root;
@@ -111,6 +170,10 @@ class ComfyClient {
   }
 
   /// 用 `/view` 探测 `input/` 是否已有该文件名（Range 只取 1 字节，避免整文件下载）。
+  ///
+  /// 注意：不要对 keep-alive 连接 `detachSocket`+`destroy`——在 Windows 上会污染
+  /// [HttpClient] 连接池，导致同客户端后续 `/prompt` 报信号灯超时 / Connection closed。
+  /// 本探测强制 `Connection: close`，并尽量 drain；超时再强拆。
   Future<bool> inputFileExists(String filename) async {
     final uri = _uri('/view', {
       'filename': filename,
@@ -120,27 +183,26 @@ class ComfyClient {
       final req = await _http.getUrl(uri);
       await _auth(req);
       req.headers.set(HttpHeaders.rangeHeader, 'bytes=0-0');
+      req.headers.set(HttpHeaders.connectionHeader, 'close');
       final res = await req.close().timeout(const Duration(seconds: 8));
       final code = res.statusCode;
       final exists = code == 200 || code == 206 || code == 416;
-      if (exists && (res.contentLength < 0 || res.contentLength > 64)) {
-        await _abortResponseBody(res);
-      } else {
-        await res.drain<void>();
-      }
+      await _consumeResponseBody(res);
       return exists;
     } catch (_) {
+      // 探测失败时保守视为不存在，走上传；并重置客户端以免半开连接留下。
+      _resetHttp();
       return false;
     }
   }
 
-  Future<void> _abortResponseBody(HttpClientResponse res) async {
+  Future<void> _consumeResponseBody(HttpClientResponse res) async {
     try {
-      final socket = await res.detachSocket();
-      socket.destroy();
+      await res.drain<void>().timeout(const Duration(seconds: 3));
     } catch (_) {
       try {
-        await res.drain<void>();
+        final socket = await res.detachSocket();
+        socket.destroy();
       } catch (_) {}
     }
   }
@@ -211,26 +273,31 @@ class ComfyClient {
       'prompt': workflow,
       'client_id': cid,
     };
-    final req = await _http.postUrl(_uri('/prompt'));
-    await _auth(req);
-    req.headers.contentType = ContentType.json;
-    req.add(utf8.encode(jsonEncode(payload)));
-    final res = await req.close();
-    final text = await res.transform(utf8.decoder).join();
-    if (res.statusCode < 200 || res.statusCode >= 300) {
-      throw ComfyApiException('提交失败 (${res.statusCode}): $text');
-    }
-    final map = jsonDecode(text) as Map<String, dynamic>;
-    if (map['node_errors'] != null &&
-        map['node_errors'] is Map &&
-        (map['node_errors'] as Map).isNotEmpty) {
-      throw ComfyApiException('节点错误: ${jsonEncode(map['node_errors'])}');
-    }
-    final id = map['prompt_id'] as String?;
-    if (id == null || id.isEmpty) {
-      throw ComfyApiException('响应缺少 prompt_id: $text');
-    }
-    return id;
+    final body = utf8.encode(jsonEncode(payload));
+    return _withTransportRetry(() async {
+      final req = await _http.postUrl(_uri('/prompt'));
+      await _auth(req);
+      req.headers.contentType = ContentType.json;
+      // 提交体可能较大；避免半开 keep-alive 被中间设备掐断。
+      req.headers.set(HttpHeaders.connectionHeader, 'close');
+      req.add(body);
+      final res = await req.close().timeout(const Duration(seconds: 60));
+      final text = await res.transform(utf8.decoder).join();
+      if (res.statusCode < 200 || res.statusCode >= 300) {
+        throw ComfyApiException('提交失败 (${res.statusCode}): $text');
+      }
+      final map = jsonDecode(text) as Map<String, dynamic>;
+      if (map['node_errors'] != null &&
+          map['node_errors'] is Map &&
+          (map['node_errors'] as Map).isNotEmpty) {
+        throw ComfyApiException('节点错误: ${jsonEncode(map['node_errors'])}');
+      }
+      final id = map['prompt_id'] as String?;
+      if (id == null || id.isEmpty) {
+        throw ComfyApiException('响应缺少 prompt_id: $text');
+      }
+      return id;
+    });
   }
 
   /// 先连 WS，再提交并等待完成（含采样进度）。返回 history 条目。
