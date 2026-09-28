@@ -601,6 +601,21 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
     }
   }
 
+  /// 从素材/生成切回文档时，IndexedStack 只露出编辑器，不会自动要回焦点；
+  /// 选区仍在，但 Ctrl+C 会被主布局当成文件复制吃掉。
+  void _ensureEditorFocusIfActive() {
+    if (!mounted || _isDir || _loading || _showPreview) return;
+    if (ref.read(contentModeProvider) != 'editor') return;
+    if (ref.read(selectedFileProvider) != widget.path) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _isDir || _loading || _showPreview) return;
+      if (ref.read(contentModeProvider) != 'editor') return;
+      if (ref.read(selectedFileProvider) != widget.path) return;
+      if (_editorFocus.hasFocus) return;
+      _editorFocus.requestFocus();
+    });
+  }
+
   void _onScrollChanged() {
     if (_jumpingToHeading || _restoringView) return;
     final scroller = _scrollController.verticalScroller;
@@ -1243,6 +1258,12 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
     ref.listen<String?>(selectedFileProvider, (prev, next) {
       if (next == widget.path) {
         _registerAgentRef();
+        _ensureEditorFocusIfActive();
+      }
+    });
+    ref.listen<String>(contentModeProvider, (prev, next) {
+      if (next == 'editor' && prev != 'editor') {
+        _ensureEditorFocusIfActive();
       }
     });
 
