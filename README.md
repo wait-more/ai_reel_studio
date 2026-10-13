@@ -116,10 +116,10 @@
 - **快捷启动**：设置里配置名称、命令、cwd（项目根或当前选中目录）。点芯片把命令发进当前终端。智能体已在跑时，会问是否新开 Tab。  
 - **「在终端打开」**：用目标文件夹作 cwd。智能体 Tab 不会为切目录乱发 `Set-Location`（除非这次启动明确要选中目录）。  
 - **OpenCode（当前 Tab 的 TUI 仍存活时）**  
-  - 左下角「会话」：列出该工作目录下的根会话（更新时间、当前项区分）。  
-  - 列表先出缓存再后台刷新，避免每次等 CLI。  
-  - 行内重命名、行内确认删除（删完列表仍开着并刷新）。  
-  - 优先 `POST /tui/select-session` 在同进程切会话；不行再带 `-s` 重拉。当前会话以 `/tui/active-session` 为准。  
+  - 统一走 `OpenCodeGateway` 门面：启动时探测本机 CLI 主版本，**版本分支只在 Gateway 内**；Shell UI 不写 `if (v2)`。  
+  - **V1**：`opencode --hostname/--port` + `db` 列会话 + `/tui/*` 切会话/新建；结束时按端口杀该 Tab 进程。  
+  - **V2**：直接 `opencode` / `opencode -s <id>`（不主动 `service start`，不用 `--standalone`）；`session list/delete` + `api session.update` 改名；切会话/新建若 live API 不可用则返回「需重启」，UI 复用退 TUI 再 `prepareTuiLaunch`。结束 Tab 时只杀该 TUI，**不** `service stop`。  
+  - 左下角「会话」：列出该工作目录下的根会话；列表先出缓存再后台刷新；行内重命名/确认删除。  
   - 退出 OpenCode 后宿主终端会静默软恢复，不必整 Tab 死掉。  
 - **启动图标**：OpenCode / DeepSeek 等在标签与快捷启动上显示品牌图。  
 - **跨启动恢复**：记住 Tab 结构、cwd、启动命令、显隐。仅当退出时该 Tab **仍是活着的智能体**才会自动再拉起；已退回普通 Shell 的只保留命令与 session id，供你手动再点。不回放屏幕历史。

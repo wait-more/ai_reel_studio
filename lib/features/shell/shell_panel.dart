@@ -11,11 +11,12 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/agent_bridge.dart';
 import '../../core/config.dart';
 import '../../core/dsh_profile_heal.dart';
-import '../../core/opencode_sessions.dart';
+import '../../core/opencode/opencode_gateway.dart';
 import '../../core/providers.dart';
 import '../../core/shell_env.dart';
 import '../../core/shell_session_memory.dart';
 import '../../core/toast.dart';
+import '../../core/windows_path.dart';
 import 'terminal_session.dart';
 
 /// Shell 面板：真实 PTY 终端，支持多 Tab、快捷启动与会话级恢复（一期）。
@@ -36,6 +37,7 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
   OverlayEntry? _sessionMenuEntry;
   bool _sessionMenuOpen = false;
   Timer? _agentExitWatch;
+  OpenCodeGateway? _openCodeGw;
 
   /// 新终端默认 cwd：项目 scripts 根目录。
   String? get _projectRoot {
@@ -43,17 +45,32 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
     return root.isNotEmpty ? root : null;
   }
 
+  Future<OpenCodeGateway> _openCode() async {
+    _openCodeGw ??= await OpenCodeGateway.obtain();
+    return _openCodeGw!;
+  }
+
+  OpenCodeTabContext _tabCtx(_ShellTab tab) => OpenCodeTabContext(
+        serverPort: tab.opencodeServerPort,
+        launchCommand: tab.launchCommand,
+        launchedAgentHint: tab.launchedAgentHint,
+        currentSessionId: tab.currentOpenCodeSessionId,
+      );
+
   bool _isOpenCodeRelated(_ShellTab tab) {
     final hint = tab.launchedAgentHint?.toLowerCase() ?? '';
     if (hint.contains('opencode')) return true;
     return containsAgentToken(tab.launchCommand ?? '', 'opencode');
   }
 
-  /// OpenCode「会话」入口：仅当前 Tab 的 TUI 仍存活时显示。
+  /// OpenCode「会话」入口：由 Gateway 判定（V1 需 port，V2 看 hint）。
   bool _isOpencodeTab(_ShellTab tab) {
-    if (!_isOpenCodeRelated(tab)) return false;
-    final port = tab.opencodeServerPort;
-    return port != null && port > 0 && tab.launchedAgentHint != null;
+    final gw = _openCodeGw;
+    if (gw != null) return gw.isSessionUiAvailable(_tabCtx(tab));
+    // Gateway 尚未就绪时：有 OpenCode hint 即先露出入口。
+    return _isOpenCodeRelated(tab) &&
+        tab.launchedAgentHint != null &&
+        tab.launchedAgentHint!.isNotEmpty;
   }
 
   bool get _showSessionEntry {
@@ -66,8 +83,9 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
     final hint = tab.launchedAgentHint;
     if (hint == null || hint.isEmpty) return false;
     if (_isOpenCodeRelated(tab)) {
-      final port = tab.opencodeServerPort;
-      return port != null && port > 0;
+      final gw = _openCodeGw;
+      if (gw != null) return gw.isAgentLive(_tabCtx(tab));
+      return true;
     }
     return true;
   }
@@ -160,6 +178,10 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
     // 尽早拉注册表 PATH / 网络盘 UNC，后续新建 PTY 与会话列表更贴近系统终端。
     unawaited(WindowsPathCache.instance.refresh());
     unawaited(WindowsDriveUncCache.instance.refresh());
+    // 版本探测只在 Gateway 内做一次；之后 UI 不再写版本 if。
+    unawaited(_openCode().then((_) {
+      if (mounted) setState(() {});
+    }));
 
     final root = _projectRoot ?? '';
     final snap = await ShellSessionMemory.instance.loadFor(root);
@@ -222,16 +244,18 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
       }
       var cmd = tab.launchCommand?.trim();
       if (cmd == null || cmd.isEmpty) continue;
-      // OpenCode：恢复时重新占端口，并带上上次会话 `-s`。
+      // OpenCode：经 Gateway 准备启动命令（V1 绑端口 / V2 仅 `-s`）。
       if (containsAgentToken(cmd, 'opencode') ||
           tab.launchedAgentHint!.toLowerCase().contains('opencode')) {
-        final prepared = await prepareOpenCodeTuiLaunch(
-          cmd,
+        final gw = await _openCode();
+        final prepared = await gw.prepareTuiLaunch(
+          command: cmd,
           sessionId: tab.currentOpenCodeSessionId,
         );
         cmd = prepared.command;
         tab.launchCommand = prepared.command;
-        tab.opencodeServerPort = prepared.port;
+        tab.opencodeServerPort =
+            prepared.port > 0 ? prepared.port : null;
         tab.currentOpenCodeSessionId = prepared.sessionId;
       } else if (shouldHealDshProfileForCommand(cmd) ||
           shouldHealDshProfileForCommand(tab.launchedAgentHint ?? '')) {
@@ -293,11 +317,11 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
     final isOpenCode = hint.toLowerCase().contains('opencode') ||
         containsAgentToken(launch, 'opencode');
 
-    // OpenCode：退出后软恢复会清掉端口。此时应允许同标签再启，
-    // 不能被滚动缓冲里残留的「opencode」或 launchCommand 记忆误判。
+    // OpenCode：退出后软恢复会清掉 agent 标记；以 Gateway.isAgentLive 为准。
     if (isOpenCode) {
-      final port = tab.opencodeServerPort;
-      return port != null && port > 0;
+      final gw = _openCodeGw;
+      if (gw != null) return gw.isAgentLive(_tabCtx(tab));
+      return hint.isNotEmpty;
     }
 
     final recent = tab.session.recentBufferText();
@@ -420,11 +444,14 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
     tab.currentOpenCodeSessionId = id;
     final base = tab.launchCommand ?? 'opencode';
     final port = tab.opencodeServerPort ?? parseOpenCodeServerPort(base);
-    var cmd = withOpenCodeSessionId(base, id);
-    if (port != null && port > 0) {
-      cmd = withOpenCodeServerBind(cmd, port);
-    }
-    tab.launchCommand = cmd;
+    final gw = _openCodeGw;
+    tab.launchCommand = gw != null
+        ? gw.commandWithSession(
+            baseCommand: base,
+            sessionId: id,
+            port: port,
+          )
+        : withOpenCodeSessionId(base, id);
     _schedulePersist();
   }
 
@@ -446,15 +473,15 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
     late final String launchCmd;
     if (_isAgentLaunchCmd(cmd) &&
         containsAgentToken(cmd.command, 'opencode')) {
-      // 直接 `opencode --hostname/--port …`，与系统终端一致；退出靠软恢复。
-      // 若本 Tab 已有上次会话，带上 `-s` 以便回到同一会话。
-      final prepared = await prepareOpenCodeTuiLaunch(
-        cmd.command,
+      // 经 Gateway：V1 绑本机端口；V2 直接 `opencode` / `-s`。
+      final gw = await _openCode();
+      final prepared = await gw.prepareTuiLaunch(
+        command: cmd.command,
         sessionId: tab.currentOpenCodeSessionId ??
             parseOpenCodeSessionFlag(tab.launchCommand),
       );
       launchCmd = prepared.command;
-      tab.opencodeServerPort = prepared.port;
+      tab.opencodeServerPort = prepared.port > 0 ? prepared.port : null;
       tab.currentOpenCodeSessionId = prepared.sessionId;
     } else if (_isAgentLaunchCmd(cmd)) {
       launchCmd = cmd.command;
@@ -494,7 +521,7 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
       if (warmCwd != null &&
           warmCwd.isNotEmpty &&
           containsAgentToken(cmd.command, 'opencode')) {
-        unawaited(listOpenCodeSessions(cwd: warmCwd));
+        unawaited(_openCode().then((gw) => gw.listSessions(cwd: warmCwd)));
       }
     }
     _schedulePersist();
@@ -721,18 +748,16 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
     tab.currentOpenCodeSessionId = null;
     final cmd = tab.launchCommand;
     if (cmd != null && cmd.isNotEmpty) {
-      tab.launchCommand = normalizeOpenCodeCoreCommand(
-        cmd
-            .replaceAll(
-              RegExp(r'\s*(?:-s|--session)(?:\s+|=)\S+'),
-              '',
-            )
-            .trim(),
-      );
+      final gw = _openCodeGw;
       final port = tab.opencodeServerPort;
-      if (port != null && port > 0) {
-        tab.launchCommand = withOpenCodeServerBind(tab.launchCommand!, port);
-      }
+      tab.launchCommand = gw != null
+          ? gw.forgetSessionCommand(cmd, port: port)
+          : normalizeOpenCodeCoreCommand(
+              cmd.replaceAll(
+                RegExp(r'\s*(?:-s|--session)(?:\s+|=)\S+'),
+                '',
+              ),
+            );
     }
     _schedulePersist();
   }
@@ -746,7 +771,8 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
     final dir = cwd?.trim() ?? '';
     if (dir.isEmpty) return null;
     try {
-      final existing = await listOpenCodeSessions(cwd: dir, forceRefresh: true);
+      final gw = await _openCode();
+      final existing = await gw.listSessions(cwd: dir, forceRefresh: true);
       return {for (final s in existing) s.id};
     } catch (_) {
       return null;
@@ -769,6 +795,8 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
           cwd: tab.cwd ?? _projectRoot ?? '',
           serverPort: tab.opencodeServerPort ??
               parseOpenCodeServerPort(tab.launchCommand),
+          forceRefreshOnOpen:
+              _openCodeGw?.preferForceRefreshOnSessionMenuOpen ?? false,
           knownSessionId: tab.currentOpenCodeSessionId ??
               parseOpenCodeSessionFlag(tab.launchCommand),
           awaitingNewSessionIds: tab.awaitingNewSessionIds == null
@@ -838,17 +866,17 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
     return false;
   }
 
-  Future<void> _leaveOpenCodeToShell(TerminalSession session, {int? port}) async {
-    // 优先按端口结束 OpenCode；宿主若被带走由软恢复接手。
-    if (port != null && port > 0) {
-      final killed = await killOpenCodeListeningOnPort(port);
-      if (killed) {
-        for (var i = 0; i < 25; i++) {
-          await Future<void>.delayed(const Duration(milliseconds: 160));
-          if (!mounted) return;
-          if (_looksLikeShellPrompt(session.recentBufferText(maxLines: 12))) {
-            return;
-          }
+  Future<void> _leaveOpenCodeToShell(_ShellTab tab) async {
+    final session = tab.session;
+    // Gateway：V1 按 port 杀；V2 按会话命令行杀 TUI，绝不 stop 全局 service。
+    final gw = await _openCode();
+    final killed = await gw.killAgentProcess(_tabCtx(tab));
+    if (killed) {
+      for (var i = 0; i < 25; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 160));
+        if (!mounted) return;
+        if (_looksLikeShellPrompt(session.recentBufferText(maxLines: 12))) {
+          return;
         }
       }
     }
@@ -882,35 +910,33 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
       final port = tab.opencodeServerPort ??
           parseOpenCodeServerPort(tab.launchCommand);
       final baseline = await _snapshotSessionIds(cwd);
+      final gw = await _openCode();
 
-      if (port != null && port > 0) {
-        final result = await tryStartOpenCodeNewSession(port: port);
-        if (result.ok) {
-          _forgetOpenCodeSession(tab);
-          tab.awaitingNewSessionIds = baseline;
-          invalidateOpenCodeSessionCache();
-          if (mounted) {
-            setState(() {});
-            showGlobalToast(context, '已打开新会话，开始对话后会出现在列表里');
-            _focusActiveTerminal();
-          }
-          return;
-        }
+      final result = await gw.startNewSession(port: port);
+      if (result.isOk) {
+        _forgetOpenCodeSession(tab);
+        tab.awaitingNewSessionIds = baseline;
+        invalidateOpenCodeSessionCache();
         if (mounted) {
-          showGlobalToast(
-            context,
-            '进程内新建失败（${result.reason}），正在重启…',
-          );
+          setState(() {});
+          showGlobalToast(context, '已打开新会话，开始对话后会出现在列表里');
+          _focusActiveTerminal();
         }
-      } else if (mounted) {
-        showGlobalToast(context, '当前 OpenCode 未绑定端口，正在重启…');
+        return;
+      }
+      if (result.outcome == OpenCodeNavOutcome.failed) {
+        if (mounted) showGlobalToast(context, '新建会话失败：${result.reason}');
+        return;
+      }
+      if (mounted) {
+        showGlobalToast(context, '正在重启 OpenCode 以新建会话…');
       }
 
       _forgetOpenCodeSession(tab);
-      await _leaveOpenCodeToShell(tab.session, port: port);
+      await _leaveOpenCodeToShell(tab);
       if (!mounted) return;
 
-      final prepared = await prepareOpenCodeTuiLaunch('opencode');
+      final prepared = await gw.prepareTuiLaunch(command: 'opencode');
       final launch = prepared.command;
       if (cwd != null && cwd.isNotEmpty) {
         final line = Platform.isWindows
@@ -922,7 +948,7 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
       }
       tab.session.syncViewportSize();
       tab.launchCommand = launch;
-      tab.opencodeServerPort = prepared.port;
+      tab.opencodeServerPort = prepared.port > 0 ? prepared.port : null;
       tab.currentOpenCodeSessionId = null;
       tab.awaitingNewSessionIds = baseline;
       tab.launchedAgentHint = 'opencode';
@@ -964,38 +990,37 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
       final cwd = tab.cwd ?? _projectRoot;
       final port = tab.opencodeServerPort ??
           parseOpenCodeServerPort(tab.launchCommand);
+      final gw = await _openCode();
 
-      // 方案 A：同进程 TUI 内嵌 HTTP（普通 opencode --port，不是 serve）
-      if (port != null && port > 0) {
-        final result = await trySelectOpenCodeTuiSession(
-          port: port,
-          sessionId: info.id,
-          directory: info.directory ?? cwd,
-        );
-        if (result.ok) {
-          _rememberOpenCodeSession(tab, info.id);
-          invalidateOpenCodeSessionCache();
-          if (mounted) {
-            showGlobalToast(context, '已切换到「${info.title}」');
-          }
-          return;
-        }
+      final result = await gw.selectSession(
+        sessionId: info.id,
+        port: port,
+        directory: info.directory ?? cwd,
+      );
+      if (result.isOk) {
+        _rememberOpenCodeSession(tab, info.id);
+        invalidateOpenCodeSessionCache();
         if (mounted) {
-          showGlobalToast(
-            context,
-            '进程内切换失败（${result.reason}），正在重启…',
-          );
+          showGlobalToast(context, '已切换到「${info.title}」');
         }
-      } else if (mounted) {
-        showGlobalToast(context, '当前 OpenCode 未绑定端口，正在重启…');
+        return;
+      }
+      if (result.outcome == OpenCodeNavOutcome.failed) {
+        if (mounted) {
+          showGlobalToast(context, '切换会话失败：${result.reason}');
+        }
+        return;
+      }
+      if (mounted) {
+        showGlobalToast(context, '正在重启 OpenCode 以切换会话…');
       }
 
-      // 方案 B：结束 TUI 后同标签用 -s 再发 `opencode …`
-      await _leaveOpenCodeToShell(tab.session, port: port);
+      // 需重启：结束 TUI 后同标签用 -s 再发（结果枚举驱动，无版本 if）
+      await _leaveOpenCodeToShell(tab);
       if (!mounted) return;
 
-      final prepared = await prepareOpenCodeTuiLaunch(
-        'opencode',
+      final prepared = await gw.prepareTuiLaunch(
+        command: 'opencode',
         sessionId: info.id,
       );
       final launch = prepared.command;
@@ -1009,7 +1034,7 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
       }
       tab.session.syncViewportSize();
       tab.launchCommand = launch;
-      tab.opencodeServerPort = prepared.port;
+      tab.opencodeServerPort = prepared.port > 0 ? prepared.port : null;
       tab.currentOpenCodeSessionId = info.id;
       tab.launchedAgentHint = 'opencode';
       invalidateOpenCodeSessionCache();
@@ -1091,6 +1116,7 @@ class _OpenCodeSessionMenuOverlay extends StatefulWidget {
     required this.link,
     required this.cwd,
     this.serverPort,
+    this.forceRefreshOnOpen = false,
     this.knownSessionId,
     this.awaitingNewSessionIds,
     this.onActiveSessionResolved,
@@ -1105,6 +1131,8 @@ class _OpenCodeSessionMenuOverlay extends StatefulWidget {
   final LayerLink link;
   final String cwd;
   final int? serverPort;
+  /// 由 Gateway 决定（V2 true / V1 false），UI 不写版本 if。
+  final bool forceRefreshOnOpen;
   final String? knownSessionId;
   final Set<String>? awaitingNewSessionIds;
   final ValueChanged<String>? onActiveSessionResolved;
@@ -1147,7 +1175,7 @@ class _OpenCodeSessionMenuOverlayState extends State<_OpenCodeSessionMenuOverlay
       _items = peeked;
       _loading = false;
     }
-    _load();
+    _load(forceRefresh: widget.forceRefreshOnOpen);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) _panelFocus.requestFocus();
     });
@@ -1229,7 +1257,8 @@ class _OpenCodeSessionMenuOverlayState extends State<_OpenCodeSessionMenuOverlay
 
     setState(() => _renaming = true);
     try {
-      final updated = await renameOpenCodeSession(
+      final gw = await OpenCodeGateway.obtain();
+      final updated = await gw.renameSession(
         sessionId: session.id,
         title: next,
         port: widget.serverPort,
@@ -1266,7 +1295,8 @@ class _OpenCodeSessionMenuOverlayState extends State<_OpenCodeSessionMenuOverlay
 
     setState(() => _deletingId = session.id);
     try {
-      await deleteOpenCodeSession(
+      final gw = await OpenCodeGateway.obtain();
+      await gw.deleteSession(
         sessionId: session.id,
         port: widget.serverPort,
       );
@@ -1339,16 +1369,14 @@ class _OpenCodeSessionMenuOverlayState extends State<_OpenCodeSessionMenuOverlay
     });
 
     try {
+      final gw = await OpenCodeGateway.obtain();
       final port = widget.serverPort;
-      final liveFuture = (port != null && port > 0)
-          ? fetchOpenCodeActiveSessionId(
-              port: port,
-              directory: widget.cwd.isEmpty ? null : widget.cwd,
-            )
-          : Future<String?>.value(null);
       final results = await Future.wait<Object?>([
-        listOpenCodeSessions(cwd: widget.cwd, forceRefresh: forceRefresh),
-        liveFuture,
+        gw.listSessions(cwd: widget.cwd, forceRefresh: forceRefresh),
+        gw.fetchActiveSessionId(
+          port: port,
+          directory: widget.cwd.isEmpty ? null : widget.cwd,
+        ),
       ]);
       if (!mounted) return;
       final list = results[0] as List<OpenCodeSessionInfo>;

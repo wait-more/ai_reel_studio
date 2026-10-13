@@ -25,13 +25,25 @@ class OpenCodeSessionInfo {
 
   factory OpenCodeSessionInfo.fromJson(Map<String, dynamic> json) {
     final title = (json['title'] as String?)?.trim();
+    final time = json['time'];
+    final location = json['location'];
+    final timeMap = time is Map ? Map<String, dynamic>.from(time) : null;
+    final locationMap =
+        location is Map ? Map<String, dynamic>.from(location) : null;
     return OpenCodeSessionInfo(
       id: (json['id'] as String?)?.trim() ?? '',
       title: (title == null || title.isEmpty) ? '未命名会话' : title,
-      updated: _parseTime(json['updated'] ?? json['time_updated']),
-      created: _parseTime(json['created'] ?? json['time_created']),
-      directory: json['directory'] as String?,
-      projectId: (json['projectId'] ?? json['project_id']) as String?,
+      updated: _parseTime(
+        json['updated'] ?? json['time_updated'] ?? timeMap?['updated'],
+      ),
+      created: _parseTime(
+        json['created'] ?? json['time_created'] ?? timeMap?['created'],
+      ),
+      directory: (json['directory'] as String?) ??
+          (locationMap?['directory'] as String?),
+      projectId: (json['projectId'] ??
+          json['project_id'] ??
+          json['projectID']) as String?,
     );
   }
 
@@ -185,6 +197,30 @@ void invalidateOpenCodeSessionCache() {
   _cachedSessions = null;
   _cachedSessionsKey = null;
   _cachedSessionsAt = null;
+}
+
+/// 若缓存仍在 TTL 内则返回副本，否则 null（供 Gateway 各实现共用）。
+List<OpenCodeSessionInfo>? takeFreshOpenCodeSessionCache(
+  String cwd, {
+  Duration ttl = const Duration(seconds: 20),
+}) {
+  final dir = cwd.trim();
+  if (dir.isEmpty || _cachedSessions == null) return null;
+  if (_cachedSessionsKey != normalizeOpenCodePath(dir)) return null;
+  if (_cachedSessionsAt == null ||
+      DateTime.now().difference(_cachedSessionsAt!) >= ttl) {
+    return null;
+  }
+  return List<OpenCodeSessionInfo>.of(_cachedSessions!);
+}
+
+/// 写入会话列表缓存（与 [peekOpenCodeSessionCache] 共用）。
+void putOpenCodeSessionCache(String cwd, List<OpenCodeSessionInfo> sessions) {
+  final dir = cwd.trim();
+  if (dir.isEmpty) return;
+  _cachedSessions = List<OpenCodeSessionInfo>.of(sessions);
+  _cachedSessionsKey = normalizeOpenCodePath(dir);
+  _cachedSessionsAt = DateTime.now();
 }
 
 /// 相对时间文案（会话列表副标题）。
