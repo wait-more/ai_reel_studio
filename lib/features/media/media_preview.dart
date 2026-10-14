@@ -5,9 +5,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
-import '../../core/fresh_file_image.dart';
 import '../../core/video_frame_extract.dart';
 import '../../core/toast.dart';
+
+export 'image_viewer.dart' show showImageViewerDialog, siblingImagePaths;
 
 /// 打开媒体预览对话框（视频/音频内嵌播放）。
 ///
@@ -30,52 +31,6 @@ Future<void> showMediaPreviewDialog(
       path: path,
       isVideo: isVideo,
       onChanged: onChanged,
-    ),
-  );
-}
-
-/// 打开图片查看对话框（可缩放；Esc 关闭）。
-void showImageViewerDialog(BuildContext context, String path) {
-  showDialog(
-    context: context,
-    barrierDismissible: true,
-    builder: (dialogCtx) => Focus(
-      autofocus: true,
-      onKeyEvent: (node, event) {
-        if (event is KeyDownEvent &&
-            event.logicalKey == LogicalKeyboardKey.escape) {
-          Navigator.pop(dialogCtx);
-          return KeyEventResult.handled;
-        }
-        return KeyEventResult.ignored;
-      },
-      child: Dialog(
-        backgroundColor: Theme.of(dialogCtx).colorScheme.surface,
-        insetPadding: const EdgeInsets.all(24),
-        child: Stack(
-          children: [
-            Center(
-              child: InteractiveViewer(
-                minScale: 0.5,
-                maxScale: 4,
-                child: ProjectFileImage(path, fit: BoxFit.contain),
-              ),
-            ),
-            Positioned(
-              top: 8,
-              right: 8,
-              child: IconButton(
-                tooltip: '关闭 (Esc)',
-                icon: Icon(
-                  Icons.close,
-                  color: Theme.of(dialogCtx).colorScheme.onSurfaceVariant,
-                ),
-                onPressed: () => Navigator.pop(dialogCtx),
-              ),
-            ),
-          ],
-        ),
-      ),
     ),
   );
 }

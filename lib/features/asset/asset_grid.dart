@@ -1858,7 +1858,12 @@ class _AssetGridViewState extends ConsumerState<AssetGridView> {
         openEditorTabRef(ref, path: path, pin: pin);
         return;
       case MediaKind.image:
-        showImageViewerDialog(context, path);
+        final gallery = _visibleEntries
+            .where((e) =>
+                e is! Directory && classifyMedia(e.path) == MediaKind.image)
+            .map((e) => e.path)
+            .toList();
+        showImageViewerDialog(context, path, gallery: gallery);
         return;
       case MediaKind.video:
         // 软件内嵌播放器预览（音画同步、进度控制、首末帧提取与截帧）
