@@ -1114,16 +1114,107 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
   }
 
   Future<void> _unbind(ComfyTemplate t) async {
+    final shortcuts = ref.read(comfyPromptShortcutsProvider);
+    final related = [
+      for (final s in shortcuts)
+        if (s.serverId == _serverId && s.templateId == t.id) s,
+    ];
+
+    // 解绑默认不删快捷路径（只标失效）；若有相关项则让用户选择。
+    var removeRelatedShortcuts = false;
+    if (related.isNotEmpty && mounted) {
+      final choice = await showDialog<bool>(
+        context: context,
+        builder: (ctx) {
+          final cs = Theme.of(ctx).colorScheme;
+          final outlinedStyle = OutlinedButton.styleFrom(
+            foregroundColor: cs.onSurface,
+            side: BorderSide(color: cs.outline),
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(8),
+            ),
+            textStyle: const TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+            ),
+          );
+          return AlertDialog(
+            title: const Text('解绑模板'),
+            content: Text(
+              '「${t.name}」有 ${related.length} 条填入快捷路径。\n'
+              '解绑后默认保留并标为失效；也可一并删除这些路径。',
+              style: TextStyle(
+                fontSize: 13,
+                height: 1.45,
+                color: cs.onSurfaceVariant,
+              ),
+            ),
+            actionsPadding: const EdgeInsets.fromLTRB(16, 0, 16, 14),
+            actions: [
+              OutlinedButton(
+                onPressed: () => Navigator.pop(ctx),
+                style: outlinedStyle,
+                child: const Text('取消'),
+              ),
+              OutlinedButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                style: outlinedStyle,
+                child: const Text('仅解绑'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                style: FilledButton.styleFrom(
+                  backgroundColor: cs.error,
+                  foregroundColor: cs.onError,
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  textStyle: const TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                child: const Text('解绑并删除路径'),
+              ),
+            ],
+          );
+        },
+      );
+      if (choice == null) return;
+      removeRelatedShortcuts = choice;
+    }
+
     await ComfyTemplateStore.unbindTemplate(
       serverId: _serverId,
       templateId: t.id,
     );
+    if (removeRelatedShortcuts) {
+      final next = [
+        for (final s in shortcuts)
+          if (!(s.serverId == _serverId && s.templateId == t.id)) s,
+      ];
+      await ComfyPromptSendMemory.saveShortcuts(next);
+      ref.read(comfyPromptShortcutsProvider.notifier).state = next;
+    }
     if (_selected?.id == t.id) {
       _clearForm();
       setState(() => _selected = null);
     }
     ref.read(comfyActionsTickProvider.notifier).state++;
     await ComfyPromptSendMemory.refreshLabelsIntoRef(ref);
+    if (mounted) {
+      showGlobalToast(
+        context,
+        removeRelatedShortcuts
+            ? '已解绑，并删除 ${related.length} 条快捷路径'
+            : related.isEmpty
+                ? '已解绑「${t.name}」'
+                : '已解绑「${t.name}」，相关快捷路径已标为失效',
+      );
+    }
   }
 
   /// 将当前模板的节点参数与 bypass 使能复制到其它 Comfy 实例，便于并行同跑。

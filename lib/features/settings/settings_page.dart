@@ -980,6 +980,10 @@ class _ComfyPromptShortcutsState extends ConsumerState<_ComfyPromptShortcuts> {
   Future<void> _add() async {
     final picked = await pickComfyPromptShortcut(context);
     if (picked == null || !mounted) return;
+    // 选择未绑定模板时已在弹窗内同步绑定，刷新生成面板绑定列表。
+    ref.read(comfyActionsTickProvider.notifier).state++;
+    await ComfyPromptSendMemory.refreshLabelsIntoRef(ref);
+    if (!mounted) return;
     final named = await _promptShortcutName(context);
     if (named == null || !mounted) return;
     final item = picked.copyWith(name: named);
@@ -1029,7 +1033,8 @@ class _ComfyPromptShortcutsState extends ConsumerState<_ComfyPromptShortcuts> {
         const SizedBox(height: 8),
         Text(
           '出现在文档右键「填入生成提示词」的二级菜单里，排在「填入上次」后面。'
-          '实例关闭启用后，对应项会从菜单隐藏。',
+          '添加时可选手未绑定模板，确认后会同步绑定。'
+          '实例关闭后菜单隐藏；解绑模板默认标为失效（不自动删除），可在解绑时选择一并移除。',
           style: Theme.of(context).textTheme.bodySmall?.copyWith(
                 color: cs.onSurfaceVariant,
               ),

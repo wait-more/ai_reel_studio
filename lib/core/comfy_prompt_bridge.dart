@@ -348,6 +348,26 @@ String _displayLabelFor({
 }) =>
     '${server.name} · ${template.name} · ${_fieldPickLabel(template, field)}';
 
+ButtonStyle _comfyDialogCancelStyle(ColorScheme cs) {
+  return OutlinedButton.styleFrom(
+    foregroundColor: cs.onSurface,
+    side: BorderSide(color: cs.outline),
+    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+    textStyle: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+  );
+}
+
+ButtonStyle _comfyDialogPrimaryStyle({Color? background, Color? foreground}) {
+  return FilledButton.styleFrom(
+    backgroundColor: background,
+    foregroundColor: foreground,
+    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+    textStyle: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+  );
+}
+
 Widget _shortcutMenuLabel(ComfyPromptSendTarget shortcut, TextStyle style) {
   final path = shortcut.displayLabel.trim();
   final name = shortcut.name.trim();
@@ -384,6 +404,8 @@ Future<_PromptFillPickResult?> _pickPromptFillTarget({
   required ComfyBindings bindings,
   ComfyPromptSendTarget? last,
   String confirmLabel = '填入',
+  String dialogTitle = '填入生成提示词',
+  bool allowUnboundTemplates = false,
 }) {
   return showDialog<_PromptFillPickResult>(
     context: context,
@@ -394,11 +416,15 @@ Future<_PromptFillPickResult?> _pickPromptFillTarget({
       bindings: bindings,
       last: last,
       confirmLabel: confirmLabel,
+      dialogTitle: dialogTitle,
+      allowUnboundTemplates: allowUnboundTemplates,
     ),
   );
 }
 
 /// 设置页添加快捷路径：选出实例 / 模板 / 字段，不立即填入。
+///
+/// 未绑定模板也可选；确认后会同步绑定到该实例。
 Future<ComfyPromptSendTarget?> pickComfyPromptShortcut(
   BuildContext context,
 ) async {
@@ -422,6 +448,8 @@ Future<ComfyPromptSendTarget?> pickComfyPromptShortcut(
     allTemplates: templates,
     bindings: bindings,
     confirmLabel: '添加',
+    dialogTitle: '添加填入快捷路径',
+    allowUnboundTemplates: true,
   );
   if (picked == null) return null;
   return ComfyPromptSendTarget(
@@ -442,6 +470,8 @@ class _PromptFillPickerDialog extends StatefulWidget {
   final ComfyBindings bindings;
   final ComfyPromptSendTarget? last;
   final String confirmLabel;
+  final String dialogTitle;
+  final bool allowUnboundTemplates;
 
   const _PromptFillPickerDialog({
     required this.servers,
@@ -449,6 +479,8 @@ class _PromptFillPickerDialog extends StatefulWidget {
     required this.bindings,
     this.last,
     this.confirmLabel = '填入',
+    this.dialogTitle = '填入生成提示词',
+    this.allowUnboundTemplates = false,
   });
 
   @override
@@ -460,10 +492,13 @@ class _PromptFillPickerDialogState extends State<_PromptFillPickerDialog> {
   late ComfyServer _server;
   ComfyTemplate? _template;
   ComfyExposedField? _field;
+  late ComfyBindings _bindings;
+  bool _submitting = false;
 
   @override
   void initState() {
     super.initState();
+    _bindings = widget.bindings;
     _server = _initialServer();
     _template = _initialTemplate(_server);
     _field = _initialField(_template);
@@ -479,24 +514,37 @@ class _PromptFillPickerDialogState extends State<_PromptFillPickerDialog> {
     return widget.servers.first;
   }
 
+  Set<String> _boundIds(ComfyServer server) =>
+      _bindings.forServer(server.id).templateIds.toSet();
+
+  bool _isBound(ComfyTemplate template) =>
+      _boundIds(_server).contains(template.id);
+
   List<ComfyTemplate> _templatesFor(ComfyServer server) {
-    final ids = widget.bindings.forServer(server.id).templateIds.toSet();
-    return [
-      for (final t in widget.allTemplates)
-        if (ids.contains(t.id)) t,
-    ];
+    final ids = _boundIds(server);
+    final bound = <ComfyTemplate>[];
+    final unbound = <ComfyTemplate>[];
+    for (final t in widget.allTemplates) {
+      if (ids.contains(t.id)) {
+        bound.add(t);
+      } else if (widget.allowUnboundTemplates) {
+        unbound.add(t);
+      }
+    }
+    return [...bound, ...unbound];
   }
 
   ComfyTemplate? _initialTemplate(ComfyServer server) {
-    final bound = _templatesFor(server);
-    if (bound.isEmpty) return null;
+    final list = _templatesFor(server);
+    if (list.isEmpty) return null;
     final last = widget.last;
     if (last != null && last.serverId == server.id) {
-      for (final t in bound) {
+      for (final t in list) {
         if (t.id == last.templateId) return t;
       }
     }
-    return bound.first;
+    // 优先已绑定；列表已按绑定在前排好。
+    return list.first;
   }
 
   ComfyExposedField? _initialField(ComfyTemplate? template) {
@@ -531,13 +579,83 @@ class _PromptFillPickerDialogState extends State<_PromptFillPickerDialog> {
     });
   }
 
+  Future<void> _submit() async {
+    final template = _template;
+    final field = _field;
+    if (template == null || field == null || _submitting) return;
+
+    final needsBind =
+        widget.allowUnboundTemplates && !_isBound(template);
+    if (needsBind) {
+      final ok = await showDialog<bool>(
+        context: context,
+        useRootNavigator: true,
+        builder: (ctx) {
+          final cs = Theme.of(ctx).colorScheme;
+          return AlertDialog(
+            title: const Text('同步绑定模板'),
+            content: Text(
+              '「${template.name}」尚未绑定到实例「${_server.name}」。\n'
+              '添加此快捷路径将同步绑定该模板，之后生成面板也可选用。',
+              style: TextStyle(
+                fontSize: 13,
+                height: 1.45,
+                color: cs.onSurfaceVariant,
+              ),
+            ),
+            actionsPadding: const EdgeInsets.fromLTRB(16, 0, 16, 14),
+            actions: [
+              OutlinedButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                style: _comfyDialogCancelStyle(cs),
+                child: const Text('取消'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                style: _comfyDialogPrimaryStyle(),
+                child: const Text('绑定并添加'),
+              ),
+            ],
+          );
+        },
+      );
+      if (ok != true || !mounted) return;
+      setState(() => _submitting = true);
+      try {
+        _bindings = await ComfyTemplateStore.bindTemplates(
+          serverId: _server.id,
+          addTemplateIds: [template.id],
+        );
+      } catch (e) {
+        if (mounted) {
+          setState(() => _submitting = false);
+          showGlobalToast(context, '绑定失败：$e');
+        }
+        return;
+      }
+      if (!mounted) return;
+      setState(() => _submitting = false);
+    }
+
+    if (!mounted) return;
+    Navigator.of(context).pop(
+      _PromptFillPickResult(
+        server: _server,
+        template: template,
+        field: field,
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
     final templates = _templatesFor(_server);
     final fields =
         _template == null ? const <ComfyExposedField>[] : comfyPromptFieldsOf(_template!);
-    final canSubmit = _template != null && _field != null;
+    final canSubmit = _template != null && _field != null && !_submitting;
+    final selectedNeedsBind =
+        _template != null && widget.allowUnboundTemplates && !_isBound(_template!);
 
     return Dialog(
       insetPadding: const EdgeInsets.symmetric(horizontal: 28, vertical: 24),
@@ -559,7 +677,7 @@ class _PromptFillPickerDialogState extends State<_PromptFillPickerDialog> {
                     const SizedBox(width: 8),
                     Expanded(
                       child: Text(
-                        '填入生成提示词',
+                        widget.dialogTitle,
                         style: Theme.of(context).textTheme.titleSmall?.copyWith(
                               fontWeight: FontWeight.w700,
                             ),
@@ -569,7 +687,9 @@ class _PromptFillPickerDialogState extends State<_PromptFillPickerDialog> {
                       tooltip: '关闭',
                       visualDensity: VisualDensity.compact,
                       icon: const Icon(Icons.close, size: 18),
-                      onPressed: () => Navigator.of(context).pop(),
+                      onPressed: _submitting
+                          ? null
+                          : () => Navigator.of(context).pop(),
                     ),
                   ],
                 ),
@@ -607,17 +727,37 @@ class _PromptFillPickerDialogState extends State<_PromptFillPickerDialog> {
                         context,
                         label: '模板',
                         child: templates.isEmpty
-                            ? _emptyHint(context, '该实例尚未绑定模板')
+                            ? _emptyHint(
+                                context,
+                                widget.allowUnboundTemplates
+                                    ? '还没有模板，请先在生成面板导入'
+                                    : '该实例尚未绑定模板',
+                              )
                             : Column(
+                                crossAxisAlignment: CrossAxisAlignment.stretch,
                                 children: [
+                                  if (widget.allowUnboundTemplates)
+                                    Padding(
+                                      padding: const EdgeInsets.only(bottom: 6),
+                                      child: Text(
+                                        '未绑定模板也可选；添加时将提示并同步绑定。',
+                                        style: TextStyle(
+                                          fontSize: 11,
+                                          height: 1.35,
+                                          color: cs.onSurfaceVariant,
+                                        ),
+                                      ),
+                                    ),
                                   for (var i = 0; i < templates.length; i++) ...[
                                     if (i > 0) const SizedBox(height: 4),
                                     _optionTile(
                                       context,
-                                      selected: _template?.id == templates[i].id,
+                                      selected:
+                                          _template?.id == templates[i].id,
                                       title: templates[i].name,
-                                      subtitle:
-                                          '${templates[i].nodes.length} 个节点',
+                                      subtitle: _isBound(templates[i])
+                                          ? '${templates[i].nodes.length} 个节点'
+                                          : '未绑定 · 添加时将同步绑定 · ${templates[i].nodes.length} 个节点',
                                       onTap: () =>
                                           _selectTemplate(templates[i]),
                                     ),
@@ -660,29 +800,40 @@ class _PromptFillPickerDialogState extends State<_PromptFillPickerDialog> {
                   ),
                 ),
               ),
+              if (selectedNeedsBind)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(14, 0, 14, 6),
+                  child: Text(
+                    '当前模板未绑定，点「${widget.confirmLabel}」将先绑定再写入快捷路径。',
+                    style: TextStyle(
+                      fontSize: 11.5,
+                      height: 1.35,
+                      color: cs.primary,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ),
               const Divider(height: 1),
               Padding(
                 padding: const EdgeInsets.fromLTRB(12, 8, 12, 10),
                 child: Row(
                   children: [
-                    TextButton(
-                      onPressed: () => Navigator.of(context).pop(),
+                    OutlinedButton(
+                      onPressed: _submitting
+                          ? null
+                          : () => Navigator.of(context).pop(),
+                      style: _comfyDialogCancelStyle(cs),
                       child: const Text('取消'),
                     ),
                     const Spacer(),
                     FilledButton(
-                      onPressed: !canSubmit
-                          ? null
-                          : () {
-                              Navigator.of(context).pop(
-                                _PromptFillPickResult(
-                                  server: _server,
-                                  template: _template!,
-                                  field: _field!,
-                                ),
-                              );
-                            },
-                      child: Text(widget.confirmLabel),
+                      onPressed: !canSubmit ? null : _submit,
+                      style: _comfyDialogPrimaryStyle(),
+                      child: Text(
+                        selectedNeedsBind
+                            ? '绑定并${widget.confirmLabel}'
+                            : widget.confirmLabel,
+                      ),
                     ),
                   ],
                 ),
