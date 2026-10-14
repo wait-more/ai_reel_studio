@@ -765,7 +765,8 @@ class _ComfySectionState extends ConsumerState<_ComfySection> {
         const SizedBox(height: 8),
         Text(
           '可配置多个 ComfyUI 地址。关闭「启用」后该实例不会出现在生成面板列表中。'
-          '同一动作共享一份 workflow 模板，各实例的节点暴露配置可单独保存。',
+          '同一动作共享一份 workflow 模板，各实例的节点暴露配置可单独保存。'
+          '「克隆」只复制名称/地址/密钥/启用状态，不复制模板绑定。',
           style: Theme.of(context).textTheme.bodySmall?.copyWith(
                 color: cs.onSurfaceVariant,
               ),
@@ -776,13 +777,20 @@ class _ComfySectionState extends ConsumerState<_ComfySection> {
           return Card(
             margin: const EdgeInsets.only(bottom: 8),
             child: ListTile(
-              selected: active,
-              enabled: s.enabled,
+              selected: active && s.enabled,
               leading: Icon(
-                active ? Icons.radio_button_checked : Icons.radio_button_off,
+                active && s.enabled
+                    ? Icons.radio_button_checked
+                    : Icons.radio_button_off,
                 size: 20,
+                color: s.enabled ? null : cs.onSurfaceVariant,
               ),
-              title: Text(s.name),
+              title: Text(
+                s.name,
+                style: s.enabled
+                    ? null
+                    : TextStyle(color: cs.onSurfaceVariant),
+              ),
               subtitle: Text(
                 s.enabled ? s.baseUrl : '${s.baseUrl} · 已关闭',
                 maxLines: 1,
@@ -792,14 +800,28 @@ class _ComfySectionState extends ConsumerState<_ComfySection> {
               trailing: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Switch(
-                    value: s.enabled,
-                    onChanged: (v) => _setEnabled(s, v),
+                  IconButton(
+                    tooltip: s.enabled
+                        ? '已启用 · 点击后从生成面板隐藏'
+                        : '已关闭 · 点击后显示在生成面板',
+                    icon: Icon(
+                      s.enabled
+                          ? Icons.visibility_outlined
+                          : Icons.visibility_off_outlined,
+                      size: 20,
+                      color: s.enabled ? cs.primary : cs.onSurfaceVariant,
+                    ),
+                    onPressed: () => _setEnabled(s, !s.enabled),
                   ),
                   IconButton(
                     tooltip: '编辑',
                     icon: const Icon(Icons.edit_outlined, size: 20),
                     onPressed: () => _editServer(s),
+                  ),
+                  IconButton(
+                    tooltip: '克隆',
+                    icon: const Icon(Icons.copy_all_outlined, size: 20),
+                    onPressed: () => _cloneServer(s),
                   ),
                   IconButton(
                     tooltip: '删除',
@@ -876,6 +898,29 @@ class _ComfySectionState extends ConsumerState<_ComfySection> {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(content: Text('实例已更新')),
+    );
+  }
+
+  /// 克隆实例：新 id，只复制名称/URL/Key/启用（不复制模板绑定）。
+  Future<void> _cloneServer(ComfyServer source) async {
+    final existingNames =
+        ref.read(comfyServersProvider).map((s) => s.name).toSet();
+    final draft = source.copyWith(
+      id: 'srv_${DateTime.now().millisecondsSinceEpoch}',
+      name: _uniqueComfyCloneName(source.name, existingNames),
+    );
+    final created = await _editServerDialog(
+      context,
+      existing: draft,
+      title: '克隆实例',
+    );
+    if (created == null) return;
+
+    final next = [...ref.read(comfyServersProvider), created];
+    await _persist(next, selectedId: created.id);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('已克隆为「${created.name}」')),
     );
   }
 
@@ -1127,96 +1172,317 @@ class _ShortcutNameDialogState extends State<_ShortcutNameDialog> {
   }
 }
 
+String _uniqueComfyCloneName(String baseName, Set<String> existing) {
+  final root = baseName.trim().isEmpty ? 'ComfyUI' : baseName.trim();
+  var candidate = '$root 副本';
+  if (!existing.contains(candidate)) return candidate;
+  var n = 2;
+  while (existing.contains('$root 副本 $n')) {
+    n++;
+  }
+  return '$root 副本 $n';
+}
+
 Future<ComfyServer?> _editServerDialog(
   BuildContext context, {
   ComfyServer? existing,
+  String? title,
 }) {
-  final nameCtrl = TextEditingController(text: existing?.name ?? '');
-  final urlCtrl = TextEditingController(
-    text: existing?.baseUrl ?? AppConfig.defaultComfyBaseUrl,
-  );
-  final keyCtrl = TextEditingController(text: existing?.apiKey ?? '');
-  var enabled = existing?.enabled ?? true;
+  final isClone = title == '克隆实例';
+  final dialogTitle = title ??
+      (existing == null ? '添加 ComfyUI 实例' : '编辑实例');
+  final subtitle = isClone
+      ? '将生成新实例，请按需改名称与地址'
+      : (existing == null
+          ? '填写 ComfyUI 服务地址与显示名称'
+          : '修改后立即对生成面板生效');
 
   return showDialog<ComfyServer>(
     context: context,
-    builder: (ctx) {
-      return StatefulBuilder(
-        builder: (ctx, setLocal) {
-          return AlertDialog(
-            title: Text(existing == null ? '添加 ComfyUI 实例' : '编辑实例'),
-            content: SizedBox(
-              width: 420,
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
+    barrierColor: Colors.black.withValues(alpha: 0.45),
+    builder: (ctx) => _ComfyServerEditDialog(
+      title: dialogTitle,
+      subtitle: subtitle,
+      existing: existing,
+      isClone: isClone,
+    ),
+  );
+}
+
+class _ComfyServerEditDialog extends StatefulWidget {
+  const _ComfyServerEditDialog({
+    required this.title,
+    required this.subtitle,
+    required this.existing,
+    required this.isClone,
+  });
+
+  final String title;
+  final String subtitle;
+  final ComfyServer? existing;
+  final bool isClone;
+
+  @override
+  State<_ComfyServerEditDialog> createState() => _ComfyServerEditDialogState();
+}
+
+class _ComfyServerEditDialogState extends State<_ComfyServerEditDialog> {
+  late final TextEditingController _nameCtrl;
+  late final TextEditingController _urlCtrl;
+  late final TextEditingController _keyCtrl;
+  late bool _enabled;
+  bool _obscureKey = true;
+  String? _urlError;
+
+  @override
+  void initState() {
+    super.initState();
+    final e = widget.existing;
+    _nameCtrl = TextEditingController(text: e?.name ?? '');
+    _urlCtrl = TextEditingController(
+      text: e?.baseUrl ?? AppConfig.defaultComfyBaseUrl,
+    );
+    _keyCtrl = TextEditingController(text: e?.apiKey ?? '');
+    _enabled = e?.enabled ?? true;
+  }
+
+  @override
+  void dispose() {
+    _nameCtrl.dispose();
+    _urlCtrl.dispose();
+    _keyCtrl.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    final name = _nameCtrl.text.trim();
+    final url = _urlCtrl.text.trim();
+    if (url.isEmpty) {
+      setState(() => _urlError = '请填写 Base URL');
+      return;
+    }
+    setState(() => _urlError = null);
+    Navigator.pop(
+      context,
+      ComfyServer(
+        id: widget.existing?.id ??
+            'srv_${DateTime.now().millisecondsSinceEpoch}',
+        name: name.isEmpty ? 'ComfyUI' : name,
+        baseUrl: url,
+        apiKey: _keyCtrl.text,
+        enabled: _enabled,
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final text = Theme.of(context).textTheme;
+    final icon = widget.isClone
+        ? Icons.copy_all_outlined
+        : (widget.existing == null
+            ? Icons.add_circle_outline
+            : Icons.dns_outlined);
+
+    return Dialog(
+      insetPadding: const EdgeInsets.symmetric(horizontal: 40, vertical: 36),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 460),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 18, 12, 0),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  TextField(
-                    controller: nameCtrl,
-                    decoration: const InputDecoration(
-                      labelText: '名称',
-                      hintText: '例如 本机 / 云 GPU',
-                      isDense: true,
+                  Container(
+                    width: 40,
+                    height: 40,
+                    decoration: BoxDecoration(
+                      color: cs.primary.withValues(alpha: 0.12),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Icon(icon, size: 22, color: cs.primary),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const SizedBox(height: 2),
+                        Text(
+                          widget.title,
+                          style: text.titleMedium?.copyWith(
+                            fontWeight: FontWeight.w600,
+                            fontSize: 16,
+                            color: cs.onSurface,
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          widget.subtitle,
+                          style: text.bodySmall?.copyWith(
+                            color: cs.onSurfaceVariant,
+                            height: 1.35,
+                          ),
+                        ),
+                      ],
                     ),
                   ),
-                  const SizedBox(height: 12),
-                  TextField(
-                    controller: urlCtrl,
-                    decoration: const InputDecoration(
-                      labelText: 'Base URL',
-                      hintText: AppConfig.defaultComfyBaseUrl,
-                      isDense: true,
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  TextField(
-                    controller: keyCtrl,
-                    decoration: const InputDecoration(
-                      labelText: 'API Key（可选）',
-                      isDense: true,
-                    ),
-                    obscureText: true,
-                  ),
-                  const SizedBox(height: 8),
-                  SwitchListTile(
-                    contentPadding: EdgeInsets.zero,
-                    title: const Text('启用'),
-                    subtitle: const Text('关闭后不显示在生成面板'),
-                    value: enabled,
-                    onChanged: (v) => setLocal(() => enabled = v),
+                  IconButton(
+                    tooltip: '关闭',
+                    visualDensity: VisualDensity.compact,
+                    onPressed: () => Navigator.pop(context),
+                    icon: Icon(Icons.close, color: cs.onSurfaceVariant),
                   ),
                 ],
               ),
             ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(ctx),
-                child: const Text('取消'),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 16, 20, 0),
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  color: cs.surfaceContainerHighest.withValues(alpha: 0.45),
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: cs.outlineVariant),
+                ),
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(14, 14, 14, 10),
+                  child: Column(
+                    children: [
+                      TextField(
+                        controller: _nameCtrl,
+                        autofocus: widget.isClone || widget.existing == null,
+                        textInputAction: TextInputAction.next,
+                        decoration: const InputDecoration(
+                          labelText: '名称',
+                          hintText: '例如 本机 / 云 GPU',
+                          prefixIcon: Icon(Icons.badge_outlined, size: 18),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller: _urlCtrl,
+                        textInputAction: TextInputAction.next,
+                        onChanged: (_) {
+                          if (_urlError != null) {
+                            setState(() => _urlError = null);
+                          }
+                        },
+                        decoration: InputDecoration(
+                          labelText: 'Base URL',
+                          hintText: AppConfig.defaultComfyBaseUrl,
+                          prefixIcon:
+                              const Icon(Icons.link_outlined, size: 18),
+                          errorText: _urlError,
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller: _keyCtrl,
+                        obscureText: _obscureKey,
+                        decoration: InputDecoration(
+                          labelText: 'API Key（可选）',
+                          prefixIcon:
+                              const Icon(Icons.key_outlined, size: 18),
+                          suffixIcon: IconButton(
+                            tooltip: _obscureKey ? '显示' : '隐藏',
+                            onPressed: () =>
+                                setState(() => _obscureKey = !_obscureKey),
+                            icon: Icon(
+                              _obscureKey
+                                  ? Icons.visibility_outlined
+                                  : Icons.visibility_off_outlined,
+                              size: 18,
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      Material(
+                        color: cs.surfaceContainerLowest,
+                        borderRadius: BorderRadius.circular(8),
+                        child: SwitchListTile(
+                          contentPadding: const EdgeInsets.symmetric(
+                            horizontal: 10,
+                          ),
+                          secondary: Icon(
+                            _enabled
+                                ? Icons.check_circle_outline
+                                : Icons.pause_circle_outline,
+                            size: 20,
+                            color: _enabled
+                                ? cs.primary
+                                : cs.onSurfaceVariant,
+                          ),
+                          title: Text(
+                            '启用此实例',
+                            style: text.bodyMedium?.copyWith(
+                              fontWeight: FontWeight.w600,
+                              color: cs.onSurface,
+                            ),
+                          ),
+                          subtitle: Text(
+                            '关闭后不出现在生成面板列表',
+                            style: text.bodySmall?.copyWith(
+                              color: cs.onSurfaceVariant,
+                            ),
+                          ),
+                          value: _enabled,
+                          onChanged: (v) => setState(() => _enabled = v),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
               ),
-              FilledButton(
-                onPressed: () {
-                  final name = nameCtrl.text.trim();
-                  final url = urlCtrl.text.trim();
-                  if (url.isEmpty) return;
-                  Navigator.pop(
-                    ctx,
-                    ComfyServer(
-                      id: existing?.id ??
-                          'srv_${DateTime.now().millisecondsSinceEpoch}',
-                      name: name.isEmpty ? 'ComfyUI' : name,
-                      baseUrl: url,
-                      apiKey: keyCtrl.text,
-                      enabled: enabled,
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 18, 20, 18),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton(
+                      onPressed: () => Navigator.pop(context),
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: cs.onSurface,
+                        side: BorderSide(color: cs.outline),
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        textStyle: const TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      child: const Text('取消'),
                     ),
-                  );
-                },
-                child: const Text('保存'),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: FilledButton(
+                      onPressed: _submit,
+                      style: FilledButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                      ),
+                      child: Text(widget.isClone ? '创建克隆' : '保存'),
+                    ),
+                  ),
+                ],
               ),
-            ],
-          );
-        },
-      );
-    },
-  );
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }
 
 Future<StartCmd?> _editStartCmd(BuildContext context, {StartCmd? existing}) {
