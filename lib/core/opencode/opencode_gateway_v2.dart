@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import '../opencode_sessions.dart';
+import '../process_encoding.dart';
 import 'opencode_gateway.dart';
 
 /// V2：CLI 自管 service；启动 `opencode` / `-s`；会话 CRUD 走 CLI/`opencode api`。
@@ -51,11 +52,19 @@ class OpenCodeGatewayV2 implements OpenCodeGateway {
 
     // V2：`session list` 按「当前项目」作用域，必须在目标 cwd 下执行；
     // 不能依赖宿主 exe 的 cwd（Debug 包常在 build\...\runner\Debug）。
-    final rows = await _runSessionListJson(maxCount, workingDirectory: dir);
+    var rows = await _runSessionListJson(maxCount, workingDirectory: dir);
+    // 个别机器上 CLI 列表空/解码失败时，走 API 再按目录过滤（与 V1 一致）。
+    if (rows.isEmpty) {
+      rows = await _runSessionListViaApi(maxCount * 6, workingDirectory: dir);
+      rows = await _filterRowsByCwd(rows, dir);
+    }
+
     final matched = <OpenCodeSessionInfo>[];
     for (final row in rows) {
       final info = OpenCodeSessionInfo.fromJson(row);
       if (info.id.isEmpty) continue;
+      // 与 TUI `/session` 对齐：不展示子会话（API 回退曾把 parent 会话漏进来）。
+      if (!info.isRoot) continue;
       matched.add(info);
       if (matched.length >= maxCount) break;
     }
@@ -71,15 +80,11 @@ class OpenCodeGatewayV2 implements OpenCodeGateway {
   }) async {
     final id = sessionId.trim();
     if (id.isEmpty) throw StateError('会话 ID 为空');
-    final result = await Process.run(
-      'opencode',
-      ['session', 'delete', id],
-      runInShell: true,
-      stdoutEncoding: utf8,
-      stderrEncoding: utf8,
-    );
+    final result = await runOpenCodeRaw(['session', 'delete', id]);
     if (result.exitCode != 0) {
-      final err = '${result.stderr}${result.stdout}'.trim();
+      final err =
+          '${decodeProcessOutput(result.stderr)}${decodeProcessOutput(result.stdout)}'
+              .trim();
       throw StateError(err.isEmpty ? '删除失败 (${result.exitCode})' : err);
     }
     invalidateOpenCodeSessionCache();
@@ -97,21 +102,17 @@ class OpenCodeGatewayV2 implements OpenCodeGateway {
     if (trimmed.isEmpty) throw StateError('标题不能为空');
 
     final body = jsonEncode({'title': trimmed});
-    final result = await Process.run(
-      'opencode',
-      [
-        'api',
-        'session.update',
-        '--param',
-        'sessionID=$id',
-        '-d',
-        body,
-      ],
-      runInShell: true,
-      stdoutEncoding: utf8,
-      stderrEncoding: utf8,
-    );
-    final text = '${result.stdout}${result.stderr}'.trim();
+    final result = await runOpenCodeRaw([
+      'api',
+      'session.update',
+      '--param',
+      'sessionID=$id',
+      '-d',
+      body,
+    ]);
+    final text =
+        '${decodeProcessOutput(result.stdout)}${decodeProcessOutput(result.stderr)}'
+            .trim();
     if (result.exitCode != 0) {
       throw StateError(text.isEmpty ? '重命名失败 (${result.exitCode})' : text);
     }
@@ -226,28 +227,79 @@ class OpenCodeGatewayV2 implements OpenCodeGateway {
     int maxCount, {
     required String workingDirectory,
   }) async {
-    final result = await Process.run(
-      'opencode',
+    final result = await runOpenCodeRaw(
       ['session', 'list', '-n', '$maxCount', '--format', 'json'],
       workingDirectory: workingDirectory,
-      runInShell: true,
-      stdoutEncoding: utf8,
-      stderrEncoding: utf8,
     );
     if (result.exitCode != 0) {
+      final err = decodeProcessOutput(result.stderr, preferJson: false).trim();
       throw StateError(
-        'opencode session list 失败 (${result.exitCode}): ${result.stderr}'
-            .trim(),
+        'opencode session list 失败 (${result.exitCode}): $err',
       );
     }
-    final text = (result.stdout as String).trim();
-    if (text.isEmpty) return const [];
-    final decoded = jsonDecode(text);
-    if (decoded is! List) return const [];
+    return _parseSessionRows(
+      decodeProcessOutput(result.stdout, preferJson: true),
+    );
+  }
+
+  /// `opencode api session.list`（service 侧多为 UTF-8 JSON）。
+  static Future<List<Map<String, dynamic>>> _runSessionListViaApi(
+    int maxCount, {
+    required String workingDirectory,
+  }) async {
+    // roots=true：只要顶层，避免子会话占满一页（与 TUI 预期一致）。
+    final result = await runOpenCodeRaw(
+      ['api', 'session.list', '--param', 'roots=true'],
+      workingDirectory: workingDirectory,
+    );
+    if (result.exitCode != 0) {
+      return const [];
+    }
+    final rows = _parseSessionRows(
+      decodeProcessOutput(result.stdout, preferJson: true),
+    );
+    if (rows.length <= maxCount) return rows;
+    return rows.sublist(0, maxCount);
+  }
+
+  static List<Map<String, dynamic>> _parseSessionRows(String text) {
+    final trimmed = text.trim();
+    if (trimmed.isEmpty) return const [];
+    late final Object decoded;
+    try {
+      decoded = jsonDecode(trimmed);
+    } on FormatException catch (e) {
+      throw StateError('会话列表 JSON 解析失败: $e');
+    }
+    final list = decoded is List
+        ? decoded
+        : (decoded is Map && decoded['data'] is List)
+            ? decoded['data'] as List
+            : null;
+    if (list == null) return const [];
     return [
-      for (final item in decoded)
+      for (final item in list)
         if (item is Map) Map<String, dynamic>.from(item),
     ];
+  }
+
+  static Future<List<Map<String, dynamic>>> _filterRowsByCwd(
+    List<Map<String, dynamic>> rows,
+    String cwd,
+  ) async {
+    await WindowsDriveUncCache.instance.refresh();
+    final cwdAliases = openCodePathAliases(cwd);
+    final out = <Map<String, dynamic>>[];
+    for (final row in rows) {
+      final info = OpenCodeSessionInfo.fromJson(row);
+      if (!info.isRoot) continue;
+      final sessionDir = info.directory;
+      if (sessionDir == null || sessionDir.isEmpty) continue;
+      final sessionAliases = openCodePathAliases(sessionDir);
+      if (!cwdAliases.any(sessionAliases.contains)) continue;
+      out.add(row);
+    }
+    return out;
   }
 }
 

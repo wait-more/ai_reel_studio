@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'process_encoding.dart';
 import 'windows_path.dart';
 
 export 'windows_path.dart' show WindowsDriveUncCache;
@@ -13,6 +14,8 @@ class OpenCodeSessionInfo {
   final DateTime? created;
   final String? directory;
   final String? projectId;
+  /// 非空表示子会话（explore 等），与 TUI `/session` 一样不进顶层列表。
+  final String? parentId;
 
   const OpenCodeSessionInfo({
     required this.id,
@@ -21,7 +24,14 @@ class OpenCodeSessionInfo {
     this.created,
     this.directory,
     this.projectId,
+    this.parentId,
   });
+
+  /// 顶层可恢复会话（无 parent）。
+  bool get isRoot {
+    final p = parentId?.trim();
+    return p == null || p.isEmpty;
+  }
 
   factory OpenCodeSessionInfo.fromJson(Map<String, dynamic> json) {
     final title = (json['title'] as String?)?.trim();
@@ -30,6 +40,9 @@ class OpenCodeSessionInfo {
     final timeMap = time is Map ? Map<String, dynamic>.from(time) : null;
     final locationMap =
         location is Map ? Map<String, dynamic>.from(location) : null;
+    final parentRaw =
+        json['parentId'] ?? json['parent_id'] ?? json['parentID'];
+    final parent = parentRaw?.toString().trim();
     return OpenCodeSessionInfo(
       id: (json['id'] as String?)?.trim() ?? '',
       title: (title == null || title.isEmpty) ? '未命名会话' : title,
@@ -44,6 +57,7 @@ class OpenCodeSessionInfo {
       projectId: (json['projectId'] ??
           json['project_id'] ??
           json['projectID']) as String?,
+      parentId: (parent == null || parent.isEmpty) ? null : parent,
     );
   }
 
@@ -54,6 +68,7 @@ class OpenCodeSessionInfo {
     DateTime? created,
     String? directory,
     String? projectId,
+    String? parentId,
   }) {
     return OpenCodeSessionInfo(
       id: id ?? this.id,
@@ -62,6 +77,7 @@ class OpenCodeSessionInfo {
       created: created ?? this.created,
       directory: directory ?? this.directory,
       projectId: projectId ?? this.projectId,
+      parentId: parentId ?? this.parentId,
     );
   }
 
@@ -109,19 +125,14 @@ bool openCodePathsEqual(
 
 Future<List<Map<String, dynamic>>> _runOpenCodeDbJson(String sql) async {
   // 直接 `opencode db <sql>`，由 CLI 自己找库；不再先跑一次 db path。
-  final result = await Process.run(
-    'opencode',
-    ['db', sql, '--format', 'json'],
-    runInShell: true,
-    stdoutEncoding: utf8,
-    stderrEncoding: utf8,
-  );
+  final result = await runOpenCodeRaw(['db', sql, '--format', 'json']);
   if (result.exitCode != 0) {
     throw StateError(
-      'opencode db 查询失败 (${result.exitCode}): ${result.stderr}'.trim(),
+      'opencode db 查询失败 (${result.exitCode}): '
+      '${decodeProcessOutput(result.stderr)}'.trim(),
     );
   }
-  final text = (result.stdout as String).trim();
+  final text = decodeProcessOutput(result.stdout, preferJson: true).trim();
   if (text.isEmpty) return const [];
   final decoded = jsonDecode(text);
   if (decoded is! List) return const [];

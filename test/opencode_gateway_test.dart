@@ -212,6 +212,18 @@ void main() {
       expect(info.projectId, 'p2');
       expect(info.updated, isNotNull);
       expect(info.created, isNotNull);
+      expect(info.isRoot, isTrue);
+    });
+
+    test('child session has parentId and is not root', () {
+      final info = OpenCodeSessionInfo.fromJson({
+        'id': 'ses_child',
+        'title': 'explore',
+        'parentID': 'ses_parent',
+        'directory': r'E:\proj',
+      });
+      expect(info.parentId, 'ses_parent');
+      expect(info.isRoot, isFalse);
     });
   });
 }
