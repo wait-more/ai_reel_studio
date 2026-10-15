@@ -2562,6 +2562,25 @@ class _TerminalTabCloseButtonState extends State<_TerminalTabCloseButton> {
   }
 }
 
+/// flterm 在 Windows 默认把 Ctrl+A/V/K 绑成全选/粘贴/清屏。
+/// 映射到无 [Action] 的 Intent 后 Shortcuts 会忽略该键，事件继续交给 PTY
+///（OpenCode 会话列表 Ctrl+A 归档等）。
+class _TerminalPtyPassThroughIntent extends Intent {
+  const _TerminalPtyPassThroughIntent();
+}
+
+class _TerminalHostCopyIntent extends Intent {
+  const _TerminalHostCopyIntent();
+}
+
+class _TerminalHostPasteIntent extends Intent {
+  const _TerminalHostPasteIntent();
+}
+
+class _TerminalHostSelectAllIntent extends Intent {
+  const _TerminalHostSelectAllIntent();
+}
+
 /// 渲染单个会话的 TerminalView 并监听会话变更。
 class _TerminalViewClient extends StatefulWidget {
   final TerminalSession session;
@@ -2583,6 +2602,22 @@ class _TerminalViewClient extends StatefulWidget {
 
 class _TerminalViewClientState extends State<_TerminalViewClient> {
   late final TerminalScrollController _scrollController;
+
+  /// 覆盖 flterm Windows 默认：Ctrl+字母留给 PTY；宿主剪贴板改用 Ctrl+Shift。
+  static const _terminalShortcuts = <ShortcutActivator, Intent>{
+    SingleActivator(LogicalKeyboardKey.keyA, control: true):
+        _TerminalPtyPassThroughIntent(),
+    SingleActivator(LogicalKeyboardKey.keyV, control: true):
+        _TerminalPtyPassThroughIntent(),
+    SingleActivator(LogicalKeyboardKey.keyK, control: true):
+        _TerminalPtyPassThroughIntent(),
+    SingleActivator(LogicalKeyboardKey.keyC, control: true, shift: true):
+        _TerminalHostCopyIntent(),
+    SingleActivator(LogicalKeyboardKey.keyV, control: true, shift: true):
+        _TerminalHostPasteIntent(),
+    SingleActivator(LogicalKeyboardKey.keyA, control: true, shift: true):
+        _TerminalHostSelectAllIntent(),
+  };
 
   @override
   void initState() {
@@ -2611,6 +2646,21 @@ class _TerminalViewClientState extends State<_TerminalViewClient> {
     super.dispose();
   }
 
+  Future<void> _copySelection() async {
+    final controller = widget.session.controller;
+    final text = controller.selectedText();
+    if (text.isEmpty) return;
+    await Clipboard.setData(ClipboardData(text: text));
+  }
+
+  Future<void> _pasteClipboard() async {
+    final data = await Clipboard.getData(Clipboard.kTextPlain);
+    final text = data?.text;
+    if (text != null && text.isNotEmpty) {
+      widget.session.controller.paste(text);
+    }
+  }
+
   Future<void> _onSecondaryPointer(PointerDownEvent event) async {
     if (event.buttons & kSecondaryMouseButton == 0) return;
     final controller = widget.session.controller;
@@ -2622,11 +2672,7 @@ class _TerminalViewClientState extends State<_TerminalViewClient> {
       }
       return;
     }
-    final data = await Clipboard.getData(Clipboard.kTextPlain);
-    final text = data?.text;
-    if (text != null && text.isNotEmpty) {
-      controller.paste(text);
-    }
+    await _pasteClipboard();
   }
 
   @override
@@ -2646,6 +2692,7 @@ class _TerminalViewClientState extends State<_TerminalViewClient> {
         foreground: TerminalTheme.dark().palette.foreground,
       ),
     );
+    final controller = widget.session.controller;
 
     return Container(
       color: const Color(0xFF1E1E1E),
@@ -2656,14 +2703,42 @@ class _TerminalViewClientState extends State<_TerminalViewClient> {
           thumbVisibility: true,
           trackVisibility: true,
           interactive: true,
-          child: TerminalView(
-            controller: widget.session.controller,
-            focusNode: widget.focusNode,
-            autofocus: widget.autofocus,
-            showKeyboard: widget.showKeyboard,
-            scrollController: _scrollController,
-            padding: const EdgeInsets.all(4),
-            theme: theme,
+          // Actions 挂在 TerminalView 外：内部 Shortcuts 可通过祖先找到宿主剪贴板 Intent。
+          child: Actions(
+            actions: <Type, Action<Intent>>{
+              _TerminalHostCopyIntent: CallbackAction<_TerminalHostCopyIntent>(
+                onInvoke: (_) {
+                  unawaited(_copySelection());
+                  return null;
+                },
+              ),
+              _TerminalHostPasteIntent: CallbackAction<_TerminalHostPasteIntent>(
+                onInvoke: (_) {
+                  unawaited(_pasteClipboard());
+                  return null;
+                },
+              ),
+              _TerminalHostSelectAllIntent:
+                  CallbackAction<_TerminalHostSelectAllIntent>(
+                onInvoke: (_) {
+                  controller.selectAll();
+                  return null;
+                },
+              ),
+            },
+            child: TerminalView(
+              controller: controller,
+              focusNode: widget.focusNode,
+              autofocus: widget.autofocus,
+              showKeyboard: widget.showKeyboard,
+              scrollController: _scrollController,
+              padding: const EdgeInsets.all(4),
+              theme: theme,
+              gestureSettings: const TerminalGestureSettings(
+                selectAllShortcut: false,
+              ),
+              shortcuts: _terminalShortcuts,
+            ),
           ),
         ),
       ),
