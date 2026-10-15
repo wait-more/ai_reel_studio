@@ -167,6 +167,7 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
   /// 忽略过期的连接检测 / 模板加载，避免切换 URL 时连环闪烁。
   int _connGen = 0;
   int _loadGen = 0;
+  int _treeRevealNonce = 0;
   bool _autoSelectScheduled = false;
 
   @override
@@ -1724,6 +1725,16 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
     _releaseTreeCtrlMemoryAfterUse();
   }
 
+  /// 在左侧目录树展开并选中 [path]，不打开编辑器 Tab。
+  void _revealPathInTree(String path) {
+    final p = path.trim();
+    if (p.isEmpty) return;
+    ref.read(treeRevealRequestProvider.notifier).state = TreeRevealRequest(
+      path: p,
+      nonce: ++_treeRevealNonce,
+    );
+  }
+
   /// 「用当前选中 / 当前选中」消费后：只清 Ctrl 多选会话记忆，保留树高亮。
   /// 下次 Ctrl+单击会当作新一轮起点（丢弃旧集合、只留当前项），避免高亮瞬间消失乱跳。
   void _releaseTreeCtrlMemoryAfterUse() {
@@ -3143,22 +3154,26 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
                         style: TextStyle(fontSize: 12.5, color: cs.onSurface),
                       ),
               ),
-              TextButton(
+              FilledButton.tonal(
                 onPressed: _useSelectedAsOutputDir,
-                style: TextButton.styleFrom(
+                style: FilledButton.styleFrom(
                   visualDensity: VisualDensity.compact,
-                  padding: const EdgeInsets.symmetric(horizontal: 8),
+                  padding: const EdgeInsets.symmetric(horizontal: 10),
                   minimumSize: const Size(0, 32),
                   tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  textStyle: const TextStyle(fontSize: 12),
                 ),
                 child: const Text('当前选中'),
               ),
+              const SizedBox(width: 4),
               FilledButton.tonal(
                 onPressed: _pickOutputDir,
                 style: FilledButton.styleFrom(
                   visualDensity: VisualDensity.compact,
                   padding: const EdgeInsets.symmetric(horizontal: 10),
                   minimumSize: const Size(0, 32),
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  textStyle: const TextStyle(fontSize: 12),
                 ),
                 child: const Text('浏览'),
               ),
@@ -4343,6 +4358,56 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
           radius: BorderRadius.circular(6),
           builder: (context, dropHot, dropBlocked) {
             final fieldCs = Theme.of(context).colorScheme;
+            // 路径区与操作区分开：预览贴路径，按钮成组且样式统一。
+            final mediaActionStyle = FilledButton.styleFrom(
+              visualDensity: VisualDensity.compact,
+              padding: const EdgeInsets.symmetric(horizontal: 10),
+              minimumSize: const Size(0, 32),
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              textStyle: const TextStyle(fontSize: 12),
+            );
+            Widget pathChild;
+            if (dropHot) {
+              pathChild = Text(
+                '释放以填入路径',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                  color: fieldCs.primary,
+                ),
+              );
+            } else if (dropBlocked) {
+              pathChild = Text(
+                '文件类型不匹配，无法填入',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                  color: fieldCs.error,
+                ),
+              );
+            } else if (path.isEmpty) {
+              pathChild = Text(
+                '未选择（可拖入文件）',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: 12,
+                  color: fieldCs.onSurfaceVariant,
+                ),
+              );
+            } else {
+              pathChild = PathEllipsisText(
+                path,
+                style: TextStyle(
+                  fontSize: 12,
+                  color: fieldCs.onSurfaceVariant,
+                ),
+              );
+            }
             return Padding(
               padding: const EdgeInsets.only(bottom: 8),
               child: Column(
@@ -4351,58 +4416,16 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
                   Text(field.label, style: const TextStyle(fontSize: 12)),
                   Row(
                     children: [
-                      // 路径在 Expanded 内按剩余宽度折叠；预览图标固定宽在外侧。
-                      Expanded(
-                        child: dropHot
-                            ? Text(
-                                '释放以填入路径',
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: TextStyle(
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.w600,
-                                  color: fieldCs.primary,
-                                ),
-                              )
-                            : dropBlocked
-                                ? Text(
-                                    '文件类型不匹配，无法填入',
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: TextStyle(
-                                      fontSize: 12,
-                                      fontWeight: FontWeight.w600,
-                                      color: fieldCs.error,
-                                    ),
-                                  )
-                                : path.isEmpty
-                                    ? Text(
-                                        '未选择（可拖入文件）',
-                                        maxLines: 1,
-                                        overflow: TextOverflow.ellipsis,
-                                        style: TextStyle(
-                                          fontSize: 12,
-                                          color: fieldCs.onSurfaceVariant,
-                                        ),
-                                      )
-                                    : PathEllipsisText(
-                                        path,
-                                        style: TextStyle(
-                                          fontSize: 12,
-                                          color: fieldCs.onSurfaceVariant,
-                                        ),
-                                      ),
-                      ),
-                      if (!dropHot && !dropBlocked && path.isNotEmpty)
+                      Expanded(child: pathChild),
+                      if (!dropHot && !dropBlocked && canPreview) ...[
+                        const SizedBox(width: 2),
+                        MediaHoverPreviewIcon(path: path),
+                      ],
+                      const SizedBox(width: 8),
+                      if (!dropHot && !dropBlocked && path.isNotEmpty) ...[
                         Builder(
-                          builder: (btnCtx) => TextButton(
-                            style: TextButton.styleFrom(
-                              visualDensity: VisualDensity.compact,
-                              padding:
-                                  const EdgeInsets.symmetric(horizontal: 6),
-                              minimumSize: const Size(0, 32),
-                              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                            ),
+                          builder: (btnCtx) => FilledButton.tonal(
+                            style: mediaActionStyle,
                             onPressed: () => _openSiblingMediaPicker(
                               anchorContext: btnCtx,
                               field: field,
@@ -4411,25 +4434,32 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
                             child: const Row(
                               mainAxisSize: MainAxisSize.min,
                               children: [
-                                Text('同目录', style: TextStyle(fontSize: 12)),
+                                Text('同目录'),
                                 Icon(Icons.arrow_drop_down, size: 16),
                               ],
                             ),
                           ),
                         ),
-                      if (!dropHot && !dropBlocked && canPreview)
-                        MediaHoverPreviewIcon(path: path),
-                      TextButton(
-                        style: TextButton.styleFrom(
-                          visualDensity: VisualDensity.compact,
+                        const SizedBox(width: 4),
+                        Tooltip(
+                          message: '在目录树中定位',
+                          waitDuration: const Duration(milliseconds: 400),
+                          child: FilledButton.tonal(
+                            style: mediaActionStyle,
+                            onPressed: () => _revealPathInTree(path),
+                            child: const Text('定位'),
+                          ),
                         ),
+                        const SizedBox(width: 4),
+                      ],
+                      FilledButton.tonal(
+                        style: mediaActionStyle,
                         onPressed: () => _useSelectedFile(field),
                         child: const Text('用当前选中'),
                       ),
+                      const SizedBox(width: 4),
                       FilledButton.tonal(
-                        style: FilledButton.styleFrom(
-                          visualDensity: VisualDensity.compact,
-                        ),
+                        style: mediaActionStyle,
                         onPressed: () => _pickMedia(field),
                         child: const Text('浏览'),
                       ),
