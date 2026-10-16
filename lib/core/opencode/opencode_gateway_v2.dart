@@ -101,17 +101,17 @@ class OpenCodeGatewayV2 implements OpenCodeGateway {
     if (id.isEmpty) throw StateError('会话 ID 为空');
     if (trimmed.isEmpty) throw StateError('标题不能为空');
 
-    final body = jsonEncode({'title': trimmed});
-    final result = await runOpenCodeRaw([
+    // 直接 argv 传 `-d`。经 cmd 拼 JSON 会拆引号，服务端报 Expected object。
+    final result = await runOpenCodeDirect([
       'api',
       'session.update',
       '--param',
       'sessionID=$id',
       '-d',
-      body,
+      jsonEncode({'title': trimmed}),
     ]);
     final text =
-        '${decodeProcessOutput(result.stdout)}${decodeProcessOutput(result.stderr)}'
+        '${decodeProcessOutput(result.stdout, preferJson: true)}${decodeProcessOutput(result.stderr)}'
             .trim();
     if (result.exitCode != 0) {
       throw StateError(text.isEmpty ? '重命名失败 (${result.exitCode})' : text);
@@ -148,7 +148,8 @@ class OpenCodeGatewayV2 implements OpenCodeGateway {
     if (id.isEmpty) {
       return OpenCodeNavResult.failed('会话 ID 为空');
     }
-    // V2 尚无稳定的 live TUI 切会话 API：统一走重启 `-s`。
+    // v2.0.30 service OpenAPI 仍无 TUI 切会话（无 /tui/select-session、
+    // 无 session.select）。session.view 只是标记已读。统一走重启 `-s`。
     return OpenCodeNavResult.needsRestart('V2 需重启 TUI 切换会话');
   }
 

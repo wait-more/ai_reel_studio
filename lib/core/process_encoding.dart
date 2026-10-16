@@ -81,3 +81,49 @@ Future<ProcessResult> runOpenCodeRaw(
     stderrEncoding: null,
   );
 }
+
+/// 直接启动 opencode 可执行文件，参数按 argv 传递。
+///
+/// 含 JSON 的 `-d` 必须走这里。`runOpenCodeRaw` 经 cmd 拼命令行时会拆掉引号，
+/// 服务端收到字符串后报 Expected object。
+Future<ProcessResult> runOpenCodeDirect(
+  List<String> args, {
+  String? workingDirectory,
+}) async {
+  final exe = await _resolveOpenCodeExecutable();
+  return Process.run(
+    exe,
+    args,
+    workingDirectory: workingDirectory,
+    runInShell: false,
+    stdoutEncoding: null,
+    stderrEncoding: null,
+  );
+}
+
+Future<String> _resolveOpenCodeExecutable() async {
+  if (!Platform.isWindows) return 'opencode';
+  final where = await Process.run(
+    'where.exe',
+    ['opencode'],
+    runInShell: false,
+    stdoutEncoding: systemEncoding,
+  );
+  final lines = '${where.stdout}'
+      .split(RegExp(r'\r?\n'))
+      .map((s) => s.trim())
+      .where((s) => s.isNotEmpty);
+  for (final line in lines) {
+    if (line.toLowerCase().endsWith('.exe') && File(line).existsSync()) {
+      return line;
+    }
+  }
+  for (final line in lines) {
+    final slash = line.lastIndexOf(RegExp(r'[\\/]'));
+    if (slash < 0) continue;
+    final dir = line.substring(0, slash);
+    final candidate = '$dir\\node_modules\\@opencode\\cli\\bin\\opencode.exe';
+    if (File(candidate).existsSync()) return candidate;
+  }
+  return 'opencode';
+}
