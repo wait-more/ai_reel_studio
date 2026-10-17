@@ -124,20 +124,67 @@ bool openCodePathsEqual(
     pathsEquivalent(a, b, driveUncMappings: driveUncMappings);
 
 Future<List<Map<String, dynamic>>> _runOpenCodeDbJson(String sql) async {
-  // 直接 `opencode db <sql>`，由 CLI 自己找库；不再先跑一次 db path。
-  final result = await runOpenCodeRaw(['db', sql, '--format', 'json']);
+  // 必须走 argv 直传：经 cmd 拼命令时带空格/括号的 SQL 会被拆开，
+  // CLI 只看到 `opencode db` 就打印帮助并 exit 1。
+  // `--format` 放在 query 前，兼容部分版本对「位置参数后 flag」的挑剔解析。
+  final result = await runOpenCodeDirect([
+    'db',
+    '--format',
+    'json',
+    sql,
+  ]);
+  final err = decodeProcessOutput(result.stderr).trim();
+  final out = decodeProcessOutput(result.stdout, preferJson: true).trim();
   if (result.exitCode != 0) {
+    final detail = err.isNotEmpty ? err : out;
     throw StateError(
-      'opencode db 查询失败 (${result.exitCode}): '
-      '${decodeProcessOutput(result.stderr)}'.trim(),
+      'opencode db 查询失败 (${result.exitCode}): $detail'.trim(),
+    );
+  }
+  if (out.isEmpty) return const [];
+  // 误打成帮助页时不要当成空列表吞掉。
+  if (out.startsWith('DESCRIPTION') || out.contains('database tools')) {
+    throw StateError('opencode db 未能执行查询（CLI 返回了帮助信息）');
+  }
+  final decoded = jsonDecode(out);
+  if (decoded is! List) return const [];
+  return [
+    for (final item in decoded)
+      if (item is Map) Map<String, dynamic>.from(item),
+  ];
+}
+
+/// 仅 V1 回退：`opencode session list --format json`（项目作用域，需 cwd）。
+/// V2 列表走 [OpenCodeGatewayV2]，勿复用本函数。
+Future<List<Map<String, dynamic>>> _runOpenCodeV1SessionListJson(
+  int maxCount, {
+  required String workingDirectory,
+}) async {
+  final result = await runOpenCodeDirect([
+    'session',
+    'list',
+    '-n',
+    '$maxCount',
+    '--format',
+    'json',
+  ], workingDirectory: workingDirectory);
+  if (result.exitCode != 0) {
+    final err = decodeProcessOutput(result.stderr).trim();
+    throw StateError(
+      'opencode session list 失败 (${result.exitCode}): $err'.trim(),
     );
   }
   final text = decodeProcessOutput(result.stdout, preferJson: true).trim();
   if (text.isEmpty) return const [];
   final decoded = jsonDecode(text);
-  if (decoded is! List) return const [];
+  final list = decoded is List
+      ? decoded
+      : (decoded is Map && decoded['data'] is List)
+          ? decoded['data'] as List
+          : null;
+  if (list == null) return const [];
   return [
-    for (final item in decoded)
+    for (final item in list)
       if (item is Map) Map<String, dynamic>.from(item),
   ];
 }
@@ -150,10 +197,10 @@ List<OpenCodeSessionInfo>? peekOpenCodeSessionCache(String cwd) {
   return List<OpenCodeSessionInfo>.of(_cachedSessions!);
 }
 
-/// 列出 [cwd] 对应项目目录下的根会话（按更新时间倒序）。
+/// **仅供 [OpenCodeGatewayV1]**：列出 [cwd] 下根会话（按更新时间倒序）。
 ///
-/// 走 `opencode db` 直查，比 `session list` 启动整套运行时快很多；
-/// 并在客户端按目录归一化过滤（global 项目下 CLI 常会混进其它目录）。
+/// 优先 `opencode db` 直查；失败再回退 V1 的 `session list`。
+/// V2 请用 Gateway 自己的 `session list` / `api session.list`，不要调用本函数。
 Future<List<OpenCodeSessionInfo>> listOpenCodeSessions({
   required String cwd,
   int maxCount = 80,
@@ -178,18 +225,33 @@ Future<List<OpenCodeSessionInfo>> listOpenCodeSessions({
 
   // 多取一些再本地过滤，避免 SQL 路径形态不一致漏数。
   final fetchLimit = (maxCount * 6).clamp(80, 400);
-  final rows = await _runOpenCodeDbJson(
-    'SELECT id, title, directory, project_id, time_updated, time_created '
-    'FROM session '
-    'WHERE parent_id IS NULL AND time_archived IS NULL '
-    'ORDER BY time_updated DESC '
-    'LIMIT $fetchLimit',
-  );
+  List<Map<String, dynamic>> rows;
+  try {
+    rows = await _runOpenCodeDbJson(
+      'SELECT id, title, directory, project_id, time_updated, time_created '
+      'FROM session '
+      'WHERE parent_id IS NULL AND time_archived IS NULL '
+      'ORDER BY time_updated DESC '
+      'LIMIT $fetchLimit',
+    );
+  } catch (dbErr) {
+    // 仅 V1：部分机器 db 参数解析失败时回退 session list（较慢但仍可用）。
+    try {
+      rows = await _runOpenCodeV1SessionListJson(
+        fetchLimit,
+        workingDirectory: dir,
+      );
+    } catch (_) {
+      throw StateError('$dbErr');
+    }
+  }
 
   final matched = <OpenCodeSessionInfo>[];
   for (final row in rows) {
     final info = OpenCodeSessionInfo.fromJson(row);
     if (info.id.isEmpty) continue;
+    // session list 偶发带上子会话，与 TUI 对齐仍过滤。
+    if (!info.isRoot) continue;
     final sessionDir = info.directory;
     if (sessionDir == null || sessionDir.isEmpty) continue;
     final sessionAliases = openCodePathAliases(sessionDir);

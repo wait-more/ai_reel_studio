@@ -46,10 +46,11 @@ String _stripBom(String s) {
   return s;
 }
 
+/// Windows cmd 参数转义：空格/`" `&|<>()` 等需包双引号；内部 `"` 写成 `""`。
 String _quoteCmdArg(String arg) {
   if (arg.isEmpty) return '""';
-  if (!RegExp(r'''[\s"^&|<>()]''').hasMatch(arg)) return arg;
-  return '"${arg.replaceAll('"', r'\"')}"';
+  if (!RegExp(r'''[\s"^&|<>()%!^]''').hasMatch(arg)) return arg;
+  return '"${arg.replaceAll('"', '""')}"';
 }
 
 /// 跑 `opencode` 并拿原始字节。Windows 先 `chcp 65001`，减少 GBK 管道。
@@ -82,48 +83,122 @@ Future<ProcessResult> runOpenCodeRaw(
   );
 }
 
+String? _cachedOpenCodeExe;
+Future<String?>? _resolvingOpenCodeExe;
+
 /// 直接启动 opencode 可执行文件，参数按 argv 传递。
 ///
-/// 含 JSON 的 `-d` 必须走这里。`runOpenCodeRaw` 经 cmd 拼命令行时会拆掉引号，
-/// 服务端收到字符串后报 Expected object。
+/// 优先真实 `.exe`（避免 cmd 拆 JSON/`-d`）。若本机只有 npm 的 `.cmd` 包装
+///（常见于部分 V1 安装），则回退 [runOpenCodeRaw]（已用 cmd `""` 转义）。
 Future<ProcessResult> runOpenCodeDirect(
   List<String> args, {
   String? workingDirectory,
 }) async {
-  final exe = await _resolveOpenCodeExecutable();
-  return Process.run(
-    exe,
-    args,
-    workingDirectory: workingDirectory,
-    runInShell: false,
-    stdoutEncoding: null,
-    stderrEncoding: null,
-  );
+  final exe = await resolveOpenCodeExecutable();
+  if (exe == null) {
+    return runOpenCodeRaw(args, workingDirectory: workingDirectory);
+  }
+  try {
+    return await Process.run(
+      exe,
+      args,
+      workingDirectory: workingDirectory,
+      runInShell: false,
+      stdoutEncoding: null,
+      stderrEncoding: null,
+    );
+  } on ProcessException {
+    // 解析到的路径失效时再走 PATH/shim。
+    return runOpenCodeRaw(args, workingDirectory: workingDirectory);
+  }
 }
 
-Future<String> _resolveOpenCodeExecutable() async {
-  if (!Platform.isWindows) return 'opencode';
-  final where = await Process.run(
-    'where.exe',
-    ['opencode'],
-    runInShell: false,
-    stdoutEncoding: systemEncoding,
-  );
-  final lines = '${where.stdout}'
-      .split(RegExp(r'\r?\n'))
-      .map((s) => s.trim())
-      .where((s) => s.isNotEmpty);
-  for (final line in lines) {
-    if (line.toLowerCase().endsWith('.exe') && File(line).existsSync()) {
-      return line;
-    }
+/// 解析本机可直接 CreateProcess 的 opencode.exe；找不到返回 null。
+Future<String?> resolveOpenCodeExecutable({bool force = false}) {
+  if (!Platform.isWindows) return Future.value('opencode');
+  if (!force && _cachedOpenCodeExe != null) {
+    return Future.value(_cachedOpenCodeExe);
   }
-  for (final line in lines) {
+  if (!force && _resolvingOpenCodeExe != null) return _resolvingOpenCodeExe!;
+  _resolvingOpenCodeExe = _resolveOpenCodeExecutableUncached().whenComplete(() {
+    _resolvingOpenCodeExe = null;
+  });
+  return _resolvingOpenCodeExe!;
+}
+
+Future<String?> _resolveOpenCodeExecutableUncached() async {
+  final candidates = <String>{};
+
+  void addCandidate(String? path) {
+    final p = path?.trim() ?? '';
+    if (p.isEmpty) return;
+    candidates.add(p);
+  }
+
+  Future<void> collectWhere(String name) async {
+    try {
+      final where = await Process.run(
+        'where.exe',
+        [name],
+        runInShell: false,
+        stdoutEncoding: systemEncoding,
+      );
+      for (final line in '${where.stdout}'.split(RegExp(r'\r?\n'))) {
+        addCandidate(line.trim());
+      }
+    } catch (_) {}
+  }
+
+  await collectWhere('opencode.exe');
+  await collectWhere('opencode');
+
+  // 从 npm/cmd 包装旁推断真实二进制。
+  final derived = <String>[];
+  for (final line in candidates) {
+    final lower = line.toLowerCase();
+    if (lower.endsWith('.exe')) continue;
     final slash = line.lastIndexOf(RegExp(r'[\\/]'));
     if (slash < 0) continue;
     final dir = line.substring(0, slash);
-    final candidate = '$dir\\node_modules\\@opencode\\cli\\bin\\opencode.exe';
-    if (File(candidate).existsSync()) return candidate;
+    derived.addAll([
+      '$dir\\opencode.exe',
+      '$dir\\node_modules\\@opencode\\cli\\bin\\opencode.exe',
+      '$dir\\node_modules\\opencode\\bin\\opencode.exe',
+      '$dir\\node_modules\\opencode-ai\\bin\\opencode.exe',
+    ]);
+    if (lower.endsWith('.cmd') || lower.endsWith('.ps1')) {
+      try {
+        final text = await File(line).readAsString();
+        for (final m in RegExp(
+          r'''["']([^"']*opencode\.exe)["']''',
+          caseSensitive: false,
+        ).allMatches(text)) {
+          var hit = m.group(1)!;
+          if (hit.contains('%~dp0') || hit.contains('%dp0%')) {
+            hit = hit
+                .replaceAll('%~dp0', '$dir\\')
+                .replaceAll('%dp0%', '$dir\\');
+          }
+          derived.add(hit);
+        }
+      } catch (_) {}
+    }
   }
-  return 'opencode';
+  candidates.addAll(derived);
+
+  for (final path in candidates) {
+    if (!path.toLowerCase().endsWith('.exe')) continue;
+    if (File(path).existsSync()) {
+      _cachedOpenCodeExe = path;
+      return path;
+    }
+  }
+  _cachedOpenCodeExe = null;
+  return null;
+}
+
+/// 测试用：清空可执行文件缓存。
+void debugResetOpenCodeExecutableCache() {
+  _cachedOpenCodeExe = null;
+  _resolvingOpenCodeExe = null;
 }

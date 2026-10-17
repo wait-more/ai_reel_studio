@@ -30,6 +30,7 @@ class OpenCodeGatewayV1 implements OpenCodeGateway {
     int maxCount = 80,
     bool forceRefresh = false,
   }) {
+    // V1 专用：`opencode db`（失败再回退 session list）。勿与 V2 Gateway 混用。
     return listOpenCodeSessions(
       cwd: cwd,
       maxCount: maxCount,
