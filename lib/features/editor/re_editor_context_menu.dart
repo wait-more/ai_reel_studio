@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -79,6 +81,7 @@ class ReEditorContextMenuController implements SelectionToolbarController {
     _keyHandlerAttached = true;
 
     final chord = ref.read(sendAgentRefChordProvider);
+    // 打开瞬间冻结：右键 pointerUp 可能随后把选区收成光标。
     final selected = controller.selectedText;
     final hasSel = selected.trim().isNotEmpty;
 
@@ -92,22 +95,34 @@ class ReEditorContextMenuController implements SelectionToolbarController {
               ContextMenuButtonItem(
                 label: '剪切',
                 onPressed: () {
+                  final canDelete = !controller.selection.isCollapsed &&
+                      controller.selectedText.isNotEmpty;
+                  if (canDelete) {
+                    controller.cut();
+                  } else if (selected.isNotEmpty) {
+                    // 选区已被右键冲掉：只写剪贴板，避免 cut() 误删。
+                    unawaited(Clipboard.setData(ClipboardData(text: selected)));
+                  }
                   _dismiss();
-                  controller.cut();
                 },
               ),
               ContextMenuButtonItem(
                 label: '复制',
                 onPressed: () {
+                  final text = selected.isNotEmpty
+                      ? selected
+                      : controller.selectedText;
                   _dismiss();
-                  controller.copy();
+                  if (text.isNotEmpty) {
+                    unawaited(Clipboard.setData(ClipboardData(text: text)));
+                  }
                 },
               ),
               ContextMenuButtonItem(
                 label: '粘贴',
                 onPressed: () {
-                  _dismiss();
                   controller.paste();
+                  _dismiss();
                 },
               ),
             ],
@@ -142,9 +157,17 @@ class ReEditorContextMenuController implements SelectionToolbarController {
                 onTap: _dismiss,
               ),
             ),
-            _DesktopContextMenuPanel(
-              anchor: anchors.primaryAnchor,
-              children: children,
+            // 必须与编辑器同属 CodeEditor 这个 TapRegion 组。
+            // 菜单在 root overlay 里，默认在编辑器的 TapRegion 之外；
+            // 点菜单按钮的 pointerDown 会被判成 tap-outside → 编辑器
+            // unfocus → re_editor hideToolbar → removeAny() 在
+            // pointerUp 前把菜单移除，按钮手势随之销毁，
+            // 「复制」的 onPressed 永远执行不到。
+            CodeEditorTapRegion(
+              child: _DesktopContextMenuPanel(
+                anchor: anchors.primaryAnchor,
+                children: children,
+              ),
             ),
           ],
         );
