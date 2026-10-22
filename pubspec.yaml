@@ -31,9 +31,7 @@ dependencies:
   shared_preferences: ^2.5.3
   watcher: ^1.2.1
   window_manager: ^0.4.3
-  # pub.dev 最新仍为 0.0.5；TUI 滚轮修复在 upstream main 未发版。
-  # 发版后可升版本；发版前勿把整库 vendor 进仓库。
-  flterm: ^0.0.5
+  flterm: ^0.0.6
   re_editor: ^0.10.0
   re_highlight: ^0.0.3
 

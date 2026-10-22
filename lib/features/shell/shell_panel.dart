@@ -132,13 +132,13 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
     if (!mounted || _tabs.isEmpty || !identical(_tabs[_activeIndex], active)) {
       return;
     }
+    // flterm 0.0.6：IME 归 TerminalView/FocusNode；非活跃 Tab 失焦即可松手。
     for (final tab in _tabs) {
       if (identical(tab, active)) continue;
-      tab.session.controller.disableKeyboard();
+      tab.focusNode.unfocus();
     }
     active.focusNode.requestFocus();
     FocusManager.instance.applyFocusChangesIfNeeded();
-    active.session.controller.showKeyboard();
   }
 
   _ShellTab _createTab({

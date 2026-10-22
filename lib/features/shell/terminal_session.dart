@@ -18,7 +18,8 @@ class TerminalSession extends ChangeNotifier {
       config: const TerminalConfig(
         cols: 120,
         rows: 32,
-        scrollbackLimit: 8 * 1024 * 1024,
+        // 0.0.6 默认仅 10KB；保持原先约 8MB 历史缓冲。
+        scrollbackMaxBytes: 8 * 1024 * 1024,
       ),
     );
   }
