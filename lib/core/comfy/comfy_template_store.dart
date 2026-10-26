@@ -386,6 +386,34 @@ class ComfyTemplateStore {
     return next;
   }
 
+  /// 调整某 URL 下已绑模板顺序（[templateIds] 顺序即列表顺序）。
+  static Future<ComfyBindings> reorderBoundTemplates({
+    required String serverId,
+    required List<String> templateIds,
+  }) async {
+    final bindings = await loadBindings();
+    final cur = bindings.forServer(serverId);
+    final known = cur.templateIds.toSet();
+    final ordered = <String>[
+      for (final id in templateIds)
+        if (known.contains(id)) id,
+    ];
+    // 漏网的仍挂在末尾，避免误丢绑定。
+    for (final id in cur.templateIds) {
+      if (!ordered.contains(id)) ordered.add(id);
+    }
+    final sel = cur.selectedTemplateId != null &&
+            ordered.contains(cur.selectedTemplateId)
+        ? cur.selectedTemplateId
+        : (ordered.isNotEmpty ? ordered.first : null);
+    final next = bindings.withServer(
+      serverId,
+      ComfyServerBinding(templateIds: ordered, selectedTemplateId: sel),
+    );
+    await saveBindings(next);
+    return next;
+  }
+
   static Future<ComfyBindings> selectTemplate({
     required String serverId,
     required String? templateId,

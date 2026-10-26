@@ -1098,6 +1098,48 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
     );
   }
 
+  Future<void> _reorderEnabledServers(int oldIndex, int newIndex) async {
+    final enabled = List<ComfyServer>.of(ref.read(comfyEnabledServersProvider));
+    if (oldIndex < 0 ||
+        oldIndex >= enabled.length ||
+        newIndex < 0 ||
+        newIndex > enabled.length) {
+      return;
+    }
+    final moved = enabled.removeAt(oldIndex);
+    enabled.insert(newIndex.clamp(0, enabled.length), moved);
+    final all = List<ComfyServer>.of(ref.read(comfyServersProvider));
+    var ei = 0;
+    final next = <ComfyServer>[
+      for (final s in all)
+        if (s.enabled) enabled[ei++] else s,
+    ];
+    await AppConfig.instance.setComfyServers(next);
+    ref.read(comfyServersProvider.notifier).state =
+        AppConfig.instance.comfyServers;
+  }
+
+  Future<void> _reorderBoundTemplates(
+    List<ComfyTemplate> bound,
+    int oldIndex,
+    int newIndex,
+  ) async {
+    if (oldIndex < 0 ||
+        oldIndex >= bound.length ||
+        newIndex < 0 ||
+        newIndex > bound.length) {
+      return;
+    }
+    final ids = bound.map((t) => t.id).toList();
+    final moved = ids.removeAt(oldIndex);
+    ids.insert(newIndex.clamp(0, ids.length), moved);
+    await ComfyTemplateStore.reorderBoundTemplates(
+      serverId: _serverId,
+      templateIds: ids,
+    );
+    ref.read(comfyActionsTickProvider.notifier).state++;
+  }
+
   Future<void> _bindMore(List<ComfyTemplate> all, ComfyServerBinding binding) async {
     final picked = await showBindTemplatesPicker(
       context,
@@ -2602,16 +2644,11 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
                     ),
                   ),
                 )
-              : ListView.separated(
+              : ReorderableListView.builder(
                   padding: const EdgeInsets.symmetric(vertical: 4),
+                  buildDefaultDragHandles: false,
                   itemCount: servers.length,
-                  separatorBuilder: (_, __) => Divider(
-                    height: 1,
-                    thickness: 1,
-                    indent: 10,
-                    endIndent: 10,
-                    color: cs.outlineVariant.withValues(alpha: 0.7),
-                  ),
+                  onReorderItem: _reorderEnabledServers,
                   itemBuilder: (context, i) {
                     final s = servers[i];
                     final selected = s.id == selectedId;
@@ -2625,8 +2662,10 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
                       _linkHint(link),
                       _serverJobCountLine(s.id),
                       _serverTaskSummary(s.id),
+                      '拖动手柄可调整顺序',
                     ].join('\n');
                     return Tooltip(
+                      key: ValueKey('comfy-url-${s.id}'),
                       message: tip,
                       waitDuration: const Duration(milliseconds: 400),
                       child: Material(
@@ -2636,13 +2675,29 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
                         child: InkWell(
                           mouseCursor: SystemMouseCursors.click,
                           onTap: () => _selectServer(s.id),
-                          child: Padding(
-                            padding: const EdgeInsets.fromLTRB(10, 7, 10, 7),
+                          child: Container(
+                            decoration: BoxDecoration(
+                              border: Border(
+                                bottom: BorderSide(
+                                  color: cs.outlineVariant.withValues(alpha: 0.7),
+                                ),
+                              ),
+                            ),
+                            padding: const EdgeInsets.fromLTRB(6, 7, 10, 7),
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
                                 Row(
                                   children: [
+                                    ReorderableDragStartListener(
+                                      index: i,
+                                      child: Icon(
+                                        Icons.drag_handle,
+                                        size: 16,
+                                        color: cs.onSurfaceVariant,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 4),
                                     Container(
                                       width: 8,
                                       height: 8,
@@ -2674,19 +2729,10 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
                                   ],
                                 ),
                                 const SizedBox(height: 2),
-                                Text(
-                                  s.baseUrl,
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: TextStyle(
-                                    fontSize: 11,
-                                    color: cs.onSurfaceVariant,
-                                  ),
-                                ),
-                                if (_serverJobCounts(s.id).total > 0) ...[
-                                  const SizedBox(height: 3),
-                                  Text(
-                                    _serverJobCountLine(s.id),
+                                Padding(
+                                  padding: const EdgeInsets.only(left: 28),
+                                  child: Text(
+                                    s.baseUrl,
                                     maxLines: 1,
                                     overflow: TextOverflow.ellipsis,
                                     style: TextStyle(
@@ -2694,25 +2740,46 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
                                       color: cs.onSurfaceVariant,
                                     ),
                                   ),
+                                ),
+                                if (_serverJobCounts(s.id).total > 0) ...[
+                                  const SizedBox(height: 3),
+                                  Padding(
+                                    padding: const EdgeInsets.only(left: 28),
+                                    child: Text(
+                                      _serverJobCountLine(s.id),
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: TextStyle(
+                                        fontSize: 11,
+                                        color: cs.onSurfaceVariant,
+                                      ),
+                                    ),
+                                  ),
                                   const SizedBox(height: 1),
-                                  Text(
-                                    _serverTaskSummary(s.id),
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: TextStyle(
-                                      fontSize: 11,
-                                      color: oldest != null
-                                          ? cs.primary
-                                          : cs.onSurfaceVariant,
+                                  Padding(
+                                    padding: const EdgeInsets.only(left: 28),
+                                    child: Text(
+                                      _serverTaskSummary(s.id),
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: TextStyle(
+                                        fontSize: 11,
+                                        color: oldest != null
+                                            ? cs.primary
+                                            : cs.onSurfaceVariant,
+                                      ),
                                     ),
                                   ),
                                   if (oldest != null) ...[
                                     const SizedBox(height: 4),
-                                    ClipRRect(
-                                      borderRadius: BorderRadius.circular(2),
-                                      child: LinearProgressIndicator(
-                                        value: progress,
-                                        minHeight: 3,
+                                    Padding(
+                                      padding: const EdgeInsets.only(left: 28),
+                                      child: ClipRRect(
+                                        borderRadius: BorderRadius.circular(2),
+                                        child: LinearProgressIndicator(
+                                          value: progress,
+                                          minHeight: 3,
+                                        ),
                                       ),
                                     ),
                                   ],
@@ -2795,19 +2862,17 @@ class _ComfyPanelState extends ConsumerState<ComfyPanel> {
                     ),
                   ),
                 )
-              : ListView.separated(
+              : ReorderableListView.builder(
+                  buildDefaultDragHandles: false,
                   itemCount: bound.length,
-                  separatorBuilder: (_, __) => Divider(
-                    height: 1,
-                    thickness: 1,
-                    indent: 10,
-                    endIndent: 10,
-                    color: cs.outlineVariant.withValues(alpha: 0.7),
-                  ),
+                  onReorderItem: (oldIndex, newIndex) =>
+                      _reorderBoundTemplates(bound, oldIndex, newIndex),
                   itemBuilder: (context, i) {
                     final t = bound[i];
                     final active = _selected?.id == t.id;
                     return _ComfyBoundTemplateRow(
+                      key: ValueKey('comfy-bound-${t.id}'),
+                      index: i,
                       name: t.name,
                       selected: active,
                       onTap: () => _selectTemplate(t),
@@ -5263,12 +5328,15 @@ class _ComfyLeftSplitterState extends State<_ComfyLeftSplitter> {
 
 class _ComfyBoundTemplateRow extends StatefulWidget {
   const _ComfyBoundTemplateRow({
+    super.key,
+    required this.index,
     required this.name,
     required this.selected,
     required this.onTap,
     required this.onUnbind,
   });
 
+  final int index;
   final String name;
   final bool selected;
   final VoidCallback onTap;
@@ -5294,13 +5362,29 @@ class _ComfyBoundTemplateRowState extends State<_ComfyBoundTemplateRow> {
         child: InkWell(
           mouseCursor: SystemMouseCursors.click,
           onTap: widget.onTap,
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(10, 10, 8, 10),
+          child: Container(
+            decoration: BoxDecoration(
+              border: Border(
+                bottom: BorderSide(
+                  color: cs.outlineVariant.withValues(alpha: 0.7),
+                ),
+              ),
+            ),
+            padding: const EdgeInsets.fromLTRB(6, 10, 8, 10),
             child: Row(
               children: [
+                ReorderableDragStartListener(
+                  index: widget.index,
+                  child: Icon(
+                    Icons.drag_handle,
+                    size: 16,
+                    color: cs.onSurfaceVariant,
+                  ),
+                ),
+                const SizedBox(width: 4),
                 Expanded(
                   child: Tooltip(
-                    message: widget.name,
+                    message: '${widget.name}\n拖动手柄可调整顺序',
                     waitDuration: const Duration(milliseconds: 400),
                     child: Text(
                       widget.name,
@@ -5324,14 +5408,14 @@ class _ComfyBoundTemplateRowState extends State<_ComfyBoundTemplateRow> {
                       size: 18,
                       color: cs.onSurface,
                     ),
-                  visualDensity: VisualDensity.compact,
-                  constraints: const BoxConstraints(
-                    minWidth: 36,
-                    minHeight: 36,
+                    visualDensity: VisualDensity.compact,
+                    constraints: const BoxConstraints(
+                      minWidth: 36,
+                      minHeight: 36,
+                    ),
+                    padding: const EdgeInsets.all(6),
+                    onPressed: widget.onUnbind,
                   ),
-                  padding: const EdgeInsets.all(6),
-                  onPressed: widget.onUnbind,
-                ),
               ],
             ),
           ),

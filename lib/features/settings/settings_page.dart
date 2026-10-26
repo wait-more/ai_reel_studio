@@ -766,75 +766,108 @@ class _ComfySectionState extends ConsumerState<_ComfySection> {
         Text(
           '可配置多个 ComfyUI 地址。关闭「启用」后该实例不会出现在生成面板列表中。'
           '同一动作共享一份 workflow 模板，各实例的节点暴露配置可单独保存。'
-          '「克隆」只复制名称/地址/密钥/启用状态，不复制模板绑定。',
+          '「克隆」只复制名称/地址/密钥/启用状态，不复制模板绑定。'
+          '拖动手柄可调整顺序，顺序会记住并同步到生成面板。',
           style: Theme.of(context).textTheme.bodySmall?.copyWith(
                 color: cs.onSurfaceVariant,
               ),
         ),
         const SizedBox(height: 16),
-        ...servers.map((s) {
-          final active = s.id == selectedId;
-          return Card(
-            margin: const EdgeInsets.only(bottom: 8),
-            child: ListTile(
-              selected: active && s.enabled,
-              leading: Icon(
-                active && s.enabled
-                    ? Icons.radio_button_checked
-                    : Icons.radio_button_off,
-                size: 20,
-                color: s.enabled ? null : cs.onSurfaceVariant,
-              ),
-              title: Text(
-                s.name,
-                style: s.enabled
-                    ? null
-                    : TextStyle(color: cs.onSurfaceVariant),
-              ),
-              subtitle: Text(
-                s.enabled ? s.baseUrl : '${s.baseUrl} · 已关闭',
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-              ),
-              onTap: s.enabled ? () => _selectServer(s.id) : null,
-              trailing: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  IconButton(
-                    tooltip: s.enabled
-                        ? '已启用 · 点击后从生成面板隐藏'
-                        : '已关闭 · 点击后显示在生成面板',
-                    icon: Icon(
-                      s.enabled
-                          ? Icons.visibility_outlined
-                          : Icons.visibility_off_outlined,
-                      size: 20,
-                      color: s.enabled ? cs.primary : cs.onSurfaceVariant,
-                    ),
-                    onPressed: () => _setEnabled(s, !s.enabled),
+        if (servers.isNotEmpty)
+          ReorderableListView.builder(
+            shrinkWrap: true,
+            physics: const NeverScrollableScrollPhysics(),
+            buildDefaultDragHandles: false,
+            itemCount: servers.length,
+            onReorderItem: (oldIndex, newIndex) async {
+              final next = List<ComfyServer>.of(servers);
+              if (oldIndex < 0 ||
+                  oldIndex >= next.length ||
+                  newIndex < 0 ||
+                  newIndex > next.length) {
+                return;
+              }
+              final item = next.removeAt(oldIndex);
+              next.insert(newIndex.clamp(0, next.length), item);
+              await _persist(next);
+            },
+            itemBuilder: (context, index) {
+              final s = servers[index];
+              final active = s.id == selectedId;
+              return Card(
+                key: ValueKey('comfy-srv-${s.id}'),
+                margin: const EdgeInsets.only(bottom: 8),
+                child: ListTile(
+                  selected: active && s.enabled,
+                  leading: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      ReorderableDragStartListener(
+                        index: index,
+                        child: const Icon(Icons.drag_handle, size: 18),
+                      ),
+                      const SizedBox(width: 4),
+                      Icon(
+                        active && s.enabled
+                            ? Icons.radio_button_checked
+                            : Icons.radio_button_off,
+                        size: 20,
+                        color: s.enabled ? null : cs.onSurfaceVariant,
+                      ),
+                    ],
                   ),
-                  IconButton(
-                    tooltip: '编辑',
-                    icon: const Icon(Icons.edit_outlined, size: 20),
-                    onPressed: () => _editServer(s),
-                  ),
-                  IconButton(
-                    tooltip: '克隆',
-                    icon: const Icon(Icons.copy_all_outlined, size: 20),
-                    onPressed: () => _cloneServer(s),
-                  ),
-                  IconButton(
-                    tooltip: '删除',
-                    icon: Icon(Icons.delete_outline, size: 20, color: cs.error),
-                    onPressed: servers.length <= 1
+                  title: Text(
+                    s.name,
+                    style: s.enabled
                         ? null
-                        : () => _deleteServer(s),
+                        : TextStyle(color: cs.onSurfaceVariant),
                   ),
-                ],
-              ),
-            ),
-          );
-        }),
+                  subtitle: Text(
+                    s.enabled ? s.baseUrl : '${s.baseUrl} · 已关闭',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  onTap: s.enabled ? () => _selectServer(s.id) : null,
+                  trailing: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      IconButton(
+                        tooltip: s.enabled
+                            ? '已启用 · 点击后从生成面板隐藏'
+                            : '已关闭 · 点击后显示在生成面板',
+                        icon: Icon(
+                          s.enabled
+                              ? Icons.visibility_outlined
+                              : Icons.visibility_off_outlined,
+                          size: 20,
+                          color: s.enabled ? cs.primary : cs.onSurfaceVariant,
+                        ),
+                        onPressed: () => _setEnabled(s, !s.enabled),
+                      ),
+                      IconButton(
+                        tooltip: '编辑',
+                        icon: const Icon(Icons.edit_outlined, size: 20),
+                        onPressed: () => _editServer(s),
+                      ),
+                      IconButton(
+                        tooltip: '克隆',
+                        icon: const Icon(Icons.copy_all_outlined, size: 20),
+                        onPressed: () => _cloneServer(s),
+                      ),
+                      IconButton(
+                        tooltip: '删除',
+                        icon:
+                            Icon(Icons.delete_outline, size: 20, color: cs.error),
+                        onPressed: servers.length <= 1
+                            ? null
+                            : () => _deleteServer(s),
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            },
+          ),
         const SizedBox(height: 8),
         Align(
           alignment: Alignment.centerLeft,
@@ -1034,7 +1067,8 @@ class _ComfyPromptShortcutsState extends ConsumerState<_ComfyPromptShortcuts> {
         Text(
           '出现在文档右键「填入生成提示词」的二级菜单里，排在「填入上次」后面。'
           '添加时可选手未绑定模板，确认后会同步绑定。'
-          '实例关闭后菜单隐藏；解绑模板默认标为失效（不自动删除），可在解绑时选择一并移除。',
+          '实例关闭后菜单隐藏；解绑模板默认标为失效（不自动删除），可在解绑时选择一并移除。'
+          '拖动手柄可调整顺序并记住。',
           style: Theme.of(context).textTheme.bodySmall?.copyWith(
                 color: cs.onSurfaceVariant,
               ),
@@ -1046,61 +1080,96 @@ class _ComfyPromptShortcutsState extends ConsumerState<_ComfyPromptShortcuts> {
             style: Theme.of(context).textTheme.bodySmall,
           )
         else
-          for (var i = 0; i < shortcuts.length; i++)
-            Card(
-              margin: const EdgeInsets.only(bottom: 8),
-              child: ListTile(
-                title: Text(
-                  shortcuts[i].name.trim().isEmpty
-                      ? (shortcuts[i].displayLabel.isEmpty
-                          ? '未命名路径'
-                          : shortcuts[i].displayLabel)
-                      : '${shortcuts[i].name.trim()}：',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: (!enabledIds.contains(shortcuts[i].serverId) ||
-                          shortcuts[i].displayLabel.startsWith('已失效'))
-                      ? TextStyle(color: cs.onSurface.withValues(alpha: 0.45))
-                      : null,
-                ),
-                subtitle: () {
-                  final lines = <String>[
-                    if (shortcuts[i].name.trim().isNotEmpty)
-                      shortcuts[i].displayLabel,
-                  ];
-                  if (!enabledIds.contains(shortcuts[i].serverId)) {
-                    lines.add('实例已关闭，菜单中隐藏');
-                  } else if (shortcuts[i].displayLabel.startsWith('已失效')) {
-                    lines.add('模板已删除或未绑定，请更新或删除此路径');
-                  }
-                  if (lines.isEmpty) return null;
-                  return Text(
-                    lines.join('\n'),
-                    maxLines: 3,
+          ReorderableListView.builder(
+            shrinkWrap: true,
+            physics: const NeverScrollableScrollPhysics(),
+            buildDefaultDragHandles: false,
+            itemCount: shortcuts.length,
+            onReorderItem: (oldIndex, newIndex) {
+              final next = List<ComfyPromptSendTarget>.of(shortcuts);
+              if (oldIndex < 0 ||
+                  oldIndex >= next.length ||
+                  newIndex < 0 ||
+                  newIndex > next.length) {
+                return;
+              }
+              final item = next.removeAt(oldIndex);
+              next.insert(newIndex.clamp(0, next.length), item);
+              _save(next);
+            },
+            itemBuilder: (context, i) {
+              final item = shortcuts[i];
+              final key = '${item.serverId}|${item.templateId}|${item.fieldId}|$i';
+              return Card(
+                key: ValueKey(key),
+                margin: const EdgeInsets.only(bottom: 8),
+                child: ListTile(
+                  leading: ReorderableDragStartListener(
+                    index: i,
+                    child: const Icon(Icons.drag_handle, size: 18),
+                  ),
+                  title: Text(
+                    item.name.trim().isEmpty
+                        ? (item.displayLabel.isEmpty
+                            ? '未命名路径'
+                            : item.displayLabel)
+                        : '${item.name.trim()}：',
+                    maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                  );
-                }(),
-                trailing: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    IconButton(
-                      tooltip: '命名',
-                      icon: const Icon(Icons.drive_file_rename_outline, size: 20),
-                      onPressed: () => _rename(i),
-                    ),
-                    IconButton(
-                      tooltip: '删除',
-                      icon: Icon(Icons.delete_outline, size: 20, color: cs.error),
-                      onPressed: () {
-                        final next = List<ComfyPromptSendTarget>.of(shortcuts)
-                          ..removeAt(i);
-                        _save(next);
-                      },
-                    ),
-                  ],
+                    style: (!enabledIds.contains(item.serverId) ||
+                            item.displayLabel.startsWith('已失效'))
+                        ? TextStyle(
+                            color: cs.onSurface.withValues(alpha: 0.45),
+                          )
+                        : null,
+                  ),
+                  subtitle: () {
+                    final lines = <String>[
+                      if (item.name.trim().isNotEmpty) item.displayLabel,
+                    ];
+                    if (!enabledIds.contains(item.serverId)) {
+                      lines.add('实例已关闭，菜单中隐藏');
+                    } else if (item.displayLabel.startsWith('已失效')) {
+                      lines.add('模板已删除或未绑定，请更新或删除此路径');
+                    }
+                    if (lines.isEmpty) return null;
+                    return Text(
+                      lines.join('\n'),
+                      maxLines: 3,
+                      overflow: TextOverflow.ellipsis,
+                    );
+                  }(),
+                  trailing: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      IconButton(
+                        tooltip: '命名',
+                        icon: const Icon(
+                          Icons.drive_file_rename_outline,
+                          size: 20,
+                        ),
+                        onPressed: () => _rename(i),
+                      ),
+                      IconButton(
+                        tooltip: '删除',
+                        icon: Icon(
+                          Icons.delete_outline,
+                          size: 20,
+                          color: cs.error,
+                        ),
+                        onPressed: () {
+                          final next =
+                              List<ComfyPromptSendTarget>.of(shortcuts)
+                                ..removeAt(i);
+                          _save(next);
+                        },
+                      ),
+                    ],
+                  ),
                 ),
-              ),
-            ),
+              );
+            },
+          ),
         const SizedBox(height: 8),
         Align(
           alignment: Alignment.centerLeft,
