@@ -132,7 +132,25 @@ String? _expandWithMappings(String normalized, Map<String, String> mappings) {
   return normalizeComparablePath('$root$rest');
 }
 
+/// 归一路径 → Windows 可给 `Directory` / `Process` 用的本地/UNC 路径。
+///
+/// `//host/share/a` → `\\host\share\a`；盘符路径保留反斜杠。
+String toNativeFilesystemPath(String path) {
+  final t = path.trim();
+  if (t.isEmpty) return t;
+  if (t.startsWith('//') || t.startsWith(r'\\')) {
+    final body = t
+        .replaceAll('/', r'\')
+        .replaceFirst(RegExp(r'^\\+'), '');
+    return '\\\\$body';
+  }
+  return t.replaceAll('/', r'\');
+}
+
 /// 生成路径别名集合（含盘符展开、UNC share 形态）。
+///
+/// 网络盘断开时 WMI 可能没有 `Z:`→UNC 映射；此时用 `share-suffix:`
+/// 把 `Z:/个人/project/foo` 与 `//nas/share/个人/project/foo` 对上。
 Set<String> pathAliases(
   String path, {
   Map<String, String>? driveUncMappings,
@@ -149,10 +167,19 @@ Set<String> pathAliases(
     out.add(expanded);
   }
 
+  final driveRest = RegExp(r'^[a-z]:/(.+)$').firstMatch(n)?.group(1);
+  if (driveRest != null && driveRest.isNotEmpty) {
+    out.add('share-suffix:$driveRest');
+  }
+
   for (final alias in List<String>.of(out)) {
     final share = uncSharePath(alias);
-    if (share != null && share.isNotEmpty) {
-      out.add('share:$share');
+    if (share == null || share.isEmpty) continue;
+    out.add('share:$share');
+    // \\host\share\rest → 去掉 share 名后的 rest，对齐盘符相对路径。
+    final slash = share.indexOf('/');
+    if (slash > 0 && slash + 1 < share.length) {
+      out.add('share-suffix:${share.substring(slash + 1)}');
     }
   }
   return out;

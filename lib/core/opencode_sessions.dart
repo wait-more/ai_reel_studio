@@ -4,7 +4,8 @@ import 'dart:io';
 import 'process_encoding.dart';
 import 'windows_path.dart';
 
-export 'windows_path.dart' show WindowsDriveUncCache;
+export 'windows_path.dart'
+    show WindowsDriveUncCache, toNativeFilesystemPath;
 
 /// OpenCode 会话摘要。
 class OpenCodeSessionInfo {

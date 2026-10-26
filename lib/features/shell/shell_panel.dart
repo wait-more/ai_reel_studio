@@ -1408,12 +1408,13 @@ class _OpenCodeSessionMenuOverlayState extends State<_OpenCodeSessionMenuOverlay
       _scrollCurrentIntoView();
     } catch (e) {
       if (!mounted) return;
+      final msg = '$e'.replaceFirst(RegExp(r'^Bad state:\s*'), '');
       setState(() {
         // 后台刷新失败时保留已显示的旧列表。
         if (_items == null) {
-          _error = '$e';
+          _error = msg;
         } else {
-          _toast('刷新会话列表失败：$e');
+          _toast('刷新会话列表失败：$msg');
         }
         _loading = false;
         _refreshing = false;

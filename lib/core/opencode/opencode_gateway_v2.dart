@@ -50,13 +50,58 @@ class OpenCodeGatewayV2 implements OpenCodeGateway {
       if (cached != null) return cached;
     }
 
-    // V2：`session list` 按「当前项目」作用域，必须在目标 cwd 下执行；
-    // 不能依赖宿主 exe 的 cwd（Debug 包常在 build\...\runner\Debug）。
-    var rows = await _runSessionListJson(maxCount, workingDirectory: dir);
-    // 个别机器上 CLI 列表空/解码失败时，走 API 再按目录过滤（与 V1 一致）。
+    // 网络盘 Z: ↔ UNC：OpenCode 常按 UNC 登记 location；仅用 Z: 会
+    // Location not found。先刷新盘符映射，再按候选路径查询。
+    await WindowsDriveUncCache.instance.refresh();
+    final candidates = _sessionLocationCandidates(dir);
+
+    List<Map<String, dynamic>> rows = const [];
+    Object? lastError;
+
+    // 1) API 带 directory=（无需 cwd；UNC 也可用，避开 cmd 不能 cd UNC）
+    for (final location in candidates) {
+      try {
+        rows = await _runSessionListViaApi(
+          maxCount * 6,
+          directory: location,
+        );
+        if (rows.isNotEmpty) break;
+      } catch (e) {
+        lastError = e;
+        if (!_isLocationUnavailable(e)) rethrow;
+      }
+    }
+
+    // 2) `session list`：必须 Direct + 可达工作目录（cmd 不支持 UNC cwd）
     if (rows.isEmpty) {
-      rows = await _runSessionListViaApi(maxCount * 6, workingDirectory: dir);
-      rows = await _filterRowsByCwd(rows, dir);
+      for (final location in candidates) {
+        if (!_directoryReachable(location)) continue;
+        try {
+          rows = await _runSessionListJson(
+            maxCount,
+            workingDirectory: location,
+          );
+          if (rows.isNotEmpty) break;
+        } catch (e) {
+          lastError = e;
+          if (!_isLocationUnavailable(e)) rethrow;
+        }
+      }
+    }
+
+    // 3) 全局 API + 本地路径别名过滤（Z: 断开但会话仍在 UNC 上）
+    if (rows.isEmpty) {
+      try {
+        rows = await _runSessionListViaApi(maxCount * 6);
+        rows = await _filterRowsByCwd(rows, dir);
+      } catch (e) {
+        lastError = e;
+        if (!_isLocationUnavailable(e)) rethrow;
+      }
+    }
+
+    if (rows.isEmpty && lastError != null) {
+      throw StateError(_friendlyLocationError(dir, lastError));
     }
 
     final matched = <OpenCodeSessionInfo>[];
@@ -67,6 +112,14 @@ class OpenCodeGatewayV2 implements OpenCodeGateway {
       if (!info.isRoot) continue;
       matched.add(info);
       if (matched.length >= maxCount) break;
+    }
+
+    // 记住 OpenCode 侧真实 location，供下次 Z: 断开时直接命中。
+    final resolved = matched
+        .map((s) => s.directory?.trim() ?? '')
+        .firstWhere((d) => d.isNotEmpty, orElse: () => '');
+    if (resolved.isNotEmpty) {
+      _rememberResolvedLocation(dir, resolved);
     }
 
     putOpenCodeSessionCache(dir, matched);
@@ -224,11 +277,75 @@ class OpenCodeGatewayV2 implements OpenCodeGateway {
     return launch.toLowerCase().contains('opencode');
   }
 
+  /// cwd → 曾解析出的 OpenCode location（多为 UNC），进程内复用。
+  static final Map<String, String> _resolvedLocationByCwd = {};
+
+  static void _rememberResolvedLocation(String cwd, String location) {
+    final key = normalizeOpenCodePath(cwd);
+    final loc = location.trim();
+    if (key.isEmpty || loc.isEmpty) return;
+    if (normalizeOpenCodePath(loc) == key) return;
+    _resolvedLocationByCwd[key] = loc;
+  }
+
+  /// 查询用 location 候选：原路径、盘符展开 UNC、上次命中的 OpenCode 路径。
+  static List<String> _sessionLocationCandidates(String cwd) {
+    final out = <String>[];
+    void add(String? raw) {
+      final t = raw?.trim() ?? '';
+      if (t.isEmpty) return;
+      final native = toNativeFilesystemPath(t);
+      if (out.any((e) => normalizeOpenCodePath(e) == normalizeOpenCodePath(native))) {
+        return;
+      }
+      out.add(native);
+    }
+
+    add(cwd);
+    final remembered = _resolvedLocationByCwd[normalizeOpenCodePath(cwd)];
+    add(remembered);
+    final expanded = WindowsDriveUncCache.instance.expandMappedDrive(
+      normalizeOpenCodePath(cwd),
+    );
+    add(expanded);
+    return out;
+  }
+
+  static bool _directoryReachable(String path) {
+    try {
+      return Directory(path).existsSync();
+    } catch (_) {
+      return false;
+    }
+  }
+
+  static bool _isLocationUnavailable(Object error) {
+    final text = '$error'.toLowerCase();
+    return text.contains('location not found') ||
+        text.contains('directory name is invalid') ||
+        text.contains('cannot find the path') ||
+        text.contains('cannot find the drive') ||
+        text.contains('系统找不到') ||
+        text.contains('找不到驱动器') ||
+        text.contains('指定的路径找不到') ||
+        (error is ProcessException);
+  }
+
+  static String _friendlyLocationError(String cwd, Object cause) {
+    final detail = '$cause'
+        .replaceFirst(RegExp(r'^Bad state:\s*'), '')
+        .trim();
+    return '项目目录不可访问：$cwd'
+        '（OpenCode 可能按 UNC 登记，或网络盘未连接）。'
+        '${detail.isEmpty ? '' : ' $detail'}';
+  }
+
+  /// 直接 argv 跑 `session list`（UNC 工作目录必须绕开 cmd）。
   static Future<List<Map<String, dynamic>>> _runSessionListJson(
     int maxCount, {
     required String workingDirectory,
   }) async {
-    final result = await runOpenCodeRaw(
+    final result = await runOpenCodeDirect(
       ['session', 'list', '-n', '$maxCount', '--format', 'json'],
       workingDirectory: workingDirectory,
     );
@@ -243,17 +360,30 @@ class OpenCodeGatewayV2 implements OpenCodeGateway {
     );
   }
 
-  /// `opencode api session.list`（service 侧多为 UTF-8 JSON）。
+  /// `opencode api session.list`；可选 `directory=` 按项目过滤（无需 cwd）。
   static Future<List<Map<String, dynamic>>> _runSessionListViaApi(
     int maxCount, {
-    required String workingDirectory,
+    String? directory,
   }) async {
-    // roots=true：只要顶层，避免子会话占满一页（与 TUI 预期一致）。
-    final result = await runOpenCodeRaw(
-      ['api', 'session.list', '--param', 'roots=true'],
-      workingDirectory: workingDirectory,
-    );
+    final args = <String>[
+      'api',
+      'session.list',
+      '--param',
+      'roots=true',
+    ];
+    final dir = directory?.trim() ?? '';
+    if (dir.isNotEmpty) {
+      args.addAll(['--param', 'directory=$dir']);
+    }
+    // Direct：directory=UNC 时避免 cmd 转义/编码问题。
+    final result = await runOpenCodeDirect(args);
     if (result.exitCode != 0) {
+      final err = decodeProcessOutput(result.stderr, preferJson: false).trim();
+      if (_isLocationUnavailable(err) || err.toLowerCase().contains('location')) {
+        throw StateError(
+          'opencode session.list 失败 (${result.exitCode}): $err',
+        );
+      }
       return const [];
     }
     final rows = _parseSessionRows(
