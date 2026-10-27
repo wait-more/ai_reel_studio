@@ -540,6 +540,9 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
   bool _loading = true;
   bool _isDirty = false;
   /// 已保存/已加载的正文基线；仅当编辑后文本与此不同才算脏。
+  ///
+  /// 必须与 [CodeLineEditingController.text] 同形态：re_editor 会把 CRLF/CR
+  /// 收成 LF，若基线仍用磁盘原文，仅选中文字就会误标未保存。
   String _cleanText = '';
   bool _showPreview = false;
   List<FileSystemEntity> _dirEntries = [];
@@ -568,6 +571,10 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
 
   static const _editorPadding = EdgeInsets.all(8);
   static const _lineHeightFactor = 1.55;
+
+  /// 与 re_editor `String.textLines` 一致的换行归一，用于脏标记比对。
+  static String _canonicalEditorText(String raw) =>
+      raw.replaceAll('\r\n', '\n').replaceAll('\r', '\n');
 
   @override
   void initState() {
@@ -941,7 +948,8 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
     try {
       final content = await file.readAsString();
       if (!mounted) return;
-      if (content == _controller.text) {
+      final canonical = _canonicalEditorText(content);
+      if (canonical == _controller.text) {
         _knownMtime = stat.modified;
         _knownSize = stat.size;
         return;
@@ -951,26 +959,27 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
       final caretFlat = flatFromCodeSelection(
         _controller.text,
         _controller.selection,
-      ).extent.clamp(0, content.length);
+      ).extent.clamp(0, canonical.length);
 
       _freezeSelection = true;
       setState(() {
         _controller.text = content;
+        final text = _controller.text;
         _controller.selection = codeSelectionFromFlat(
-          content,
-          caretFlat,
-          caretFlat,
+          text,
+          caretFlat.clamp(0, text.length),
+          caretFlat.clamp(0, text.length),
         );
-        _outline = isMarkdownDoc ? parseMarkdownOutline(content) : const [];
-        _activeLine = lineIndexOfOffset(content, caretFlat);
+        _outline = isMarkdownDoc ? parseMarkdownOutline(text) : const [];
+        _activeLine = lineIndexOfOffset(text, caretFlat.clamp(0, text.length));
         _activeOutline = activeOutlineIndex(_outline, _viewportLineApprox());
         _isDirty = false;
+        _cleanText = text;
       });
       _freezeSelection = false;
       _knownMtime = stat.modified;
       _knownSize = stat.size;
       _diskConflictNotified = false;
-      _cleanText = content;
       _registerAgentRef();
 
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -1015,15 +1024,33 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
       final diskContent = await file.readAsString();
       if (!mounted) return;
       final draft = ref.read(draftContentsProvider)[widget.path];
-      final content = draft ?? diskContent;
-      final dirty = draft != null;
+
+      // 先经 controller 归一换行，再定脏基线，避免 CRLF 文件「只选中就脏」。
+      _reloadingFromDisk = true;
+      String cleanText;
+      String content;
+      bool dirty;
+      try {
+        _controller.text = diskContent;
+        cleanText = _controller.text;
+        if (draft != null) {
+          _controller.text = draft;
+          content = _controller.text;
+          dirty = content != cleanText;
+        } else {
+          content = cleanText;
+          dirty = false;
+        }
+      } finally {
+        _reloadingFromDisk = false;
+      }
+
       setState(() {
-        _controller.text = content;
         _outline = isMarkdownDoc ? parseMarkdownOutline(content) : const [];
         _activeOutline = activeOutlineIndex(_outline, 0);
         _activeLine = 0;
         _isDirty = dirty;
-        _cleanText = diskContent;
+        _cleanText = cleanText;
         _loading = false;
       });
       if (dirty) {
@@ -1186,16 +1213,14 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
       _freezeSelection = true;
       setState(() {
         _controller.text = content;
-        _controller.selection = codeSelectionFromFlat(
-          content,
-          caretFlat,
-          caretFlat,
-        );
-        _outline = isMarkdownDoc ? parseMarkdownOutline(content) : const [];
-        _activeLine = lineIndexOfOffset(content, caretFlat);
+        final text = _controller.text;
+        final caret = caretFlat.clamp(0, text.length);
+        _controller.selection = codeSelectionFromFlat(text, caret, caret);
+        _outline = isMarkdownDoc ? parseMarkdownOutline(text) : const [];
+        _activeLine = lineIndexOfOffset(text, caret);
         _activeOutline = activeOutlineIndex(_outline, _viewportLineApprox());
         _isDirty = false;
-        _cleanText = content;
+        _cleanText = text;
         _rememberedRange = null;
       });
       _freezeSelection = false;
@@ -1240,7 +1265,7 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
   /// re_editor 选区变化也会触发 onChanged，必须按正文对比。
   void _onEditorContentChanged() {
     if (_controller.isComposing) return;
-    if (_restoringView || _reloadingFromDisk) return;
+    if (_restoringView || _reloadingFromDisk || _loading) return;
     final text = _controller.text;
     if (text == _cleanText) {
       if (_isDirty) _clearDirtyLocal();
