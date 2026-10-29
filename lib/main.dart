@@ -10,6 +10,7 @@ import 'core/project_registry.dart';
 import 'core/project_reload.dart';
 import 'core/providers.dart';
 import 'core/window_state.dart';
+import 'core/windows_ime.dart';
 import 'core/windows_path.dart';
 import 'core/workspace_memory.dart';
 
@@ -25,6 +26,8 @@ void main() async {
   // 先刷新盘符↔UNC，避免工作区路径在 Z: / \\nas 形态下被误丢弃。
   if (Platform.isWindows) {
     await WindowsDriveUncCache.instance.refresh();
+    // 缓解 Windows 上中文候选窗偶发整窗消失（Flutter IME 上下文发霉）。
+    WindowsIme.ensureGuardStarted();
   }
 
   await ProjectRegistry.instance.migrateCurrentRootIfEmpty();
