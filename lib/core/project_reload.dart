@@ -10,6 +10,7 @@ import 'config.dart';
 import 'inline_fs_edit.dart';
 import 'project_registry.dart';
 import 'providers.dart';
+import 'text_file_io.dart';
 import 'toast.dart';
 import 'workspace_memory.dart';
 
@@ -224,7 +225,7 @@ Future<void> _saveAllDirty(ProviderContainer container) async {
       continue;
     }
     try {
-      await File(path).writeAsString(draft);
+      await writeTextFileReliable(path, draft);
       container.read(dirtyFilesProvider.notifier).update((s) {
         if (!s.contains(path)) return s;
         return {...s}..remove(path);

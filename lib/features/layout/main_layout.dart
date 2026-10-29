@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -12,6 +11,7 @@ import '../../core/config.dart';
 import '../../core/editor_tab_menu.dart';
 import '../../core/fs_context_menu.dart';
 import '../../core/providers.dart';
+import '../../core/text_file_io.dart';
 import '../../core/toast.dart';
 import '../../core/workspace_memory.dart';
 import '../settings/settings_page.dart';
@@ -219,7 +219,7 @@ class _MainLayoutState extends ConsumerState<MainLayout> with WindowListener {
         continue;
       }
       try {
-        await File(path).writeAsString(draft);
+        await writeTextFileReliable(path, draft);
         ref.read(dirtyFilesProvider.notifier).update((s) {
           if (!s.contains(path)) return s;
           return {...s}..remove(path);

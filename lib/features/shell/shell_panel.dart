@@ -16,7 +16,6 @@ import '../../core/providers.dart';
 import '../../core/shell_env.dart';
 import '../../core/shell_session_memory.dart';
 import '../../core/toast.dart';
-import '../../core/windows_ime.dart';
 import '../../core/windows_path.dart';
 import 'terminal_session.dart';
 
@@ -140,8 +139,6 @@ class _ShellPanelState extends ConsumerState<ShellPanel> {
     }
     active.focusNode.requestFocus();
     FocusManager.instance.applyFocusChangesIfNeeded();
-    // 终端 Tab 抢焦点后偶发整窗 IME 发霉；主动轮换 HIMC。
-    WindowsIme.refreshDebounced();
   }
 
   _ShellTab _createTab({

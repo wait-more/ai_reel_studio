@@ -12,6 +12,7 @@ import '../../core/editor_tabs.dart';
 import '../../core/file_actions.dart';
 import '../../core/fresh_file_image.dart';
 import '../../core/providers.dart';
+import '../../core/text_file_io.dart';
 import '../../core/toast.dart';
 import '../../core/workspace_memory.dart';
 import 'editor_selection_util.dart';
@@ -217,7 +218,7 @@ class MarkdownEditor extends ConsumerWidget {
         final draft = ref.read(draftContentsProvider)[path];
         if (draft != null) {
           try {
-            await File(path).writeAsString(draft);
+            await writeTextFileReliable(path, draft);
           } catch (_) {}
         }
       }
@@ -1132,9 +1133,8 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
   }
 
   Future<void> _save() async {
-    final file = File(widget.path);
     try {
-      await file.writeAsString(_controller.text);
+      await writeTextFileReliable(widget.path, _controller.text);
       if (!mounted) return;
       setState(() {
         _isDirty = false;
@@ -1157,8 +1157,9 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
       );
     } catch (e) {
       if (!mounted) return;
+      final msg = '$e'.replaceFirst(RegExp(r'^Bad state:\s*'), '');
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('保存失败: $e')),
+        SnackBar(content: Text('保存失败: $msg')),
       );
     }
   }
