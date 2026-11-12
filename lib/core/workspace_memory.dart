@@ -109,7 +109,10 @@ class WorkspaceSnapshot {
       previewTabPath: json['previewTabPath'] as String?,
       selectedFile: json['selectedFile'] as String?,
       selectedDir: json['selectedDir'] as String?,
-      contentMode: (mode == 'assets' || mode == 'editor' || mode == 'comfy')
+      contentMode: (mode == 'assets' ||
+              mode == 'editor' ||
+              mode == 'comfy' ||
+              mode == 'pipeline')
           ? mode
           : 'editor',
       fileViews: views,

@@ -19,6 +19,7 @@ import '../tree/project_tree.dart';
 import '../editor/markdown_editor.dart';
 import '../asset/asset_grid.dart';
 import '../comfy/comfy_panel.dart';
+import '../pipeline/pipeline_panel.dart';
 import '../search/global_search.dart';
 import '../shell/shell_panel.dart';
 
@@ -430,12 +431,14 @@ class _MainLayoutState extends ConsumerState<MainLayout> with WindowListener {
                         index: switch (ref.watch(contentModeProvider)) {
                           'editor' => 1,
                           'comfy' => 2,
+                          'pipeline' => 3,
                           _ => 0,
                         },
                         children: const [
                           AssetGridView(),
                           MarkdownEditor(),
                           ComfyPanel(),
+                          PipelinePanel(),
                         ],
                       ),
                     ),
@@ -538,6 +541,13 @@ class _MainLayoutState extends ConsumerState<MainLayout> with WindowListener {
               value: 'comfy',
               label: '生成',
               icon: Icons.auto_awesome_outlined,
+              current: mode,
+            ),
+            _modeSegment(
+              context,
+              value: 'pipeline',
+              label: '流水线',
+              icon: Icons.account_tree_outlined,
               current: mode,
             ),
           ],

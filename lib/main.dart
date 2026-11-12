@@ -5,6 +5,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:media_kit/media_kit.dart';
 import 'app.dart';
 import 'core/config.dart';
+import 'core/pipeline/pipeline_service.dart';
+import 'core/pipeline/pipeline_skill_sync.dart';
 import 'core/progress.dart';
 import 'core/project_registry.dart';
 import 'core/project_reload.dart';
@@ -45,6 +47,16 @@ void main() async {
   // 恢复当前项目根下的目录树展开 + 中间栏（Tabs/模式/选中）
   final workspace = await WorkspaceMemory.instance.load();
   applyWorkspaceSnapshot(container, workspace);
+
+  bindPipelineEngineToProviders(container);
+  if (AppConfig.instance.isConfigured) {
+    try {
+      await PipelineService.instance.ensureStarted();
+    } catch (_) {}
+    try {
+      await PipelineSkillSync.syncToProject();
+    } catch (_) {}
+  }
 
   runApp(UncontrolledProviderScope(
     container: container,

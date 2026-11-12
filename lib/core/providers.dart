@@ -188,7 +188,7 @@ final fsShortcutRequestProvider =
 /// 项目树根节点
 final treeRootProvider = StateProvider<ScriptNode?>((ref) => null);
 
-/// 中间视图模式：'editor' | 'assets' | 'comfy'
+/// 中间视图模式：'editor' | 'assets' | 'comfy' | 'pipeline'
 final contentModeProvider = StateProvider<String>((ref) => 'editor');
 
 /// ComfyUI 多实例列表 / 当前选中实例。

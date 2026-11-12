@@ -8,6 +8,8 @@ import '../features/layout/main_layout.dart';
 import 'comfy_prompt_bridge.dart';
 import 'config.dart';
 import 'inline_fs_edit.dart';
+import 'pipeline/pipeline_service.dart';
+import 'pipeline/pipeline_skill_sync.dart';
 import 'project_registry.dart';
 import 'providers.dart';
 import 'text_file_io.dart';
@@ -82,6 +84,14 @@ Future<void> hydrateAfterProjectRootChange(
   await ComfyPromptSendMemory.hydrateProviderContainer(container);
   container.read(comfyActionsTickProvider.notifier).state++;
   container.read(treeRefreshTickProvider.notifier).state++;
+  try {
+    await PipelineService.instance.ensureStarted(rewriteBridgeInfo: true);
+  } catch (_) {}
+  try {
+    await PipelineSkillSync.syncToProject();
+  } catch (_) {}
+  container.read(pipelineJobsTickProvider.notifier).state++;
+  container.read(pipelineConfigTickProvider.notifier).state++;
 }
 
 /// 设置里切换项目根的数据层：落盘旧根 → 写新根 → touch 最近列表 → 重灌 provider。
