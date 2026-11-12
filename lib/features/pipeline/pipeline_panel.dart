@@ -1545,12 +1545,18 @@ class _PipelineJobDetailState extends ConsumerState<_PipelineJobDetail> {
   }
 
   Future<void> _confirmDelete(BuildContext context, PipelineJob job) async {
+    final foreign = _isForeignHost(job);
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('删除任务'),
+        title: Text(foreign ? '删除他机任务' : '删除任务'),
         content: Text(
-          '删除账本记录 ${job.id}？\n不会删除剧目录下的「参考图」「分镜素材」文件。',
+          foreign
+              ? '这是其它机器创建的任务（host: ${job.hostId}）。\n'
+                  '确认后将强制删除共享账本记录 ${job.id}。\n'
+                  '不会删除剧目录下的「参考图」「分镜素材」文件。'
+              : '删除账本记录 ${job.id}？\n'
+                  '不会删除剧目录下的「参考图」「分镜素材」文件。',
         ),
         actions: [
           TextButton(
@@ -1565,10 +1571,17 @@ class _PipelineJobDetailState extends ConsumerState<_PipelineJobDetail> {
       ),
     );
     if (ok != true) return;
-    await PipelineEngine.instance.deleteJob(job.id);
-    if (!context.mounted) return;
-    widget.onDeleted();
-    showGlobalToast(context, '已删除任务');
+    try {
+      // 面板删除是人工确认后的账本清理；他机任务必须 force。
+      await PipelineEngine.instance.deleteJob(job.id, force: true);
+      if (!context.mounted) return;
+      widget.onDeleted();
+      showGlobalToast(context, '已删除任务');
+    } catch (e) {
+      if (context.mounted) {
+        showGlobalToast(context, '删除失败: $e');
+      }
+    }
   }
 
   @override
@@ -1614,8 +1627,10 @@ class _PipelineJobDetailState extends ConsumerState<_PipelineJobDetail> {
                     OutlinedButton(
                       onPressed: () async {
                         try {
-                          await PipelineEngine.instance
-                              .cancelJob(widget.jobId);
+                          await PipelineEngine.instance.cancelJob(
+                            widget.jobId,
+                            force: true,
+                          );
                           bumpPipelineJobsTick(ref);
                           unawaited(_load());
                         } catch (e) {
@@ -1637,7 +1652,8 @@ class _PipelineJobDetailState extends ConsumerState<_PipelineJobDetail> {
                           builder: (ctx) => AlertDialog(
                             title: const Text('删除任务？'),
                             content: Text(
-                              '将删除 ${widget.jobId} 记录（不删剧目录物料）。',
+                              '将删除 ${widget.jobId} 记录（不删剧目录物料）。'
+                              '若属于其它机器，确认后会强制清理账本。',
                             ),
                             actions: [
                               TextButton(
@@ -1653,10 +1669,15 @@ class _PipelineJobDetailState extends ConsumerState<_PipelineJobDetail> {
                         );
                         if (ok != true) return;
                         try {
-                          await PipelineEngine.instance
-                              .deleteJob(widget.jobId);
+                          await PipelineEngine.instance.deleteJob(
+                            widget.jobId,
+                            force: true,
+                          );
                           bumpPipelineJobsTick(ref);
                           widget.onDeleted();
+                          if (context.mounted) {
+                            showGlobalToast(context, '已删除任务');
+                          }
                         } catch (e) {
                           if (context.mounted) {
                             showGlobalToast(context, '删除失败: $e');
@@ -1843,10 +1864,13 @@ class _PipelineJobDetailState extends ConsumerState<_PipelineJobDetail> {
                 if (PipelineEngine.instance.isCancellable(job.status))
                   _HeaderIconBtn(
                     icon: Icons.stop_circle_outlined,
-                    tooltip: '取消任务',
+                    tooltip: foreign ? '强制取消他机任务' : '取消任务',
                     onPressed: () async {
                       try {
-                        await PipelineEngine.instance.cancelJob(job.id);
+                        await PipelineEngine.instance.cancelJob(
+                          job.id,
+                          force: true,
+                        );
                         bumpPipelineJobsTick(ref);
                         unawaited(_load());
                       } catch (e) {
@@ -1858,7 +1882,7 @@ class _PipelineJobDetailState extends ConsumerState<_PipelineJobDetail> {
                   ),
                 _HeaderIconBtn(
                   icon: Icons.delete_outline,
-                  tooltip: '删除任务',
+                  tooltip: foreign ? '强制删除他机任务' : '删除任务',
                   onPressed: () => _confirmDelete(context, job),
                 ),
               ],
@@ -1871,7 +1895,8 @@ class _PipelineJobDetailState extends ConsumerState<_PipelineJobDetail> {
                 tone: const Color(0xFFC48A3A),
                 icon: Icons.info_outline,
                 text: foreign
-                    ? '其它机器创建的任务（host: ${job.hostId}）。本机 Agent 默认不会动它。'
+                    ? '其它机器创建的任务（host: ${job.hostId}）。'
+                        '本机 Agent 默认不会动它；面板可强制取消/删除账本。'
                     : orphan
                         ? '状态仍像在跑，但本机进程并未驱动。可取消或删除。'
                         : '工作目录不可用：$workdirError',

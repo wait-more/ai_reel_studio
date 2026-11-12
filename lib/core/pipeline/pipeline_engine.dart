@@ -325,24 +325,7 @@ class PipelineEngine {
           'pass=${reviewItems.length - failCount} fail=$failCount';
     }
 
-    final maxRounds =
-        isRefs ? cfg.maxRefReviewRounds : cfg.maxClipReviewRounds;
-    final exhausted = isRefs
-        ? graph.refs.any((r) => r.status == 'pending' && r.round >= maxRounds)
-        : graph.shots
-            .any((s) => s.status == 'pending' && s.round >= maxRounds);
-
-    if (exhausted && failCount > 0) {
-      job.status = PipelineJobStatus.failedNeedsHuman;
-      job.error = isRefs
-          ? '参考图自检轮次耗尽，需人工介入'
-          : '视频自检轮次耗尽，需人工介入';
-      await _store.saveJob(job);
-      await _store.appendEvent(jobId, 'review_exhausted', {'phase': phase});
-      _notify();
-      return job;
-    }
-
+    // 不设轮次上限：未通过就继续进 retry，交给智能体反复操作。
     if (failCount > 0) {
       if (isRefs) {
         _ensureStep(job, 'gen_refs_retry', PipelineStepType.genRefsRetry);
@@ -352,6 +335,7 @@ class PipelineEngine {
         _setCurrentStep(job, 'gen_clips_retry');
       }
       job.status = PipelineJobStatus.queued;
+      job.error = null;
     } else if (isRefs) {
       if (job.intent == PipelineIntent.refOnly) {
         _setCurrentStep(job, 'finalize', skipReason: '仅参考图，跳过视频');
