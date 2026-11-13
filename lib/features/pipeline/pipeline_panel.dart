@@ -1240,7 +1240,7 @@ class _PipelineConfigPaneState extends ConsumerState<_PipelineConfigPane> {
                       ),
                       const SizedBox(height: 2),
                       Text(
-                        '自动 = 打满在线实例，空闲立刻派活',
+                        '自动 = 打满在线实例；多任务共用桶位，空闲立刻派活',
                         style: TextStyle(
                           fontSize: 11,
                           color: scheme.onSurfaceVariant,

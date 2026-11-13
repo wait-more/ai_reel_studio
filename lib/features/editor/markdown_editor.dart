@@ -957,22 +957,25 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
       }
 
       final scroll = _scrollOffset;
-      final caretFlat = flatFromCodeSelection(
-        _controller.text,
-        _controller.selection,
-      ).extent.clamp(0, canonical.length);
+      // 先记下选区：改 text 会冲掉 CodeLineSelection，不能事后再读。
+      final pin = _effectiveSelection();
+      final baseFlat = pin.base.clamp(0, canonical.length);
+      final extentFlat = pin.extent.clamp(0, canonical.length);
 
       _freezeSelection = true;
       setState(() {
         _controller.text = content;
         final text = _controller.text;
-        _controller.selection = codeSelectionFromFlat(
-          text,
-          caretFlat.clamp(0, text.length),
-          caretFlat.clamp(0, text.length),
-        );
+        final base = baseFlat.clamp(0, text.length);
+        final extent = extentFlat.clamp(0, text.length);
+        if (base != extent) {
+          _rememberedRange = (base: base, extent: extent);
+        } else {
+          _rememberedRange = null;
+        }
+        _controller.selection = codeSelectionFromFlat(text, base, extent);
         _outline = isMarkdownDoc ? parseMarkdownOutline(text) : const [];
-        _activeLine = lineIndexOfOffset(text, caretFlat.clamp(0, text.length));
+        _activeLine = lineIndexOfOffset(text, extent);
         _activeOutline = activeOutlineIndex(_outline, _viewportLineApprox());
         _isDirty = false;
         _cleanText = text;
@@ -991,7 +994,18 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
           if ((scroller.offset - target).abs() > 0.5) scroller.jumpTo(target);
           _scrollOffset = target;
         }
+        // 换行归一 / 布局后偶发丢选区，再钉一次。
+        final text = _controller.text;
+        final base = baseFlat.clamp(0, text.length);
+        final extent = extentFlat.clamp(0, text.length);
+        if (base != extent) {
+          _freezeSelection = true;
+          _rememberedRange = (base: base, extent: extent);
+          _controller.selection = codeSelectionFromFlat(text, base, extent);
+          _freezeSelection = false;
+        }
         _refreshActiveOutlineFromViewport();
+        if (!_restoringView) _schedulePersistView();
       });
 
       if (mounted) showGlobalToast(context, '已从磁盘重新加载');

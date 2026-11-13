@@ -22,45 +22,54 @@ class _ServerLease {
   bool busy = false;
 }
 
-/// 流水线内调用已有 Comfy 模板；默认打满所有已启用实例。
-class PipelineComfyRunner {
-  PipelineComfyRunner(this.config);
+String _comfyUrlKey(String baseUrl) =>
+    baseUrl.trim().toLowerCase().replaceAll(RegExp(r'/+$'), '');
 
-  final PipelineConfig config;
+/// 进程内共享 Comfy「桶」：多 Job 共用 busy/排队，避免各自以为整池空闲一起打满。
+class _ComfyBucketPool {
+  _ComfyBucketPool._();
+  static final instance = _ComfyBucketPool._();
 
-  final _pool = <_ServerLease>[];
-  final _waiters = Queue<Completer<_ServerLease>>();
-  var _prepared = false;
+  final _byUrl = <String, _ServerLease>{};
+  final _wake = Queue<Completer<void>>();
+  Future<void>? _probeGate;
 
-  /// 在线且可用的实例数（prepare 后有效）。
-  int get onlineServerCount => _pool.length;
-
-  List<String> get onlineServerNames => [
-        for (final s in _pool) '${s.server.name}(${s.server.baseUrl})',
-      ];
-
-  /// 探测并建立实例池。`comfyServerId` 非空时只用指定实例；否则用全部 enabled。
-  Future<void> prepare() async {
-    if (_prepared) return;
-    final want = config.comfyServerId.trim();
-    final candidates = <ComfyServer>[
-      for (final s in AppConfig.instance.comfyServers)
-        if (s.enabled && s.baseUrl.trim().isNotEmpty)
-          if (want.isEmpty || s.id == want) s,
-    ];
-    if (candidates.isEmpty) {
-      // 退回当前选中
-      final sel = AppConfig.instance.comfySelectedServer;
-      if (sel.baseUrl.trim().isNotEmpty) candidates.add(sel);
+  Future<List<_ServerLease>> ensureOnline(List<ComfyServer> candidates) async {
+    // 串行探测，避免并发 prepare 只跑第一批候选、漏掉其它 Job 的服务器。
+    final prev = _probeGate;
+    final done = Completer<void>();
+    _probeGate = done.future;
+    try {
+      if (prev != null) await prev;
+      await _probeAll(candidates);
+    } finally {
+      done.complete();
+      if (identical(_probeGate, done.future)) _probeGate = null;
     }
-
-    final probes = <Future<_ServerLease?>>[
-      for (final s in candidates) _probe(s),
-    ];
-    for (final r in await Future.wait(probes)) {
-      if (r != null) _pool.add(r);
+    final out = <_ServerLease>[];
+    for (final s in candidates) {
+      final lease = _byUrl[_comfyUrlKey(s.baseUrl)];
+      if (lease != null) out.add(lease);
     }
-    _prepared = true;
+    return out;
+  }
+
+  Future<void> _probeAll(List<ComfyServer> candidates) async {
+    final missing = <ComfyServer>[];
+    for (final s in candidates) {
+      final key = _comfyUrlKey(s.baseUrl);
+      if (key.isEmpty) continue;
+      if (!_byUrl.containsKey(key)) missing.add(s);
+    }
+    if (missing.isEmpty) return;
+    final probed = await Future.wait([
+      for (final s in missing) _probe(s),
+    ]);
+    for (final lease in probed) {
+      if (lease == null) continue;
+      final key = _comfyUrlKey(lease.server.baseUrl);
+      _byUrl.putIfAbsent(key, () => lease);
+    }
   }
 
   Future<_ServerLease?> _probe(ComfyServer server) async {
@@ -78,21 +87,6 @@ class PipelineComfyRunner {
     }
   }
 
-  void close() {
-    for (final w in _waiters) {
-      if (!w.isCompleted) {
-        w.completeError(StateError('Comfy 池已关闭'));
-      }
-    }
-    _waiters.clear();
-    for (final s in _pool) {
-      s.client.close();
-    }
-    _pool.clear();
-    _prepared = false;
-  }
-
-  /// 在候选里挑 Comfy 队列最短的（running*100 + pending）；探活失败的靠后。
   Future<_ServerLease> _pickLeastLoaded(List<_ServerLease> candidates) async {
     if (candidates.length == 1) return candidates.first;
     final scores = await Future.wait([
@@ -117,40 +111,102 @@ class PipelineComfyRunner {
     }
   }
 
-  Future<_ServerLease> _acquire() async {
-    await prepare();
-    if (_pool.isEmpty) {
+  Future<_ServerLease> acquire(Set<String> allowedUrls) async {
+    if (allowedUrls.isEmpty) {
       throw StateError('没有可用的 ComfyUI 实例（请在设置里启用并确保在线）');
     }
-    final free = [for (final s in _pool) if (!s.busy) s];
-    if (free.isNotEmpty) {
-      final best = await _pickLeastLoaded(free);
-      // 再确认没被并发抢走
-      if (!best.busy) {
-        best.busy = true;
-        return best;
+    while (true) {
+      final free = [
+        for (final url in allowedUrls)
+          if (_byUrl[url] case final lease? when !lease.busy) lease,
+      ];
+      if (free.isNotEmpty) {
+        final best = await _pickLeastLoaded(free);
+        if (!best.busy &&
+            allowedUrls.contains(_comfyUrlKey(best.server.baseUrl))) {
+          best.busy = true;
+          return best;
+        }
+        continue;
       }
-      // 被抢走则重新找
-      final free2 = [for (final s in _pool) if (!s.busy) s];
-      if (free2.isNotEmpty) {
-        final again = await _pickLeastLoaded(free2);
-        again.busy = true;
-        return again;
-      }
+      final signal = Completer<void>();
+      _wake.add(signal);
+      await signal.future;
     }
-    final c = Completer<_ServerLease>();
-    _waiters.add(c);
-    return c.future;
+  }
+
+  void release(_ServerLease lease) {
+    lease.busy = false;
+    while (_wake.isNotEmpty) {
+      final c = _wake.removeFirst();
+      if (!c.isCompleted) c.complete();
+    }
+  }
+}
+
+/// 流水线内调用已有 Comfy 模板；默认打满所有已启用实例。
+///
+/// 租约走进程内共享池，多 Job 并行时互相可见占用。
+class PipelineComfyRunner {
+  PipelineComfyRunner(this.config);
+
+  final PipelineConfig config;
+
+  final _allowedUrls = <String>{};
+  var _prepared = false;
+
+  /// 在线且可用的实例数（prepare 后有效）。
+  int get onlineServerCount => _allowedUrls.length;
+
+  List<String> get onlineServerNames {
+    final pool = _ComfyBucketPool.instance;
+    return [
+      for (final url in _allowedUrls)
+        if (pool._byUrl[url] case final lease?)
+          '${lease.server.name}(${lease.server.baseUrl})',
+    ];
+  }
+
+  List<ComfyServer> _candidateServers() {
+    final want = config.comfyServerId.trim();
+    final candidates = <ComfyServer>[
+      for (final s in AppConfig.instance.comfyServers)
+        if (s.enabled && s.baseUrl.trim().isNotEmpty)
+          if (want.isEmpty || s.id == want) s,
+    ];
+    if (candidates.isEmpty) {
+      final sel = AppConfig.instance.comfySelectedServer;
+      if (sel.baseUrl.trim().isNotEmpty) candidates.add(sel);
+    }
+    return candidates;
+  }
+
+  /// 探测并建立实例池。`comfyServerId` 非空时只用指定实例；否则用全部 enabled。
+  Future<void> prepare() async {
+    if (_prepared) return;
+    final candidates = _candidateServers();
+    final online = await _ComfyBucketPool.instance.ensureOnline(candidates);
+    _allowedUrls
+      ..clear()
+      ..addAll({
+        for (final s in online) _comfyUrlKey(s.server.baseUrl),
+      });
+    _prepared = true;
+  }
+
+  /// Job 结束不必拆共享连接；其它任务可能仍在用同一批实例。
+  void close() {}
+
+  Future<_ServerLease> _acquire() async {
+    await prepare();
+    if (_allowedUrls.isEmpty) {
+      throw StateError('没有可用的 ComfyUI 实例（请在设置里启用并确保在线）');
+    }
+    return _ComfyBucketPool.instance.acquire(Set<String>.of(_allowedUrls));
   }
 
   void _release(_ServerLease lease) {
-    if (_waiters.isNotEmpty) {
-      final c = _waiters.removeFirst();
-      // 直接转给下一个等待者，保持 busy（桶式接力，不等整波结束）
-      c.complete(lease);
-      return;
-    }
-    lease.busy = false;
+    _ComfyBucketPool.instance.release(lease);
   }
 
   Future<T> withServer<T>(
@@ -167,10 +223,10 @@ class PipelineComfyRunner {
   /// 有效并行度：配置 >0 时取 min(配置, 在线数)；否则 = 在线实例数（打满桶）。
   Future<int> effectiveConcurrency() async {
     await prepare();
-    if (_pool.isEmpty) return 1;
+    if (_allowedUrls.isEmpty) return 1;
     final cfg = config.comfyConcurrency;
-    if (cfg <= 0) return _pool.length;
-    return cfg.clamp(1, _pool.length);
+    if (cfg <= 0) return _allowedUrls.length;
+    return cfg.clamp(1, _allowedUrls.length);
   }
 
   /// 派发用的 worker 数：略大于实例数，让空位一出现就被 waiter 接住。
@@ -439,6 +495,10 @@ Future<void> pipelineDepsMapPool<T>({
     if (running.isEmpty) break;
 
     wake = Completer<void>();
+    // 派发循环与 kick 之间可能丢信号：重建 wake 后再看一眼。
+    if (running.length < slots && readyNow().isNotEmpty) {
+      kick();
+    }
     await wake.future;
   }
 
